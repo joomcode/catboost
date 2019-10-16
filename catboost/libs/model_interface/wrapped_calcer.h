@@ -249,12 +249,12 @@ public:
         total_size_hint = std::max(total_size_hint, 1000ul);
         std::string buffer(total_size_hint, '\0');
         char* result = nullptr;
-        while (!(result = GetModelNumericFeatures(CalcerHolder.get(), buffer.data(), buffer.data() + buffer.size()))) {
+        while (!(result = GetModelNumericFeatures(CalcerHolder.get(), &*buffer.begin(), &*buffer.end()))) {
             buffer.resize(buffer.size() * 2);
         }
 
         std::vector<std::string> names;
-        char* current = buffer.data();
+        const char* current = buffer.data();
         while (current != result) {
             names.emplace_back(current);
             current += names.back().size() + 1;
