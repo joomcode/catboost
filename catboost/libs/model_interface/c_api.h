@@ -206,6 +206,8 @@ EXPORT const char* GetModelInfoValue(ModelCalcerHandle* modelHandle, const char*
 
 EXPORT char* GetModelNumericFeatures(ModelCalcerHandle* modelHandle, char* buffer, const char* end);
 
+EXPORT char* GetModelCategoricalFeatures(ModelCalcerHandle* modelHandle, char* buffer, const char* end);
+
 #if defined(__cplusplus)
 }
 #endif

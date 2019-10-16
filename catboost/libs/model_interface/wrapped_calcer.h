@@ -245,11 +245,12 @@ public:
         return std::string(value_ptr, value_size);
     }
 
-    std::vector<std::string> GetNumericFeatures(size_t total_size_hint = 0) const {
+private:
+    std::vector<std::string> GetFeatures(size_t total_size_hint, char* (*get_features)(ModelCalcerHandle*, char*, const char*)) const {
         total_size_hint = std::max(total_size_hint, 1000ul);
         std::string buffer(total_size_hint, '\0');
         char* result = nullptr;
-        while (!(result = GetModelNumericFeatures(CalcerHolder.get(), &*buffer.begin(), &*buffer.end()))) {
+        while (!(result = get_features(CalcerHolder.get(), &*buffer.begin(), &*buffer.end()))) {
             buffer.resize(buffer.size() * 2);
         }
 
@@ -261,6 +262,15 @@ public:
         }
 
         return names;
+    }
+
+public:
+    std::vector<std::string> GetNumericFeatures(size_t total_size_hint = 0) const {
+        return GetFeatures(total_size_hint, GetModelNumericFeatures);
+    }
+
+    std::vector<std::string> GetCategoricalFeatures(size_t total_size_hint = 0) const {
+        return GetFeatures(total_size_hint, GetModelCategoricalFeatures);
     }
 
 private:

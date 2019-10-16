@@ -199,7 +199,28 @@ EXPORT const char* GetModelInfoValue(ModelCalcerHandle* modelHandle, const char*
 EXPORT char* GetModelNumericFeatures(ModelCalcerHandle* modelHandle, char* buffer, const char* end) {
     const TObliviousTrees& forest = *FULL_MODEL_PTR(modelHandle)->ObliviousTrees;
 
-    for (const TFloatFeature& feature : forest.FloatFeatures) {
+    for (auto&& feature : forest.FloatFeatures) {
+        TString feature_name = feature.FeatureId.empty() ? ToString(feature.Position.FlatIndex) : feature.FeatureId;
+        for (char c : feature_name) {
+            if (buffer != end) {
+                *(buffer++) = c;
+            } else {
+                return nullptr;
+            }
+        }
+        if (buffer != end) {
+            *(buffer++) = '\0';
+        } else {
+            return nullptr;
+        }
+    }
+    return buffer;
+}
+
+EXPORT char* GetModelCategoricalFeatures(ModelCalcerHandle* modelHandle, char* buffer, const char* end) {
+    const TObliviousTrees& forest = *FULL_MODEL_PTR(modelHandle)->ObliviousTrees;
+
+    for (auto&& feature : forest.CatFeatures) {
         TString feature_name = feature.FeatureId.empty() ? ToString(feature.Position.FlatIndex) : feature.FeatureId;
         for (char c : feature_name) {
             if (buffer != end) {
