@@ -245,6 +245,24 @@ public:
         return std::string(value_ptr, value_size);
     }
 
+    std::vector<std::string> GetNumericFeatures(size_t total_size_hint = 0) const {
+        total_size_hint = std::max(total_size_hint, 1000ul);
+        std::string buffer(total_size_hint, '\0');
+        char* result = nullptr;
+        while (!(result = GetModelNumericFeatures(CalcerHolder.get(), buffer.data(), buffer.data() + buffer.size()))) {
+            buffer.resize(buffer.size() * 2);
+        }
+
+        std::vector<std::string> names;
+        char* current = buffer.data();
+        while (current != result) {
+            names.emplace_back(current);
+            current += names.back().size() + 1;
+        }
+
+        return names;
+    }
+
 private:
     using CalcerHolderType = std::unique_ptr<ModelCalcerHandle, std::function<void(ModelCalcerHandle*)>>;
     CalcerHolderType CalcerHolder;

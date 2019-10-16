@@ -204,6 +204,8 @@ EXPORT size_t GetModelInfoValueSize(ModelCalcerHandle* modelHandle, const char* 
  */
 EXPORT const char* GetModelInfoValue(ModelCalcerHandle* modelHandle, const char* keyPtr, size_t keySize);
 
+EXPORT char* GetModelNumericFeatures(ModelCalcerHandle* modelHandle, char* buffer, const char* end);
+
 #if defined(__cplusplus)
 }
 #endif

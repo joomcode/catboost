@@ -6,6 +6,7 @@
 #include <util/generic/singleton.h>
 #include <util/stream/file.h>
 #include <util/string/builder.h>
+#include <util/string/cast.h>
 
 #define FULL_MODEL_PTR(x) ((TFullModel*)(x))
 
@@ -193,6 +194,27 @@ EXPORT const char* GetModelInfoValue(ModelCalcerHandle* modelHandle, const char*
         return nullptr;
     }
     return FULL_MODEL_PTR(modelHandle)->ModelInfo.at(key).c_str();
+}
+
+EXPORT char* GetModelNumericFeatures(ModelCalcerHandle* modelHandle, char* buffer, const char* end) {
+    const TObliviousTrees& forest = *FULL_MODEL_PTR(modelHandle)->ObliviousTrees;
+
+    for (const TFloatFeature& feature : forest.FloatFeatures) {
+        TString feature_name = feature.FeatureId.empty() ? ToString(feature.Position.FlatIndex) : feature.FeatureId;
+        for (char c : feature_name) {
+            if (buffer != end) {
+                *(buffer++) = c;
+            } else {
+                return nullptr;
+            }
+        }
+        if (buffer != end) {
+            *(buffer++) = '\0';
+        } else {
+            return nullptr;
+        }
+    }
+    return buffer;
 }
 
 }
