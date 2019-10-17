@@ -6,6 +6,7 @@
 #include <util/generic/singleton.h>
 #include <util/stream/file.h>
 #include <util/string/builder.h>
+#include <util/string/cast.h>
 
 #define FULL_MODEL_PTR(x) ((TFullModel*)(x))
 
@@ -13,6 +14,29 @@
 struct TErrorMessageHolder {
     TString Message;
 };
+
+
+// See GetModelUsedFeaturesNames
+template <typename T>
+char* getAllFeatureNames(T&& features, char* buffer, size_t size) {
+    const char* end = buffer + size;
+    for (auto&& feature : features) {
+        TString feature_name = feature.FeatureId.empty() ? ToString(feature.Position.FlatIndex) : feature.FeatureId;
+        for (char c : feature_name) {
+            if (buffer != end) {
+                *buffer++ = c;
+            } else {
+                return nullptr;
+            }
+        }
+        if (buffer != end) {
+            *buffer++ = '\0';
+        } else {
+            return nullptr;
+        }
+    }
+    return buffer;
+}
 
 extern "C" {
 EXPORT ModelCalcerHandle* ModelCalcerCreate() {
@@ -193,6 +217,14 @@ EXPORT const char* GetModelInfoValue(ModelCalcerHandle* modelHandle, const char*
         return nullptr;
     }
     return FULL_MODEL_PTR(modelHandle)->ModelInfo.at(key).c_str();
+}
+
+EXPORT char* GetModelNumericFeatures(ModelCalcerHandle* modelHandle, char* buffer, size_t size) {
+    return getAllFeatureNames(FULL_MODEL_PTR(modelHandle)->ObliviousTrees->FloatFeatures, buffer, size);
+}
+
+EXPORT char* GetModelCategoricalFeatures(ModelCalcerHandle* modelHandle, char* buffer, size_t size) {
+    return getAllFeatureNames(FULL_MODEL_PTR(modelHandle)->ObliviousTrees->CatFeatures, buffer, size);
 }
 
 }
