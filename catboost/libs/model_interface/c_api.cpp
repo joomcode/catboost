@@ -15,19 +15,22 @@ struct TErrorMessageHolder {
     TString Message;
 };
 
+
+// See GetModelUsedFeaturesNames
 template <typename T>
-char* getAllFeatureNames(T&& features, char* buffer, const char* end) {
+char* getAllFeatureNames(T&& features, char* buffer, size_t size) {
+    const char* end = buffer + size;
     for (auto&& feature : features) {
         TString feature_name = feature.FeatureId.empty() ? ToString(feature.Position.FlatIndex) : feature.FeatureId;
         for (char c : feature_name) {
             if (buffer != end) {
-                *(buffer++) = c;
+                *buffer++ = c;
             } else {
                 return nullptr;
             }
         }
         if (buffer != end) {
-            *(buffer++) = '\0';
+            *buffer++ = '\0';
         } else {
             return nullptr;
         }
@@ -216,12 +219,12 @@ EXPORT const char* GetModelInfoValue(ModelCalcerHandle* modelHandle, const char*
     return FULL_MODEL_PTR(modelHandle)->ModelInfo.at(key).c_str();
 }
 
-EXPORT char* GetModelNumericFeatures(ModelCalcerHandle* modelHandle, char* buffer, const char* end) {
-    return getAllFeatureNames(FULL_MODEL_PTR(modelHandle)->ObliviousTrees->FloatFeatures, buffer, end);
+EXPORT char* GetModelNumericFeatures(ModelCalcerHandle* modelHandle, char* buffer, size_t size) {
+    return getAllFeatureNames(FULL_MODEL_PTR(modelHandle)->ObliviousTrees->FloatFeatures, buffer, size);
 }
 
-EXPORT char* GetModelCategoricalFeatures(ModelCalcerHandle* modelHandle, char* buffer, const char* end) {
-    return getAllFeatureNames(FULL_MODEL_PTR(modelHandle)->ObliviousTrees->CatFeatures, buffer, end);
+EXPORT char* GetModelCategoricalFeatures(ModelCalcerHandle* modelHandle, char* buffer, size_t size) {
+    return getAllFeatureNames(FULL_MODEL_PTR(modelHandle)->ObliviousTrees->CatFeatures, buffer, size);
 }
 
 }

@@ -246,10 +246,10 @@ public:
     }
 
 private:
-    std::vector<std::string> GetFeatures(char* (*get_features)(ModelCalcerHandle*, char*, const char*)) const {
+    std::vector<std::string> GetFeatures(char* (*get_features)(ModelCalcerHandle*, char*, size_t)) const {
         std::vector<char> buffer(10000, '\0');
         char* result = nullptr;
-        while (!(result = get_features(CalcerHolder.get(), &*buffer.begin(), &*buffer.end()))) {
+        while (!(result = get_features(CalcerHolder.get(), buffer.data(), buffer.size()))) {
             buffer.resize(buffer.size() * 2);
         }
 
