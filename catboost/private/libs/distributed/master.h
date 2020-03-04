@@ -2,7 +2,7 @@
 
 #include "mappers.h"
 
-#include <catboost/private/libs/algo/approx_calcer_multi.h>
+#include <catboost/private/libs/algo/approx_delta_calcer_multi.h>
 #include <catboost/private/libs/algo/learn_context.h>
 #include <catboost/private/libs/algo/split.h>
 #include <catboost/private/libs/algo/tensor_search_helpers.h>
@@ -27,6 +27,7 @@ void MapBuildPlainFold(TLearnContext* ctx);
 void MapRestoreApproxFromTreeStruct(TLearnContext* ctx);
 void MapTensorSearchStart(TLearnContext* ctx);
 void MapBootstrap(TLearnContext* ctx);
+double MapCalcDerivativesStDevFromZero(ui32 learnSampleCount, TLearnContext* ctx);
 void MapCalcScore(
     double scoreStDev,
     int depth,
@@ -63,7 +64,7 @@ TVector<typename TMapper::TOutput> ApplyMapper(
 
 void MapSetApproxesSimple(
     const IDerCalcer& error,
-    const TSplitTree& splitTree,
+    const TVariant<TSplitTree, TNonSymmetricTreeStructure>& splitTree,
     TConstArrayRef<NCB::TTrainingForCPUDataProviderPtr> testData,
     TVector<TVector<double>>* averageLeafValues,
     TVector<double>* sumLeafWeights,
@@ -71,7 +72,7 @@ void MapSetApproxesSimple(
 
 void MapSetApproxesMulti(
     const IDerCalcer& error,
-    const TSplitTree& splitTree,
+    const TVariant<TSplitTree, TNonSymmetricTreeStructure>& splitTree,
     TConstArrayRef<NCB::TTrainingForCPUDataProviderPtr> testData,
     TVector<TVector<double>>* averageLeafValues,
     TVector<double>* sumLeafWeights,

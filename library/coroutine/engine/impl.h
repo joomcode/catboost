@@ -103,10 +103,12 @@ private:
 
 private:
     TContExecutor& Executor_;
-    NCoro::TTrampoline Trampoline_;
 
     // TODO(velavokr): allow name storage owning (for generated names backed by TString)
     const char* Name_ = nullptr;
+
+    NCoro::TTrampoline Trampoline_;
+
     TIntrusiveList<TJoinWait> Waiters_;
     bool Cancelled_ = false;
     bool Scheduled_ = false;
@@ -196,7 +198,11 @@ public:
     }
 
     size_t TotalReadyConts() const noexcept {
-        return Ready_.Size() + ReadyNext_.Size();
+        return Ready_.Size() + TotalScheduledConts();
+    }
+
+    size_t TotalScheduledConts() const noexcept {
+        return ReadyNext_.Size();
     }
 
     size_t TotalConts() const noexcept {

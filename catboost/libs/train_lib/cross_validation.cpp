@@ -1,4 +1,5 @@
 #include "cross_validation.h"
+#include "dir_helper.h"
 #include "train_model.h"
 #include "options_helper.h"
 
@@ -29,6 +30,7 @@
 #include <util/generic/maybe.h>
 #include <util/stream/labeled.h>
 #include <util/string/cast.h>
+#include <util/system/compiler.h>
 #include <util/system/hp_timer.h>
 
 #include <cmath>
@@ -327,7 +329,7 @@ void TrainBatch(
         evalMetricDescriptor,
         foldContext->TrainingData,
         labelConverter,
-        cvCallbacks,
+        cvCallbacks.Get(),
         /*initModel*/ Nothing(),
         std::move(foldContext->LearnProgress),
         /*initModelApplyCompatiblePools*/ TDataProviders(),
@@ -373,7 +375,7 @@ void Train(
     const TLabelConverter& labelConverter,
     const TVector<THolder<IMetric>>& metrics,
     bool isErrorTrackerActive,
-    const THolder<ITrainingCallbacks>& trainingCallbacks,
+    ITrainingCallbacks* trainingCallbacks,
     TFoldContext* foldContext,
     IModelTrainer* modelTrainer,
     NPar::TLocalExecutor* localExecutor
@@ -413,7 +415,7 @@ void Train(
     );
     if (foldContext->FullModel.Defined()) {
         TFileOutput modelFile(JoinFsPaths(trainDir, foldContext->OutputOptions.ResultModelPath.Get()));
-        foldContext->FullModel.Save(&modelFile);
+        foldContext->FullModel->Save(&modelFile);
     }
     const auto skipMetricOnTrain = GetSkipMetricOnTrain(metrics);
     for (const auto& trainMetrics : metricsAndTimeHistory.LearnMetricsHistory) {
@@ -563,7 +565,7 @@ void CrossValidate(
 
     TSetLogging inThisScope(loggingLevel);
 
-    ui32 approxDimension = GetApproxDimension(catBoostOptions, labelConverter);
+    ui32 approxDimension = GetApproxDimension(catBoostOptions, labelConverter, trainingData->TargetData->GetTargetDimension());
 
 
     TVector<THolder<IMetric>> metrics = CreateMetrics(
@@ -644,35 +646,27 @@ void CrossValidate(
     }
 
     if (outputFileOptions.AllowWriteFiles()) {
-        // TODO(akhropov): compatibility name
-        TString namesPrefix = "fold_0_";
-
-        TOutputFiles outputFiles(outputFileOptions, namesPrefix);
-
         TVector<TString> learnSetNames, testSetNames;
         for (auto foldIdx : xrange(cvParams.FoldCount)) {
             learnSetNames.push_back("fold_" + ToString(foldIdx) + "_learn");
             testSetNames.push_back("fold_" + ToString(foldIdx) + "_test");
         }
-        AddFileLoggers(
-            /*detailedProfile*/false,
-            outputFiles.LearnErrorLogFile,
-            outputFiles.TestErrorLogFile,
-            outputFiles.TimeLeftLogFile,
-            outputFiles.JsonLogFile,
-            outputFiles.ProfileLogFile,
-            outputFileOptions.GetTrainDir(),
-            GetJsonMeta(
-                catBoostOptions.BoostingOptions->IterationCount.Get(),
-                outputFileOptions.GetName(),
-                GetConstPointers(metrics),
-                learnSetNames,
-                testSetNames,
-                /*parametersName=*/ "",
-                ELaunchMode::CV),
-            outputFileOptions.GetMetricPeriod(),
-            &logger
-        );
+        const auto& metricsMetaJson = GetJsonMeta(
+            catBoostOptions.BoostingOptions->IterationCount.Get(),
+            outputFileOptions.GetName(),
+            GetConstPointers(metrics),
+            learnSetNames,
+            testSetNames,
+            /*parametersName=*/ "",
+            ELaunchMode::CV);
+        // TODO(akhropov): compatibility name
+        const TString namesPrefix = "fold_0_";
+        InitializeFileLoggers(
+            outputFileOptions,
+            metricsMetaJson,
+            namesPrefix,
+            /*isDetailedProfile*/false,
+            &logger);
     }
 
     AddConsoleLogger(
@@ -831,7 +825,7 @@ void CrossValidate(
         TVector<TConstArrayRef<float>> labels;
         for (auto& foldContext : foldContexts) {
             allApproxes.push_back(std::move(foldContext.LastUpdateEvalResult.GetRawValuesRef()[0][0]));
-            labels.push_back(*foldContext.TrainingData.Test[0]->TargetData->GetTarget());
+            labels.push_back(*foldContext.TrainingData.Test[0]->TargetData->GetOneDimensionalTarget());
         }
 
         TRocCurve rocCurve(allApproxes, labels, catBoostOptions.SystemOptions.Get().NumThreads);
@@ -896,14 +890,19 @@ void CrossValidate(
     TLabelConverter labelConverter;
     TMaybe<float> targetBorder = catBoostOptions.DataProcessingOptions->TargetBorder;
 
+    TString tmpDir;
+    if (outputFileOptions.AllowWriteFiles()) {
+        NCB::NPrivate::CreateTrainDirWithTmpDirIfNotExist(outputFileOptions.GetTrainDir(), &tmpDir);
+    }
+
     TTrainingDataProviderPtr trainingData = GetTrainingData(
         std::move(data),
         /*isLearnData*/ true,
         TStringBuf(),
         Nothing(), // TODO(akhropov): allow loading borders and nanModes in CV?
-        /*unloadCatFeaturePerfectHashFromRamIfPossible*/ true,
+        /*unloadCatFeaturePerfectHashFromRam*/ outputFileOptions.AllowWriteFiles(),
         /*ensureConsecutiveLearnFeaturesDataForCpu*/ false,
-        outputFileOptions.AllowWriteFiles(),
+        tmpDir,
         quantizedFeaturesInfo,
         &catBoostOptions,
         &labelConverter,
@@ -934,4 +933,49 @@ TVector<NCB::TArraySubsetIndexing<ui32>> TransformToVectorArrayIndexing(
         );
     }
     return result;
+}
+
+TVector<TArraySubsetIndexing<ui32>> StratifiedSplitToFolds(
+    const TDataProvider& dataProvider,
+    ui32 partCount
+) {
+    CB_ENSURE(
+        dataProvider.MetaInfo.TargetCount > 0,
+        "Cannot do stratified split: Target data is unavailable"
+    );
+    CB_ENSURE(
+        dataProvider.MetaInfo.TargetCount == 1,
+        "Cannot do stratified split: Target data is multi-dimensional"
+    );
+
+    switch (dataProvider.RawTargetData.GetTargetType()) {
+        case ERawTargetType::Float: {
+            TVector<float> rawTargetData;
+            rawTargetData.yresize(dataProvider.GetObjectCount());
+            TArrayRef<float> rawTargetDataRef = rawTargetData;
+            dataProvider.RawTargetData.GetNumericTarget(TArrayRef<TArrayRef<float>>(&rawTargetDataRef, 1));
+            return NCB::StratifiedSplitToFolds<float>(
+                *dataProvider.ObjectsGrouping,
+                rawTargetData,
+                partCount);
+        }
+        case ERawTargetType::String: {
+            TVector<TConstArrayRef<TString>> rawTargetData;
+            dataProvider.RawTargetData.GetStringTargetRef(&rawTargetData);
+            return NCB::StratifiedSplitToFolds(*dataProvider.ObjectsGrouping, rawTargetData[0], partCount);
+        }
+        default:
+            Y_UNREACHABLE();
+    }
+    Y_UNREACHABLE();
+}
+
+TVector<TArraySubsetIndexing<ui32>> StratifiedSplitToFolds(
+    const NCB::TTrainingDataProvider& trainingDataProvider,
+    ui32 partCount
+) {
+    TMaybeData<TConstArrayRef<float>> maybeTarget
+        = trainingDataProvider.TargetData->GetOneDimensionalTarget();
+    CB_ENSURE(maybeTarget, "Cannot do stratified split: Target data is unavailable");
+    return NCB::StratifiedSplitToFolds(*trainingDataProvider.ObjectsGrouping, *maybeTarget, partCount);
 }

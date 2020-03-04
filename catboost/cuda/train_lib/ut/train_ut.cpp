@@ -25,7 +25,8 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
         dataProviders.Learn = CreateDataProvider(
             [&](IRawFeaturesOrderDataVisitor* visitor) {
                 TDataMetaInfo metaInfo;
-                metaInfo.HasTarget = true;
+                metaInfo.TargetType = ERawTargetType::Float;
+                metaInfo.TargetCount = 1;
                 metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                     (ui32)3,
                     TVector<ui32>{},
@@ -43,7 +44,9 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
                     2,
                     MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{-2.0f, -1.0f, +6.0f, -1.2f}));
 
-                visitor->AddTarget(TVector<float>{1.0f, 0.0f, 0.2f, 0.0f});
+                visitor->AddTarget(
+                    MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{1.0f, 0.0f, 0.2f, 0.0f})
+                );
 
                 visitor->Finish();
             });
@@ -63,7 +66,9 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
                     visitor->AddFloatFeature(
                         2,
                         MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{-2.5f}));
-                    visitor->AddTarget(TVector<float>{1.0f});
+                    visitor->AddTarget(
+                        MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{1.0f})
+                    );
 
                     visitor->Finish();
                 }));

@@ -127,11 +127,21 @@ public:
     }
 };
 
+struct TFeaturesGroupRef {
+    ui32 GroupIdx = std::numeric_limits<ui32>::max();
+
+public:
+    bool operator==(const TFeaturesGroupRef& other) const {
+        return GroupIdx == other.GroupIdx;
+    }
+};
+
 
 enum class ESplitEnsembleType {
     OneFeature,
     BinarySplits,
-    ExclusiveBundle
+    ExclusiveBundle,
+    FeaturesGroup
 };
 
 
@@ -144,9 +154,11 @@ struct TSplitEnsemble {
     TSplitCandidate SplitCandidate;
     TBinarySplitsPackRef BinarySplitsPackRef;
     TExclusiveFeaturesBundleRef ExclusiveFeaturesBundleRef;
+    TFeaturesGroupRef FeaturesGroupRef;
 
     static constexpr size_t BinarySplitsPackHash = 118223;
     static constexpr size_t ExclusiveBundleHash = 981490;
+    static constexpr size_t FeaturesGroupHash = 735019;
 
 public:
     TSplitEnsemble()
@@ -174,6 +186,14 @@ public:
         , ExclusiveFeaturesBundleRef(std::move(exclusiveFeaturesBundleRef))
     {}
 
+    /* move is not really needed for such a simple structure but do it in the same way as splitCandidate for
+     * consistency
+     */
+    explicit TSplitEnsemble(TFeaturesGroupRef&& featuresGroupRef)
+        : Type(ESplitEnsembleType::FeaturesGroup)
+        , FeaturesGroupRef(std::move(featuresGroupRef))
+    {}
+
     bool operator==(const TSplitEnsemble& other) const {
         switch (Type) {
             case ESplitEnsembleType::OneFeature:
@@ -185,10 +205,13 @@ public:
             case ESplitEnsembleType::ExclusiveBundle:
                 return (other.Type == ESplitEnsembleType::ExclusiveBundle) &&
                     (ExclusiveFeaturesBundleRef == other.ExclusiveFeaturesBundleRef);
+            case ESplitEnsembleType::FeaturesGroup:
+                return (other.Type == ESplitEnsembleType::FeaturesGroup) &&
+                       (FeaturesGroupRef == other.FeaturesGroupRef);
         }
     }
 
-    SAVELOAD(Type, SplitCandidate, BinarySplitsPackRef, ExclusiveFeaturesBundleRef);
+    SAVELOAD(Type, SplitCandidate, BinarySplitsPackRef, ExclusiveFeaturesBundleRef, FeaturesGroupRef);
 
     size_t GetHash() const {
         switch (Type) {
@@ -198,6 +221,8 @@ public:
                 return MultiHash(BinarySplitsPackHash, BinarySplitsPackRef.PackIdx);
             case ESplitEnsembleType::ExclusiveBundle:
                 return MultiHash(ExclusiveBundleHash, ExclusiveFeaturesBundleRef.BundleIdx);
+            case ESplitEnsembleType::FeaturesGroup:
+                return MultiHash(FeaturesGroupHash, FeaturesGroupRef.GroupIdx);
         }
     }
 
@@ -219,21 +244,25 @@ struct TSplitEnsembleSpec {
 
     ESplitType OneSplitType; // used only if Type == OneFeature
     NCB::TExclusiveFeaturesBundle ExclusiveFeaturesBundle; // used only if Type == ExclusiveBundle
+    NCB::TFeaturesGroup FeaturesGroup; // used only if Type == FeaturesGroup
 
 public:
     explicit TSplitEnsembleSpec(
         ESplitEnsembleType type = ESplitEnsembleType::OneFeature,
         ESplitType oneSplitType = ESplitType::FloatFeature,
-        const NCB::TExclusiveFeaturesBundle& exclusiveFeaturesBundle = NCB::TExclusiveFeaturesBundle()
+        NCB::TExclusiveFeaturesBundle exclusiveFeaturesBundle = NCB::TExclusiveFeaturesBundle(),
+        NCB::TFeaturesGroup featuresGroup = NCB::TFeaturesGroup()
     )
         : Type(type)
         , OneSplitType(oneSplitType)
-        , ExclusiveFeaturesBundle(exclusiveFeaturesBundle)
+        , ExclusiveFeaturesBundle(std::move(exclusiveFeaturesBundle))
+        , FeaturesGroup(std::move(featuresGroup))
     {}
 
     TSplitEnsembleSpec(
         const TSplitEnsemble& splitEnsemble,
-        TConstArrayRef<NCB::TExclusiveFeaturesBundle> exclusiveFeaturesBundles
+        TConstArrayRef<NCB::TExclusiveFeaturesBundle> exclusiveFeaturesBundles,
+        TConstArrayRef<NCB::TFeaturesGroup> featuresGroups
     )
         : Type(splitEnsemble.Type)
         , OneSplitType(splitEnsemble.SplitCandidate.Type)
@@ -242,9 +271,12 @@ public:
             ExclusiveFeaturesBundle
                 = exclusiveFeaturesBundles[splitEnsemble.ExclusiveFeaturesBundleRef.BundleIdx];
         }
+        if (Type == ESplitEnsembleType::FeaturesGroup) {
+            FeaturesGroup = featuresGroups[splitEnsemble.FeaturesGroupRef.GroupIdx];
+        }
     }
 
-    SAVELOAD(Type, OneSplitType, ExclusiveFeaturesBundle);
+    SAVELOAD(Type, OneSplitType, ExclusiveFeaturesBundle, FeaturesGroup);
 
     bool operator==(const TSplitEnsembleSpec& other) const {
         switch (Type) {
@@ -255,6 +287,9 @@ public:
             case ESplitEnsembleType::ExclusiveBundle:
                 return (other.Type == ESplitEnsembleType::ExclusiveBundle) &&
                     (ExclusiveFeaturesBundle == other.ExclusiveFeaturesBundle);
+            case ESplitEnsembleType::FeaturesGroup:
+                return (other.Type == ESplitEnsembleType::FeaturesGroup) &&
+                    (FeaturesGroup == other.FeaturesGroup);
         }
     }
 
@@ -275,6 +310,17 @@ public:
             exclusiveFeaturesBundle
         );
     }
+
+    static TSplitEnsembleSpec FeatureGroup(
+        const NCB::TFeaturesGroup& featuresGroup
+    ) {
+        return TSplitEnsembleSpec(
+            ESplitEnsembleType::FeaturesGroup,
+            ESplitType::FloatFeature, // dummy value
+            {}, // dummy value
+            featuresGroup
+        );
+    }
 };
 
 
@@ -282,7 +328,8 @@ int GetBucketCount(
     const TSplitEnsemble& splitEnsemble,
     const NCB::TQuantizedFeaturesInfo& quantizedFeaturesInfo,
     size_t packedBinaryFeaturesCount,
-    TConstArrayRef<NCB::TExclusiveFeaturesBundle> exclusiveFeaturesBundles
+    TConstArrayRef<NCB::TExclusiveFeaturesBundle> exclusiveFeaturesBundles,
+    TConstArrayRef<NCB::TFeaturesGroup> featuresGroups
 );
 
 
@@ -372,7 +419,7 @@ public:
         return result;
     }
 
-    TVector<TCtr> GetCtrSplits() const {
+    TVector<TCtr> GetUsedCtrs() const {
         TVector<TCtr> result;
         for (const auto& split : Splits) {
             if (split.Type == ESplitType::OnlineCtr) {
@@ -382,6 +429,110 @@ public:
         return result;
     }
 };
+
+/*
+ * TSplitNode is node in non-symmetric tree
+ * It is used in model training (in other places non-symmetric tree can have another layout).
+ * Here negative values of Left and Right means leaves, non-negative values - split nodes.
+ * To get leaf index from negative value of Left or Right, we use ~ operator.
+ */
+struct TSplitNode {
+    TSplit Split;
+    int Left = -1;
+    int Right = -1;
+
+    TSplitNode() = default;
+    TSplitNode(const TSplit& split, int left, int right)
+        : Split(split), Left(left), Right(right)
+    {
+    }
+
+    SAVELOAD(Split, Left, Right);
+    Y_SAVELOAD_DEFINE(Split, Left, Right);
+};
+
+struct TNonSymmetricTreeStructure {
+    TVector<TSplitNode> Nodes;
+    TVector<int> LeafParent;
+
+public:
+    SAVELOAD(Nodes, LeafParent);
+    Y_SAVELOAD_DEFINE(Nodes, LeafParent);
+
+    TNonSymmetricTreeStructure()
+        : LeafParent((size_t)1, -1)
+    {
+    }
+
+    int GetRoot() const {
+        return Nodes.empty() ? -1 : 0;
+    }
+
+    TConstArrayRef<TSplitNode> GetNodes() const {
+        return Nodes;
+    }
+
+    const TSplitNode& AddSplit(const TSplit& split, int leafIdx) {
+        Y_ASSERT(0 <= leafIdx && leafIdx < SafeIntegerCast<int>(GetLeafCount()));
+        int newLeafIdx = GetLeafCount();
+        int newNodeIdx = Nodes.size();
+        int parent = LeafParent[leafIdx];
+        if (parent >= 0) {
+            if (Nodes[parent].Left == ~leafIdx) {
+                Nodes[parent].Left = newNodeIdx;
+            } else {
+                Nodes[parent].Right = newNodeIdx;
+            }
+        }
+        Nodes.emplace_back(split, ~leafIdx, ~newLeafIdx);
+        LeafParent[leafIdx] = newNodeIdx;
+        LeafParent.emplace_back(newNodeIdx);
+        return Nodes.back();
+    }
+
+    inline ui32 GetNodesCount() const {
+        return Nodes.ysize();
+    }
+
+    inline ui32 GetLeafCount() const {
+        return Nodes.ysize() + 1;
+    }
+
+    TVector<TSplit> GetSplits() const {
+        TVector<TSplit> splits;
+        splits.reserve(Nodes.size());
+        for (const auto& node : Nodes) {
+            splits.push_back(node.Split);
+        }
+        return splits;
+    }
+
+    TVector<TCtr> GetUsedCtrs() const {
+        TVector<TCtr> result;
+        for (const auto& node : Nodes) {
+            if (node.Split.Type == ESplitType::OnlineCtr) {
+                result.push_back(node.Split.Ctr);
+            }
+        }
+        return result;
+    }
+};
+
+inline TVector<TCtr> GetUsedCtrs(const TVariant<TSplitTree, TNonSymmetricTreeStructure>& tree) {
+    if (HoldsAlternative<TSplitTree>(tree)) {
+        return Get<TSplitTree>(tree).GetUsedCtrs();
+    } else {
+        return Get<TNonSymmetricTreeStructure>(tree).GetUsedCtrs();
+    }
+}
+
+inline int GetLeafCount(const TVariant<TSplitTree, TNonSymmetricTreeStructure>& tree) {
+    if (HoldsAlternative<TSplitTree>(tree)) {
+        return Get<TSplitTree>(tree).GetLeafCount();
+    } else {
+        return Get<TNonSymmetricTreeStructure>(tree).GetLeafCount();
+    }
+}
 
 struct TTreeStats {
     TVector<double> LeafWeightsSum;

@@ -63,7 +63,7 @@
       <RemoveUnreferencedCodeData Condition="'$(Configuration)|$(Platform)'=='Debug|x64'"/>
       <WarningLevel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Level4</WarningLevel>
       <RemoveUnreferencedCodeData Condition="'$(Configuration)|$(Platform)'=='Release|x64'"/>
-      <AdditionalIncludeDirectories>;$(SolutionDir)$(Configuration);$(SolutionDir)..;$(SolutionDir)../catboost/libs/helpers;$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include;$(SolutionDir)../contrib/libs/double-conversion/include;$(SolutionDir)$(Configuration)/library/unittest;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>;$(SolutionDir)$(Configuration);$(SolutionDir)..;$(SolutionDir)../catboost/libs/helpers;$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include;$(SolutionDir)../contrib/libs/zlib/include;$(SolutionDir)../contrib/libs/double-conversion/include;$(SolutionDir)$(Configuration)/library/unittest;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib;crypt32.lib;$(SolutionDir)$(Configuration)\MSVS\62440384-FCD2-5217-9DB5-BBEF00D51E9B\exists_checker.obj;$(SolutionDir)$(Configuration)\MSVS\62440384-FCD2-5217-9DB5-BBEF00D51E9B\line_data_reader.obj;$(SolutionDir)$(Configuration)\MSVS\B2E67D35-D818-4BB5-60B7-B6EEC460B8F8\cpu_id_check.obj;%(AdditionalDependencies)</AdditionalDependencies>
@@ -80,7 +80,6 @@
   <ItemGroup>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\array_subset_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\checksum_ut.cpp"/>
-    <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\compare_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\compression_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\dbg_output_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\double_array_iterator_ut.cpp"/>
@@ -91,8 +90,10 @@
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\maybe_owning_array_holder_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\permutation_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\polymorphic_type_containers_ut.cpp"/>
+    <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\quantile_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\resource_constrained_executor_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\resource_holder_ut.cpp"/>
+    <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\sample_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\serialization_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\short_vector_ops_ut.cpp"/>
     <ClCompile Include="$(SolutionDir)..\catboost\libs\helpers\ut\sparse_array_ut.cpp"/>
@@ -156,6 +157,9 @@
     <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\nayuki_md5\contrib-libs-nayuki_md5.vcxproj">
       <Project>{C0251DC8-E401-B1AF-785F-72D686693CB9}</Project>
     </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\rapidjson\contrib-libs-rapidjson.vcxproj">
+      <Project>{9CDB08FB-219D-3356-E006-1AC8AECC636E}</Project>
+    </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\zlib\contrib-libs-zlib.vcxproj">
       <Project>{E8A35EC0-40EE-2D96-1FB2-D065B804958D}</Project>
     </ProjectReference>
@@ -198,6 +202,12 @@
     <ProjectReference Include="$(SolutionDir)Projects\library\json\common\library-json-common.vcxproj">
       <Project>{3B322F11-1D2A-AEFE-BC14-4F74683E14DB}</Project>
     </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\json\fast_sax\library-json-fast_sax.vcxproj">
+      <Project>{8AAB2F9B-ECAA-2170-D871-1CEE27B498C2}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\json\library-json.vcxproj">
+      <Project>{E633ADF4-A720-EDCB-A12B-52A8216FF956}</Project>
+    </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\json\writer\library-json-writer.vcxproj">
       <Project>{C27A0E65-4FDF-D0F0-5127-62A23E33B196}</Project>
     </ProjectReference>
@@ -224,6 +234,9 @@
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\string_utils\base64\library-string_utils-base64.vcxproj">
       <Project>{137212F6-D2FE-719F-EBE2-99060434BC72}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\string_utils\relaxed_escaper\library-string_utils-relaxed_escaper.vcxproj">
+      <Project>{91423FEC-8B3D-547B-2674-3740D83114B5}</Project>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\terminate_handler\library-terminate_handler.vcxproj">
       <Project>{4E4966F6-2368-4B6C-B986-DF5B07F94F72}</Project>

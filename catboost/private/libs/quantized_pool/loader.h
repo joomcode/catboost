@@ -21,6 +21,7 @@ namespace NCB {
         void AddChunk(
             const TQuantizedPool::TChunkDescription& chunk,
             EColumn columnType,
+            const size_t* const multiTargetIdx,
             const size_t* flatFeatureIdx,
             const size_t* baselineIdx,
             IQuantizedFeaturesDataVisitor* visitor) const;
@@ -49,6 +50,8 @@ namespace NCB {
         TPathWithScheme PairsPath;
         TPathWithScheme GroupWeightsPath;
         TPathWithScheme BaselinePath;
+        TPathWithScheme TimestampsPath;
+        TPathWithScheme FeatureNamesPath;
         TDataMetaInfo DataMetaInfo;
         EObjectsOrder ObjectsOrder;
         TDatasetSubset DatasetSubset;
@@ -57,6 +60,7 @@ namespace NCB {
     struct IQuantizedPoolLoader {
         virtual ~IQuantizedPoolLoader() = default;
         virtual TQuantizedPool LoadQuantizedPool(TLoadQuantizedPoolParameters params) = 0;
+        virtual TVector<ui8> LoadQuantizedColumn(ui32 columnIdx) = 0;
     };
 
     using TQuantizedPoolLoaderFactory =

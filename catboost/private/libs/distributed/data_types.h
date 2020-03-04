@@ -17,6 +17,7 @@
 #include <catboost/private/libs/options/restrictions.h>
 
 #include <library/binsaver/bin_saver.h>
+#include <library/json/json_value.h>
 #include <library/par/par.h>
 #include <library/par/par_util.h>
 
@@ -32,26 +33,6 @@ namespace NCatboostDistributed {
     struct TUnusedInitializedParam {
         char Zero = 0;
     };
-
-    template <typename TData>
-    struct TEnvelope : public IObjectBase {
-        TData Data;
-
-    public:
-        TEnvelope() = default;
-        explicit TEnvelope(const TData& data)
-            : Data(data)
-        {
-        }
-
-        SAVELOAD(Data);
-        OBJECT_NOCOPY_METHODS(TEnvelope);
-    };
-
-    template <typename TData>
-    TEnvelope<TData> MakeEnvelope(const TData& data) {
-        return TEnvelope<TData>(data);
-    }
 
     using TStats5D = TVector<TVector<TStats3D>>; // [cand][subCand][bodyTail & approxDim][leaf][bucket]
     using TStats4D = TVector<TStats3D>; // [subCand][bodyTail & approxDim][leaf][bucket]
@@ -141,6 +122,14 @@ namespace NCatboostDistributed {
         TArray2D<double> PairwiseBuckets;
         int GradientIteration;
 
+        // data used by Exact approx calcer
+        TVector<TVector<TVector<std::pair<double, double>>>> ExactDiff; // [dim][leaf][]
+        TVector<TVector<TMinMax<int>>> SplitBounds; // [dim][leaf]
+        TVector<TVector<double>> LastPivot; // [dim][leaf]
+        TVector<TVector<int>> LastPartitionPoint; // [dim][leaf]
+        TVector<TVector<double>> CollectedLeftSumWeight; // [dim][leaf]
+        TVector<TVector<double>> LastSplitLeftSumWeight; // [dim][leaf]
+
         ui32 AllDocCount;
         double SumAllWeights;
         EHessianType HessianType = EHessianType::Symmetric;
@@ -148,7 +137,7 @@ namespace NCatboostDistributed {
         NCatboostOptions::TCatBoostOptions Params;
 
         NCB::TTrainingForCPUDataProviderPtr TrainData;
-        TVector<TString> ClassNamesFromDataset;
+        TVector<NJson::TJsonValue> ClassLabelsFromDataset;
 
         TFlatPairsInfo FlatPairs;
 

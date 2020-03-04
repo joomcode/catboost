@@ -32,17 +32,18 @@ static void FromJson(const TJsonValue& value, TString* result) {
     *result = value.GetString();
 }
 
-static void WriteJsonWithCatBoostPrecision(const TJsonValue& value, IOutputStream* out) {
+static void WriteJsonWithCatBoostPrecision(const TJsonValue& value, bool formatOutput, IOutputStream* out) {
     TJsonWriterConfig config;
-    config.FormatOutput = true;
+    config.FormatOutput = formatOutput;
     config.FloatNDigits = 9;
     config.DoubleNDigits = 17;
+    config.SortKeys = true;
     WriteJson(out, &value, config);
 }
 
-static TString WriteJsonWithCatBoostPrecision(const TJsonValue& value) {
+static TString WriteJsonWithCatBoostPrecision(const TJsonValue& value, bool formatOutput) {
     TStringStream ss;
-    WriteJsonWithCatBoostPrecision(value, &ss);
+    WriteJsonWithCatBoostPrecision(value, formatOutput, &ss);
     return ss.Str();
 }
 
@@ -144,12 +145,12 @@ static TJsonValue ToJson(const TModelCtrBase& modelCtrBase) {
 }
 
 TString ModelCtrBaseToStr(const TModelCtrBase& modelCtrBase) {
-    return WriteJsonWithCatBoostPrecision(ToJson(modelCtrBase));
+    return WriteJsonWithCatBoostPrecision(ToJson(modelCtrBase), false);
 }
 
 static TModelCtrBase ModelCtrBaseFromJson(const TJsonValue& jsonValue) {
     TModelCtrBase modelCtrBase;
-    modelCtrBase.CtrType = FromString<ECtrType >(jsonValue["type"].GetString());
+    modelCtrBase.CtrType = FromString<ECtrType>(jsonValue["type"].GetString());
     modelCtrBase.Projection = FeatureCombinationFromJson(jsonValue["identifier"]);
     return modelCtrBase;
 }
@@ -258,39 +259,39 @@ static TCatFeature CatFeatureFromJson(const TJsonValue& value) {
 }
 
 static TJsonValue GetFeaturesInfoJson(
-        const TObliviousTrees& obliviousTrees,
+        const TModelTrees& modelTrees,
         const TVector<TString>* featureId,
         const THashMap<ui32, TString>* catFeaturesHashToString
 ) {
     TJsonValue jsonValue;
-    if (!obliviousTrees.FloatFeatures.empty()) {
+    if (!modelTrees.GetFloatFeatures().empty()) {
         jsonValue.InsertValue("float_features", TJsonValue());
     }
-    for (const auto& floatFeature: obliviousTrees.FloatFeatures) {
+    for (const auto& floatFeature: modelTrees.GetFloatFeatures()) {
         jsonValue["float_features"].AppendValue(ToJson(floatFeature));
-        if (featureId) {
+        if (featureId && !featureId->empty()) {
             const auto& name = (*featureId)[floatFeature.Position.FlatIndex];
             if (!name.empty()) {
                 jsonValue["float_features"].Back().InsertValue("feature_name", name);
             }
         }
     }
-    if (!obliviousTrees.CatFeatures.empty()) {
+    if (!modelTrees.GetCatFeatures().empty()) {
         jsonValue.InsertValue("categorical_features", TJsonValue());
         THashMap<int, int> oneHotIndexes;
-        for (int idx = 0; idx < obliviousTrees.OneHotFeatures.ysize(); ++idx) {
-            oneHotIndexes[obliviousTrees.OneHotFeatures[idx].CatFeatureIndex] = idx;
+        for (int idx = 0; idx < modelTrees.GetOneHotFeatures().ysize(); ++idx) {
+            oneHotIndexes[modelTrees.GetOneHotFeatures()[idx].CatFeatureIndex] = idx;
         }
-        for (const auto &catFeature: obliviousTrees.CatFeatures) {
+        for (const auto &catFeature: modelTrees.GetCatFeatures()) {
             auto catFeatureJsonValue = ToJson(catFeature);
-            if (oneHotIndexes.contains(catFeature.Position.FlatIndex)) {
-                auto &ohFeauture = obliviousTrees.OneHotFeatures[oneHotIndexes[catFeature.Position.FlatIndex]];
+            if (oneHotIndexes.contains(catFeature.Position.Index)) {
+                auto &ohFeauture = modelTrees.GetOneHotFeatures()[oneHotIndexes[catFeature.Position.Index]];
                 catFeatureJsonValue.InsertValue("values", VectorToJson(ohFeauture.Values));
                 if (!ohFeauture.StringValues.empty()) {
                     catFeatureJsonValue.InsertValue("string_values", VectorToJson(ohFeauture.StringValues));
                 }
             }
-            if (featureId) {
+            if (featureId && !featureId->empty()) {
                 const auto &name = (*featureId)[catFeature.Position.FlatIndex];
                 if (!name.empty()) {
                     catFeatureJsonValue.InsertValue("feature_name", name);
@@ -299,10 +300,10 @@ static TJsonValue GetFeaturesInfoJson(
             jsonValue["categorical_features"].AppendValue(catFeatureJsonValue);
         }
     }
-    if (!obliviousTrees.CtrFeatures.empty()) {
+    if (!modelTrees.GetCtrFeatures().empty()) {
         jsonValue.InsertValue("ctrs", TJsonValue());
     }
-    for (const auto& ctr: obliviousTrees.CtrFeatures) {
+    for (const auto& ctr: modelTrees.GetCtrFeatures()) {
         jsonValue["ctrs"].AppendValue(ToJson(ctr));
     }
     if (catFeaturesHashToString) {
@@ -317,88 +318,168 @@ static TJsonValue GetFeaturesInfoJson(
     return jsonValue;
 }
 
-static void GetFeaturesInfo(const TJsonValue& jsonValue, TObliviousTrees* obliviousTrees) {
+static void GetFeaturesInfo(const TJsonValue& jsonValue, TModelTrees* modelTrees) {
     if (jsonValue.Has("float_features")) {
         for (const auto &value: jsonValue["float_features"].GetArray()) {
-            obliviousTrees->FloatFeatures.push_back(FloatFeatureFromJson(value));
+            modelTrees->AddFloatFeature(FloatFeatureFromJson(value));
         }
     }
     if (jsonValue.Has("categorical_features")) {
         for (const auto &value: jsonValue["categorical_features"].GetArray()) {
             auto catFeature = CatFeatureFromJson(value);
-            obliviousTrees->CatFeatures.push_back(catFeature);
+            modelTrees->AddCatFeature(catFeature);
             if (value.Has("values")) {
                 TOneHotFeature ohFeature;
-                ohFeature.CatFeatureIndex = catFeature.Position.FlatIndex;
+                ohFeature.CatFeatureIndex = catFeature.Position.Index;
                 ohFeature.Values = JsonToVector<int>(value["values"]);
                 ohFeature.StringValues = JsonToVector<TString>(value["string_values"]);
-                obliviousTrees->OneHotFeatures.push_back(ohFeature);
+                modelTrees->AddOneHotFeature(ohFeature);
             }
         }
     }
     if (jsonValue.Has("ctrs")) {
         for (const auto &value: jsonValue["ctrs"].GetArray()) {
-            obliviousTrees->CtrFeatures.push_back(CtrFeatureFromJson(value));
+            modelTrees->AddCtrFeature(CtrFeatureFromJson(value));
         }
     }
 }
 
-static TJsonValue GetObliviousTreesJson(const TObliviousTrees& obliviousTrees) {
+static TJsonValue GetObliviousModelTreesJson(const TModelTrees& modelTrees) {
     int leafValuesOffset = 0;
     int leafWeightsOffset = 0;
     TJsonValue jsonValue;
-    const auto& binFeatures = obliviousTrees.GetBinFeatures();
-    for (int treeIdx = 0; treeIdx < obliviousTrees.TreeSizes.ysize(); ++treeIdx) {
+    const auto& binFeatures = modelTrees.GetBinFeatures();
+    for (int treeIdx = 0; treeIdx < modelTrees.GetTreeSizes().ysize(); ++treeIdx) {
         TJsonValue tree;
-        const size_t treeLeafCount = (1uLL <<  obliviousTrees.TreeSizes[treeIdx]) * obliviousTrees.ApproxDimension;
-        const size_t treeWeightsCount = (1uLL <<  obliviousTrees.TreeSizes[treeIdx]);
-        if (!obliviousTrees.LeafWeights.empty()) {
+        const size_t treeLeafCount = (1uLL << modelTrees.GetTreeSizes()[treeIdx]) * modelTrees.GetDimensionsCount();
+        const size_t treeWeightsCount = (1uLL << modelTrees.GetTreeSizes()[treeIdx]);
+        if (!modelTrees.GetLeafWeights().empty()) {
             for (size_t idx = 0; idx < treeWeightsCount; ++idx) {
-                tree["leaf_weights"].AppendValue(obliviousTrees.LeafWeights[leafWeightsOffset + idx]);
+                tree["leaf_weights"].AppendValue(modelTrees.GetLeafWeights()[leafWeightsOffset + idx]);
             }
         }
         tree.InsertValue("leaf_values", TJsonValue());
         for (size_t idx = 0; idx < treeLeafCount; ++idx) {
-            tree["leaf_values"].AppendValue(obliviousTrees.LeafValues[leafValuesOffset + idx]);
+            tree["leaf_values"].AppendValue(modelTrees.GetLeafValues()[leafValuesOffset + idx]);
         }
         leafValuesOffset += treeLeafCount;
         leafWeightsOffset += treeWeightsCount;
         int treeSplitEnd;
-        if (treeIdx + 1 < obliviousTrees.TreeStartOffsets.ysize()) {
-            treeSplitEnd = obliviousTrees.TreeStartOffsets[treeIdx + 1];
+        if (treeIdx + 1 < modelTrees.GetTreeStartOffsets().ysize()) {
+            treeSplitEnd = modelTrees.GetTreeStartOffsets()[treeIdx + 1];
         } else {
-            treeSplitEnd = obliviousTrees.TreeSplits.ysize();
+            treeSplitEnd = modelTrees.GetTreeSplits().ysize();
         }
         tree.InsertValue("splits", TJsonValue());
-        for (int idx = obliviousTrees.TreeStartOffsets[treeIdx]; idx < treeSplitEnd; ++idx) {
-            tree["splits"].AppendValue(ToJson(binFeatures[obliviousTrees.TreeSplits[idx]]));
-            tree["splits"].Back().InsertValue("split_index", obliviousTrees.TreeSplits[idx]);
+        for (int idx = modelTrees.GetTreeStartOffsets()[treeIdx]; idx < treeSplitEnd; ++idx) {
+            tree["splits"].AppendValue(ToJson(binFeatures[modelTrees.GetTreeSplits()[idx]]));
+            tree["splits"].Back().InsertValue("split_index", modelTrees.GetTreeSplits()[idx]);
         }
         jsonValue.AppendValue(tree);
     }
     return jsonValue;
 }
 
-static void GetObliviousTrees(const TJsonValue& jsonValue, TObliviousTrees* obliviousTrees) {
-    obliviousTrees->TreeStartOffsets.push_back(0);
+static TJsonValue BuildLeafJson(const TModelTrees& modelTrees, ui32 nodeIdx) {
+    ui32 leafIdx = modelTrees.GetNonSymmetricNodeIdToLeafId()[nodeIdx];
+    TJsonValue leafJson;
+    leafJson.InsertValue("weight", modelTrees.GetLeafWeights()[leafIdx / modelTrees.GetDimensionsCount()]);
+    if (modelTrees.GetDimensionsCount() == 1) {
+        leafJson.InsertValue("value", modelTrees.GetLeafValues()[leafIdx]);
+    } else {
+        TConstArrayRef<double> valueRef(modelTrees.GetLeafValues().begin() + leafIdx, modelTrees.GetDimensionsCount());
+        leafJson.InsertValue("value", VectorToJson<double>({valueRef.begin(), valueRef.end()}));
+    }
+    return leafJson;
+}
+
+static TJsonValue BuildTreeJson(const TModelTrees& modelTrees, ui32 nodeIdx) {
+    TJsonValue tree;
+    const TNonSymmetricTreeStepNode& node = modelTrees.GetNonSymmetricStepNodes()[nodeIdx];
+    if (node.LeftSubtreeDiff == 0 && node.RightSubtreeDiff == 0) {
+        return BuildLeafJson(modelTrees, nodeIdx);
+    } else {
+        tree.InsertValue("split", ToJson(modelTrees.GetBinFeatures()[modelTrees.GetTreeSplits()[nodeIdx]]));
+        tree["split"].InsertValue("split_index", modelTrees.GetTreeSplits()[nodeIdx]);
+        tree.InsertValue("left",
+            node.LeftSubtreeDiff ? BuildTreeJson(modelTrees, nodeIdx + node.LeftSubtreeDiff) : BuildLeafJson(modelTrees, nodeIdx));
+        tree.InsertValue("right",
+            node.RightSubtreeDiff ? BuildTreeJson(modelTrees, nodeIdx + node.RightSubtreeDiff) : BuildLeafJson(modelTrees, nodeIdx));
+    }
+    return tree;
+}
+
+static TJsonValue GetNonSymmetricModelTreesJson(const TModelTrees& modelTrees) {
+    TJsonValue jsonValue(JSON_ARRAY);
+    for (int treeIdx = 0; treeIdx < modelTrees.GetTreeSizes().ysize(); ++treeIdx) {
+        jsonValue.AppendValue(BuildTreeJson(modelTrees, modelTrees.GetTreeStartOffsets()[treeIdx]));
+    }
+    return jsonValue;
+}
+
+static TJsonValue GetModelTreesJson(const TModelTrees& modelTrees) {
+    if (modelTrees.IsOblivious()) {
+        return GetObliviousModelTreesJson(modelTrees);
+    } else {
+        return GetNonSymmetricModelTreesJson(modelTrees);
+    }
+}
+
+static void GetObliviousModelTrees(const TJsonValue& jsonValue, TModelTrees* modelTrees) {
     for (const auto& value: jsonValue.GetArray()) {
         for (const auto& leaf: value["leaf_values"].GetArray()) {
-            obliviousTrees->LeafValues.push_back(leaf.GetDouble());
+            modelTrees->AddLeafValue(leaf.GetDouble());
         }
         int treeSize = value["splits"].GetArray().ysize();
-        obliviousTrees->TreeSizes.push_back(treeSize);
-        obliviousTrees->ApproxDimension = value["leaf_values"].GetArray().ysize() / (1uLL << treeSize);
-        obliviousTrees->TreeStartOffsets.push_back(obliviousTrees->TreeStartOffsets.back() + treeSize);
+        modelTrees->AddTreeSize(treeSize);
+        modelTrees->SetApproxDimension(value["leaf_values"].GetArray().ysize() / (1uLL << treeSize));
         for (const auto& split: value["splits"].GetArray()) {
-            obliviousTrees->TreeSplits.push_back(split["split_index"].GetInteger());
+            modelTrees->AddTreeSplit(split["split_index"].GetInteger());
         }
         if (value.Has("leaf_weights")) {
             for (const auto& weight: value["leaf_weights"].GetArray()) {
-                obliviousTrees->LeafWeights.push_back(weight.GetDouble());
+                modelTrees->AddLeafWeight(weight.GetDouble());
             }
         }
     }
-    obliviousTrees->TreeStartOffsets.pop_back();
+}
+
+static void GetNonSymmetricModelTrees(const TJsonValue& jsonValue, TModelTrees* modelTrees) {
+    TVector<TNonSymmetricTreeStepNode> nodes;
+    TVector<ui32> nodeIdToLeafId;
+    const std::function<int(const TJsonValue&)> readTreeFromJson = [modelTrees, &nodes, &nodeIdToLeafId, &readTreeFromJson](const TJsonValue& jsonNode) {
+        int nodeIdx = nodes.size();
+        nodes.emplace_back(TNonSymmetricTreeStepNode{0, 0});
+        if (jsonNode.Has("value")) {
+            const TJsonValue& value = jsonNode["value"];
+            nodeIdToLeafId.push_back(modelTrees->GetLeafValues().size());
+            modelTrees->AddTreeSplit(0);
+            if (value.GetType() == EJsonValueType::JSON_ARRAY) {
+                modelTrees->SetApproxDimension(value.GetArray().ysize());
+                for (const auto& singleValue : value.GetArray()) {
+                    modelTrees->AddLeafValue(singleValue.GetDouble());
+                }
+            } else {
+                modelTrees->AddLeafValue(value.GetDouble());
+            }
+            if (jsonNode.Has("weight")) {
+                modelTrees->AddLeafWeight(jsonNode["weight"].GetDouble());
+            }
+        } else {
+            nodeIdToLeafId.push_back(Max<ui32>());
+            modelTrees->AddTreeSplit(jsonNode["split"]["split_index"].GetInteger());
+            nodes[nodeIdx].LeftSubtreeDiff = readTreeFromJson(jsonNode["left"]) - nodeIdx;
+            nodes[nodeIdx].RightSubtreeDiff = readTreeFromJson(jsonNode["right"]) - nodeIdx;
+        }
+        return nodeIdx;
+    };
+    for (const auto& treeJson : jsonValue.GetArray()) {
+        int oldNodesCount = nodes.size();
+        readTreeFromJson(treeJson);
+        modelTrees->AddTreeSize(nodes.size() - oldNodesCount);
+    }
+    modelTrees->SetNonSymmetricStepNodes(std::move(nodes));
+    modelTrees->SetNonSymmetricNodeIdToLeafId(std::move(nodeIdToLeafId));
 }
 
 static NJson::TJsonValue ConvertCtrsToJson(const TStaticCtrProvider* ctrProvider, const TVector<TModelCtr>& neededCtrs) {
@@ -458,26 +539,40 @@ static NJson::TJsonValue ConvertCtrsToJson(const TStaticCtrProvider* ctrProvider
     return jsonValue;
 }
 
+static TJsonValue GetScaleAndBiasJson(const TFullModel& model) {
+    TJsonValue jsonValue;
+    jsonValue.AppendValue(model.GetScaleAndBias().Scale);
+    jsonValue.AppendValue(model.GetScaleAndBias().Bias);
+    return jsonValue;
+}
+
 TJsonValue ConvertModelToJson(const TFullModel& model, const TVector<TString>* featureId, const THashMap<ui32, TString>* catFeaturesHashToString) {
     TJsonValue jsonModel;
     TJsonValue modelInfo;
     for (const auto& key_value : model.ModelInfo) {
-        if (key_value.first == "params") {
+        if (key_value.first.EndsWith("params")) {
             TJsonValue tree;
-            TStringStream ss(key_value.second);
-            CB_ENSURE(ReadJsonTree(&ss, &tree), "can't parse params file");
-            modelInfo.InsertValue(key_value.first, tree);
+            if (!key_value.second.empty()) {
+                TStringStream ss(key_value.second);
+                CB_ENSURE(ReadJsonTree(&ss, &tree), "can't parse params file");
+                modelInfo.InsertValue(key_value.first, tree);
+            }
         } else {
             modelInfo.InsertValue(key_value.first, key_value.second);
         }
     }
     jsonModel.InsertValue("model_info", modelInfo);
-    jsonModel.InsertValue("oblivious_trees", GetObliviousTreesJson(*model.ObliviousTrees));
-    jsonModel.InsertValue("features_info", GetFeaturesInfoJson(*model.ObliviousTrees, featureId, catFeaturesHashToString));
+    if (model.IsOblivious()) {
+        jsonModel.InsertValue("oblivious_trees", GetModelTreesJson(*model.ModelTrees));
+    } else {
+        jsonModel.InsertValue("trees", GetModelTreesJson(*model.ModelTrees));
+    }
+    jsonModel.InsertValue("features_info", GetFeaturesInfoJson(*model.ModelTrees, featureId, catFeaturesHashToString));
     const TStaticCtrProvider* ctrProvider = dynamic_cast<TStaticCtrProvider*>(model.CtrProvider.Get());
     if (ctrProvider) {
-        jsonModel.InsertValue("ctr_data", ConvertCtrsToJson(ctrProvider, model.ObliviousTrees->GetUsedModelCtrs()));
+        jsonModel.InsertValue("ctr_data", ConvertCtrsToJson(ctrProvider, model.ModelTrees->GetUsedModelCtrs()));
     }
+    jsonModel.InsertValue("scale_and_bias", GetScaleAndBiasJson(model));
     return jsonModel;
 }
 
@@ -538,11 +633,21 @@ void ConvertJsonToCatboostModel(const TJsonValue& jsonModel, TFullModel* fullMod
     for (const auto& key_value : jsonModel["model_info"].GetMap()) {
         fullModel->ModelInfo[key_value.first] = key_value.second.GetStringRobust();
     }
-    GetObliviousTrees(jsonModel["oblivious_trees"], fullModel->ObliviousTrees.GetMutable());
-    GetFeaturesInfo(jsonModel["features_info"], fullModel->ObliviousTrees.GetMutable());
+    if (jsonModel.Has("oblivious_trees")) {
+        GetObliviousModelTrees(jsonModel["oblivious_trees"], fullModel->ModelTrees.GetMutable());
+    } else {
+        GetNonSymmetricModelTrees(jsonModel["trees"], fullModel->ModelTrees.GetMutable());
+    }
+    GetFeaturesInfo(jsonModel["features_info"], fullModel->ModelTrees.GetMutable());
     if (jsonModel.Has("ctr_data")) {
         auto ctrData = CtrDataFromJson(jsonModel["ctr_data"]);
         fullModel->CtrProvider = new TStaticCtrProvider(ctrData);
+    }
+    if (jsonModel.Has("scale_and_bias")) {
+        const auto& scaleAndBias = jsonModel["scale_and_bias"].GetArray();
+        double scale = scaleAndBias[0].GetDouble();
+        double bias = scaleAndBias[1].GetDouble();
+        fullModel->SetScaleAndBias({scale, bias});
     }
 
     fullModel->UpdateDynamicData();
@@ -551,5 +656,5 @@ void ConvertJsonToCatboostModel(const TJsonValue& jsonModel, TFullModel* fullMod
 void OutputModelJson(const TFullModel& model, const TString& outputPath, const TVector<TString>* featureId, const THashMap<ui32, TString>* catFeaturesHashToString) {
     TOFStream out(outputPath);
     auto jsonModel = ConvertModelToJson(model, featureId, catFeaturesHashToString);
-    WriteJsonWithCatBoostPrecision(jsonModel, &out);
+    WriteJsonWithCatBoostPrecision(jsonModel, true, &out);
 }

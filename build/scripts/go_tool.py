@@ -117,7 +117,7 @@ def get_source_path(args):
 
 
 def gen_vet_info(args):
-    import_path = args.import_path
+    import_path = args.real_import_path if hasattr(args, 'real_import_path') else args.import_path
     info = get_import_config_info(args.peers, True, args.import_map, args.module_map)
 
     import_map = dict(info['importmap'])
@@ -135,8 +135,7 @@ def gen_vet_info(args):
         'Dir': os.path.join(args.arc_source_root, get_source_path(args)),
         'ImportPath': import_path,
         'GoFiles': list(filter(lambda x: x.endswith('.go'), args.go_srcs)),
-        'NonGoFiles': [
-        ],
+        'NonGoFiles': list(filter(lambda x: not x.endswith('.go'), args.go_srcs)),
         'ImportMap': import_map,
         'PackageFile': dict(info['packagefile']),
         'Standard': dict(info['standard']),
@@ -212,7 +211,7 @@ def do_vet(args):
 
 def _do_compile_go(args):
     import_path, is_std_module = args.import_path, args.is_std
-    cmd = [args.go_compile, '-o', args.output, '-trimpath', args.build_root, '-p', import_path, '-D', '""']
+    cmd = [args.go_compile, '-o', args.output, '-trimpath', args.arc_source_root, '-p', import_path, '-D', '""']
     cmd += ['-goversion', 'go' + args.goversion]
     if is_std_module:
         cmd.append('-std')
@@ -248,14 +247,12 @@ def _do_compile_go(args):
 class VetThread(threading.Thread):
 
     def __init__(self, target, args):
-        threading.Thread.__init__(self)
-        self.target = target
-        self.args = args
+        super(VetThread, self).__init__(target=target, args=args)
         self.exc_info = None
 
     def run(self):
         try:
-            self.target(self.args)
+            super(VetThread, self).run()
         except:
             self.exc_info = sys.exc_info()
 
@@ -268,7 +265,7 @@ class VetThread(threading.Thread):
 def do_compile_go(args):
     raise_exception_from_vet = False
     if args.vet:
-        run_vet = VetThread(target=do_vet, args=args)
+        run_vet = VetThread(target=do_vet, args=(args,))
         run_vet.start()
     try:
         _do_compile_go(args)
@@ -280,7 +277,7 @@ def do_compile_go(args):
 
 def do_compile_asm(args):
     assert(len(args.srcs) == 1 and len(args.asm_srcs) == 1)
-    cmd = [args.go_asm, '-trimpath', args.build_root]
+    cmd = [args.go_asm, '-trimpath', args.arc_source_root]
     cmd += ['-I', args.output_root, '-I', os.path.join(args.pkg_root, 'include')]
     cmd += ['-D', 'GOOS_' + args.targ_os, '-D', 'GOARCH_' + args.targ_arch, '-o', args.output]
     if args.asm_flags:
@@ -312,7 +309,8 @@ def do_link_exe(args):
     assert args.non_local_peers is not None
     compile_args = copy_args(args)
     compile_args.output = os.path.join(args.output_root, 'main.a')
-    # compile_args.import_path = 'main'
+    compile_args.real_import_path = compile_args.import_path
+    compile_args.import_path = 'main'
 
     if args.vcs and os.path.isfile(compile_args.vcs):
         build_info = os.path.join('library', 'go', 'core', 'buildinfo')
@@ -329,7 +327,12 @@ def do_link_exe(args):
     cmd += ['-buildmode=exe', '-extld={}'.format(args.extld)]
     extldflags = []
     if args.extldflags is not None:
-        extldflags += args.extldflags
+        filter_musl = None
+        if args.musl:
+            cmd.append('-linkmode=external')
+            extldflags.append('-static')
+            filter_musl = lambda x: not x in ('-lc', '-ldl', '-lm', '-lpthread', '-lrt')
+        extldflags += list(filter(filter_musl, args.extldflags))
     if args.cgo_peers is not None and len(args.cgo_peers) > 0:
         is_group = args.targ_os == 'linux'
         if is_group:
@@ -385,6 +388,11 @@ func coverRegisterFile(fileName string, counter []uint32, pos []uint32, numStmts
     return lines
 
 
+def filter_out_skip_tests(tests, skip_tests):
+    skip_set = set(skip_tests)
+    return filter(lambda x: x not in skip_set, tests)
+
+
 def gen_test_main(args, test_lib_args, xtest_lib_args):
     assert args and (test_lib_args or xtest_lib_args)
     test_miner = args.test_miner
@@ -419,6 +427,8 @@ def gen_test_main(args, test_lib_args, xtest_lib_args):
         os_symlink(test_lib_args.output, os.path.join(test_pkg_dir, os.path.basename(test_module_path) + '.a'))
         cmd = [test_miner, '-benchmarks', '-tests', test_module_path]
         tests = filter(lambda x: len(x) > 0, (call(cmd, test_lib_args.output_root, my_env) or '').strip().split('\n'))
+        if args.skip_tests:
+            tests = filter_out_skip_tests(tests, args.skip_tests)
     test_main_found = '#TestMain' in tests
 
     # Get the list of "external" tests
@@ -428,6 +438,8 @@ def gen_test_main(args, test_lib_args, xtest_lib_args):
         os_symlink(xtest_lib_args.output, os.path.join(test_pkg_dir, os.path.basename(xtest_module_path) + '.a'))
         cmd = [test_miner, '-benchmarks', '-tests', xtest_module_path]
         xtests = filter(lambda x: len(x) > 0, (call(cmd, xtest_lib_args.output_root, my_env) or '').strip().split('\n'))
+        if args.skip_tests:
+            xtests = filter_out_skip_tests(xtests, args.skip_tests)
     xtest_main_found = '#TestMain' in xtests
 
     test_main_package = None
@@ -444,10 +456,17 @@ def gen_test_main(args, test_lib_args, xtest_lib_args):
     if test_main_package is None:
         lines.append('    "os"')
     lines.extend(['    "testing"', '    "testing/internal/testdeps"'])
+
     if len(tests) > 0:
         lines.append('    _test "{}"'.format(test_module_path))
+    elif test_lib_args:
+        lines.append('    _ "{}"'.format(test_module_path))
+
     if len(xtests) > 0:
         lines.append('    _xtest "{}"'.format(xtest_module_path))
+    elif xtest_lib_args:
+        lines.append('    _ "{}"'.format(xtest_module_path))
+
     if is_cover:
         lines.append('    _cover0 "{}"'.format(test_module_path))
     lines.extend([')', ''])
@@ -578,6 +597,8 @@ if __name__ == '__main__':
     parser.add_argument('++vet', nargs='?', const=True, default=False)
     parser.add_argument('++vet-flags', nargs='*', default=None)
     parser.add_argument('++arc-source-root')
+    parser.add_argument('++musl', action='store_true')
+    parser.add_argument('++skip-tests', nargs='*', default=None)
     args = parser.parse_args()
 
     # Temporary work around for noauto

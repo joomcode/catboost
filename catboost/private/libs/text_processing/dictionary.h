@@ -36,6 +36,7 @@ namespace NCB {
         ui32 Size() const;
 
         TTokenId GetUnknownTokenId() const;
+        TVector<TTokenId> GetTopTokens(ui32 topSize) const;
 
         void Save(IOutputStream* stream) const;
         void Load(IInputStream* stream);
@@ -65,6 +66,16 @@ namespace NCB {
             }
         }
 
+        template <class F>
+        void ForEach(F&& visitor, NPar::TLocalExecutor* localExecutor) const {
+            NPar::ParallelFor(
+                *localExecutor,
+                0,
+                Size(),
+                [&](ui32 i) { visitor(i, TextFeature[i]); }
+            );
+        }
+
         ui32 Size() const {
             return TextFeature.size();
         }
@@ -87,6 +98,11 @@ namespace NCB {
             );
         }
 
+        template <class F>
+        void ForEach(F&& visitor, NPar::TLocalExecutor* localExecutor) const {
+            TextFeature->ParallelForEach(visitor, localExecutor);
+        }
+
         ui32 Size() const {
             return TextFeature->GetSize();
         }
@@ -105,14 +121,12 @@ namespace NCB {
             dictionaryOptions.DictionaryOptions
         );
 
-        TVector<TStringBuf> tokens;
-        const auto& tokenize = [&tokenizer, &tokens](ui32 /*index*/, TStringBuf phrase) {
-            TVector<TStringBuf> phraseTokens;
-            tokenizer->Tokenize(phrase, &phraseTokens);
-            tokens.insert(tokens.end(), phraseTokens.begin(), phraseTokens.end());
+        TTokensWithBuffer tokens;
+        const auto& tokenize = [&](ui32 /*index*/, TStringBuf phrase) {
+            tokenizer->Tokenize(phrase, &tokens);
+            dictionaryBuilder.Add(tokens.View);
         };
         textFeature.ForEach(tokenize);
-        dictionaryBuilder.Add(tokens);
 
         return new TDictionaryProxy(dictionaryBuilder.FinishBuilding());
     }

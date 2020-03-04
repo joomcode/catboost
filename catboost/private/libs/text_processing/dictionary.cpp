@@ -11,13 +11,9 @@ namespace NCB {
     }
 
     void TDictionaryProxy::Apply(TConstArrayRef<TStringBuf> tokens, TText* text) const {
-        text->Clear();
-
         TVector<ui32> tokenIds;
         DictionaryImpl->Apply(tokens, &tokenIds);
-        for (const auto& tokenId : tokenIds) {
-            (*text)[TTokenId(tokenId)]++;
-        }
+        *text = TText{std::move(tokenIds)};
     }
 
     ui32 TDictionaryProxy::Size() const {
@@ -36,6 +32,11 @@ namespace NCB {
 
     TTokenId TDictionaryProxy::GetUnknownTokenId() const {
         return TTokenId(DictionaryImpl->GetUnknownTokenId());
+    }
+
+    TVector<TTokenId> TDictionaryProxy::GetTopTokens(ui32 topSize) const {
+        topSize = Min(topSize, DictionaryImpl->Size());
+        return xrange(topSize);
     }
 
     void TDictionaryProxy::Save(IOutputStream* stream) const {

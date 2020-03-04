@@ -144,15 +144,15 @@ private:
 
 
 TVector<bool> GetFeaturesUsedInModel(const TFullModel& model) {
-    TVector<bool> result(model.ObliviousTrees->GetFlatFeatureVectorExpectedSize(), false);
+    TVector<bool> result(model.ModelTrees->GetFlatFeatureVectorExpectedSize(), false);
 
-    for (const auto& floatFeature : model.ObliviousTrees->FloatFeatures) {
+    for (const auto& floatFeature : model.ModelTrees->GetFloatFeatures()) {
         if (floatFeature.UsedInModel()) {
             result[floatFeature.Position.FlatIndex] = true;
         }
     }
 
-    for (const auto& catFeature : model.ObliviousTrees->CatFeatures) {
+    for (const auto& catFeature : model.ModelTrees->GetCatFeatures()) {
         if (catFeature.UsedInModel()) {
             result[catFeature.Position.FlatIndex] = true;
         }
@@ -196,7 +196,10 @@ int DoMain(int argc, char** argv) {
     NCatboostOptions::TColumnarPoolFormatParams columnarPoolFormatParams;
     columnarPoolFormatParams.CdFilePath = NCB::TPathWithScheme(options.CdPath, "dsv");
     NCB::TDataProviderPtr dataset = NCB::ReadDataset(
+        /*taskType*/Nothing(),
         NCB::TPathWithScheme(options.PoolPath, "dsv"),
+        NCB::TPathWithScheme(),
+        NCB::TPathWithScheme(),
         NCB::TPathWithScheme(),
         NCB::TPathWithScheme(),
         NCB::TPathWithScheme(),
@@ -287,7 +290,11 @@ int DoMain(int argc, char** argv) {
     int biggestPriority = Min<int>();
     for (const auto& key : allRegisteredKeys) {
         try {
-            modules.emplace_back(TPerftestModuleFactory::Construct(key, model));
+            auto product = TPerftestModuleFactory::Construct(key, model);
+            if (!product) {
+                continue;
+            }
+            modules.emplace_back(std::move(product));
             if (modules.back()->GetComparisonPriority(IPerftestModule::EPerftestModuleDataLayout::ObjectsFirst) > biggestPriority) {
                 biggestPriority = modules.back()->GetComparisonPriority(IPerftestModule::EPerftestModuleDataLayout::ObjectsFirst);
                 results.BaseResultName = modules.back()->GetName(IPerftestModule::EPerftestModuleDataLayout::ObjectsFirst);

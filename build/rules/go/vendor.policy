@@ -1,5 +1,8 @@
 ALLOW vendor/ -> .*
 
+# Validate and define text-based and dynamic configuration
+ALLOW .* -> vendor/cuelang.org/go
+
 # driver for write to and read from XLSX files
 ALLOW .* -> vendor/github.com/360EntSecGroup-Skylar/excelize/v2
 
@@ -59,6 +62,9 @@ ALLOW .* -> vendor/github.com/gofrs/uuid
 # websocket protocol
 ALLOW .* -> vendor/github.com/gorilla/websocket
 
+# S2 geometry
+ALLOW .* -> vendor/github.com/golang/geo
+
 # Protocol buffers
 ALLOW .* -> vendor/github.com/golang/protobuf
 
@@ -68,9 +74,6 @@ ALLOW .* -> vendor/github.com/golang/snappy
 # API for sentry
 ALLOW .* -> vendor/github.com/getsentry/raven-go
 
-# Parser and generator of M3U8-playlists for Apple HLS
-ALLOW .* -> vendor/github.com/grafov/m3u8
-
 # configuration library
 ALLOW .* -> vendor/github.com/heetch/confita
 
@@ -78,6 +81,12 @@ ALLOW .* -> vendor/github.com/heetch/confita
 ALLOW .* -> vendor/github.com/iancoleman/strcase
 
 # PostgreSQL driver and toolkit for Go
+ALLOW .* -> vendor/github.com/jackc/pgx/v4
+ALLOW .* -> vendor/github.com/jackc/pgconn
+ALLOW .* -> vendor/github.com/jackc/pgtype
+# v3 is to be deprecated in the future
+# deny v3 for MDB, responsible: @sidh
+DENY cloud/mdb -> vendor/github.com/jackc/pgx
 ALLOW .* -> vendor/github.com/jackc/pgx
 
 # database/sql wrapper with a lot of helper functions
@@ -96,7 +105,7 @@ ALLOW .* -> vendor/github.com/kentik/patricia
 ALLOW .* -> vendor/github.com/kshvakov/clickhouse
 
 # High performance, minimalist web framework
-ALLOW .* -> vendor/github.com/labstack/echo
+ALLOW .* -> vendor/github.com/labstack/echo/v4
 
 # fluent SQL builder
 ALLOW .* -> vendor/github.com/Masterminds/squirrel
@@ -136,9 +145,6 @@ ALLOW .* -> vendor/github.com/mailru/easyjson
 
 # lz4 compression codec
 ALLOW .* -> vendor/github.com/pierrec/lz4
-
-# simple error handling primitives
-ALLOW .* -> vendor/github.com/pkg/errors
 
 # library for HTML DOM manipulations and searching nodes by CSS selectors
 ALLOW .* -> vendor/github.com/PuerkitoBio/goquery
@@ -206,6 +212,9 @@ ALLOW .* -> vendor/golang.org/x/sync
 # golang.org/x/text
 ALLOW .* -> vendor/golang.org/x/text
 
+# golang.org/x/time
+ALLOW .* -> vendor/golang.org/x/time
+
 # experimental implementation of Go error inspection. Use x/xerrors instead.
 ALLOW .* -> vendor/golang.org/x/exp/errors
 
@@ -227,6 +236,12 @@ ALLOW .* -> vendor/gopkg.in/yaml.v2
 # INI file format
 ALLOW .* -> vendor/gopkg.in/ini.v1
 
+# JSON Schema
+ALLOW .* -> vendor/github.com/xeipuuv/gojsonschema
+
+# JSONPath
+ALLOW .* -> vendor/github.com/PaesslerAG/jsonpath
+
 # Go generated proto packages
 ALLOW .* -> vendor/google.golang.org/genproto
 
@@ -235,6 +250,12 @@ ALLOW .* -> vendor/google.golang.org/grpc
 
 # Usefull GRPC interceptors
 ALLOW .* -> vendor/github.com/grpc-ecosystem/go-grpc-middleware
+
+# GRPC Intercaptors for Prometheus monitoring
+ALLOW .* -> vendor/github.com/grpc-ecosystem/go-grpc-prometheus
+
+# Protobuf and gRPC reflection
+ALLOW .* -> vendor/github.com/jhump/protoreflect
 
 # Job Scheduling Package
 ALLOW .* -> vendor/github.com/jasonlvhit/gocron
@@ -253,6 +274,7 @@ ALLOW .* -> vendor/github.com/tarm/serial
 
 # generation tool and serialization library for MessagePack
 ALLOW .* -> vendor/github.com/tinylib/msgp
+ALLOW .* -> vendor/github.com/vmihailenco/msgpack
 
 # Generate fancy REST API from grpc api
 ALLOW .* -> vendor/github.com/grpc-ecosystem/grpc-gateway
@@ -279,6 +301,7 @@ ALLOW .* -> vendor/github.com/go-cmd/cmd
 ALLOW .* -> vendor/github.com/NVIDIA/gpu-monitoring-tools/bindings/go
 
 # Opentracing interface and implementation.
+ALLOW .* -> vendor/github.com/uber/jaeger-client-go
 ALLOW .* -> vendor/github.com/jaegertracing/jaeger-client-go
 ALLOW .* -> vendor/github.com/opentracing/opentracing-go
 
@@ -332,12 +355,103 @@ ALLOW .* -> vendor/github.com/cenkalti/backoff
 # CONTRIB-1491 A parser library for Go
 ALLOW .* -> vendor/github.com/alecthomas/participle
 
+# CONTRIB-1539 staticcheck
+ALLOW library/go/yolint -> vendor/honnef.co/go/tools
+
+# CONTRIB-1542 Simple netlink library for go.
+ALLOW .* -> vendor/github.com/vishvananda/netlink
+
+# CONTRIB-1542 Simple network namespace handling for go.
+ALLOW .* -> vendor/github.com/vishvananda/netns
+
+# CONTRIB-1545 Go bindings for creating BPF programs.
+ALLOW .* -> vendor/github.com/iovisor/gobpf
+
+# CONTRIB-1561 Go pretty format for numbers
+ALLOW .* -> vendor/github.com/dustin/go-humanize
+
+# CONTRIB-1615 Go pretty table formatter similar to python PrettyTable
+ALLOW .* -> vendor/github.com/olekukonko/tablewriter
+
+# CONTRIB-1596 embedded key/value database
+ALLOW .* -> vendor/go.etcd.io/bbolt
+
+# CONTRIB-1616 Gountries provides structured countries data
+ALLOW .* -> vendor/github.com/pariz/gountries
+
+# CONTRIB-1630- Go binding for qemu/qmp runtime
+ALLOW .* -> vendor/github.com/intel/govmm/qemu
+
+# CONTRIB-1650 golang ftp server library with a sample implementation
+ALLOW .* -> vendor/github.com/fclairamb/ftpserver
+
+# CONTRIB-1647 golang binlog replication implementation
+ALLOW .* -> vendor/github.com/siddontang/go-mysql/replication
+ALLOW .* -> vendor/github.com/siddontang/go-mysql/canal
+ALLOW .* -> vendor/github.com/siddontang/go-mysql/mysql
+
+# CONTRIB-1656 golang sftp server library
+ALLOW .* -> vendor/github.com/pkg/sftp
+
+# CONTRIB-1670
+ALLOW .* -> vendor/github.com/soniah/gosnmp
+
+# CONTRIB-1686 markdown parser
+ALLOW .* -> vendor/github.com/yuin/goldmark
+
+# CONTRIB-1681 A FileSystem Abstraction System for Go
+ALLOW .* -> vendor/github.com/spf13/afero
+
+# CONTRIB-1702 parse and generate XML easily in go
+ALLOW .* -> vendor/github.com/beevik/etree
+
+# CONTRIB-1703 telebot client for telegram. responsible: alittleprince@
+ALLOW .* -> vendor/gopkg.in/tucnak/telebot.v2
+
+# CONTRIB-1726 helpers for working with protobuf field masks
+ALLOW .* -> vendor/github.com/mennanov/fieldmask-utils
+
 #
 # Temporary exceptions.
 #
 
 # CONTRIB-1244. resposible: gzuykov@
 ALLOW cloud -> vendor/github.com/rcrowley/go-metrics
+
+# IGNIETFERRO-1287
+ALLOW cloud/compute/snapshot/snapshot/config -> vendor/github.com/pkg/errors
+ALLOW cloud/compute/snapshot/snapshot/lib/chunker -> vendor/github.com/pkg/errors
+ALLOW cloud/compute/snapshot/snapshot/lib/nbd -> vendor/github.com/pkg/errors
+ALLOW contrib/go/patched/hugo -> vendor/github.com/pkg/errors
+ALLOW edadeal/backend/go/charm/internal/pkg/store/pg -> vendor/github.com/pkg/errors
+ALLOW extsearch/video/station/starter -> vendor/github.com/pkg/errors
+ALLOW infra/yp_service_discovery/golang/resolver -> vendor/github.com/pkg/errors
+ALLOW library/go/yandex/solomon/reporters/pusher/httppusher -> vendor/github.com/pkg/errors
+ALLOW locdoc/doc/daas-farm/pkg/daasclient -> vendor/github.com/pkg/errors
+ALLOW locdoc/doc/daas-farm/pkg/menugen -> vendor/github.com/pkg/errors
+ALLOW locdoc/doc/daas-farm/pkg/wikiclient -> vendor/github.com/pkg/errors
+ALLOW locdoc/doc/daas-farm/pkg/wikigen -> vendor/github.com/pkg/errors
+ALLOW market/sre/library/golang/dispenser -> vendor/github.com/pkg/errors
+ALLOW market/sre/services/rtcstats2graphite/src/internal/blogic -> vendor/github.com/pkg/errors
+ALLOW market/sre/services/rtcstats2graphite/src/internal/nanny -> vendor/github.com/pkg/errors
+ALLOW market/sre/services/rtcstats2graphite/src/internal/oops -> vendor/github.com/pkg/errors
+ALLOW market/sre/services/rtcstats2graphite/src/internal/walle -> vendor/github.com/pkg/errors
+ALLOW market/sre/services/rtcstats2graphite/src/internal/yasm -> vendor/github.com/pkg/errors
+ALLOW market/sre/tools/ya-gde/src/cmd/getthefacts -> vendor/github.com/pkg/errors
+ALLOW market/sre/tools/ya-gde/src/pkg/hostinfo -> vendor/github.com/pkg/errors
+ALLOW market/sre/tools/ya-gde/src/pkg/util -> vendor/github.com/pkg/errors
+ALLOW orgvisits/witness -> vendor/github.com/pkg/errors
+ALLOW quasar/go/blackbox -> vendor/github.com/pkg/errors
+ALLOW toolbox/bunker -> vendor/github.com/pkg/errors
+ALLOW toolbox/pg-pinger/pinger -> vendor/github.com/pkg/errors
+ALLOW transfer_manager/go/pkg/abstract -> vendor/github.com/pkg/errors
+ALLOW transfer_manager/go/pkg/server/impl -> vendor/github.com/pkg/errors
+ALLOW yabs/telephony/platform/inventory/api/http -> vendor/github.com/pkg/errors
+ALLOW yabs/telephony/platform/inventory/core -> vendor/github.com/pkg/errors
+ALLOW yabs/telephony/platform/push-service/api/http -> vendor/github.com/pkg/errors
+ALLOW yt/go/guid -> vendor/github.com/pkg/errors
+ALLOW yt/jaeger/plugin/cmd/agent -> vendor/github.com/pkg/errors
+ALLOW yt/jaeger/plugin/cmd/collector -> vendor/github.com/pkg/errors
 
 #
 # Permanent exceptions.
@@ -353,5 +467,9 @@ ALLOW yt/jaeger/plugin -> vendor/github.com/gogo
 
 # CONTRIB-1496 RTP/RTCP stack for Go. responsible: rmcf@
 ALLOW yabs/telephony/platform/internal/rtp -> vendor/github.com/wernerd/GoRTP
+
+# CONTRIB-1518 client for monkey-patched Apache Pulsar by TuyaInc. responsible: jock@
+ALLOW quasar/iot/adapters/tuya_adapter -> vendor/github.com/TuyaInc/tuya_pulsar_sdk_go
+ALLOW quasar/iot/adapters/tuya_adapter/server -> vendor/github.com/sirupsen/logrus
 
 DENY .* -> vendor/

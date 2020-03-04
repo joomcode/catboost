@@ -27,8 +27,11 @@ TVector<TVector<double>> CalcScoresForOneCandidate(
     const TCandidatesInfoList& candidate,
     const TCalcScoreFold& fold,
     const TFold& initialFold,
+    const TVector<TIndexType>& leafs,
     TLearnContext* ctx
 );
+
+double CalcScoreWithoutSplit(int leaf, const TFold& fold, const TLearnContext& ctx);
 
 template <typename TGetBucketStats, typename TUpdateSplitScore>
 inline void CalcScoresForLeaf(
@@ -156,6 +159,29 @@ inline void CalcScoresForLeaf(
 
                     binsBegin += binBounds.GetSize() + 1;
                 }
+            }
+        }
+            break;
+        case ESplitEnsembleType::FeaturesGroup:
+        {
+            int splitIdxOffset = 0;
+            int partStatsOffset = 0;
+            for (const auto& part : splitEnsembleSpec.FeaturesGroup.Parts) {
+                TBucketStats allStats{0, 0, 0, 0};
+                for (int statsIndex = partStatsOffset; statsIndex < partStatsOffset + static_cast<int>(part.BucketCount); ++statsIndex) {
+                    allStats.Add(getBucketStats(statsIndex));
+                }
+                TBucketStats trueStats{0, 0, 0, 0};
+                TBucketStats falseStats{0, 0, 0, 0};
+                trueStats = allStats;
+                for (int splitIdx = 0, statsIndex = partStatsOffset; splitIdx < static_cast<int>(part.BucketCount) - 1; ++splitIdx, ++statsIndex) {
+                    const TBucketStats& stats = getBucketStats(statsIndex);
+                    falseStats.Add(stats);
+                    trueStats.Remove(stats);
+                    updateSplitScore(trueStats, falseStats, splitIdxOffset + splitIdx);
+                }
+                splitIdxOffset += part.BucketCount - 1;
+                partStatsOffset += part.BucketCount;
             }
         }
             break;

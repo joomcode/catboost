@@ -6,10 +6,13 @@
 #include <catboost/libs/helpers/exception.h>
 
 #include <library/binsaver/bin_saver.h>
+#include <library/dbg_output/dump.h>
 
+#include <util/folder/path.h>
 #include <util/generic/guid.h>
 #include <util/generic/map.h>
 #include <util/generic/maybe.h>
+#include <util/generic/ptr.h>
 #include <util/generic/string.h>
 #include <util/generic/typetraits.h>
 #include <util/generic/vector.h>
@@ -19,6 +22,7 @@
 #include <util/system/spinlock.h>
 #include <util/system/tempfile.h>
 #include <util/system/types.h>
+#include <util/system/yassert.h>
 #include <util/ysaveload.h>
 
 
@@ -110,23 +114,56 @@ Y_DECLARE_PODTYPE(NCB::TValueWithCount);
 Y_DECLARE_PODTYPE(NCB::TCatFeaturePerfectHashDefaultValue);
 
 
+template <>
+struct TDumper<NCB::TValueWithCount> {
+    template <class S>
+    static inline void Dump(
+        S& s,
+        NCB::TValueWithCount valueWithCount
+    ) {
+        s << "{Value=" << valueWithCount.Value << ",Count=" << valueWithCount.Count << '}';
+    }
+};
+
+template <>
+struct TDumper<NCB::TCatFeaturePerfectHashDefaultValue> {
+    template <class S>
+    static inline void Dump(
+        S& s,
+        const NCB::TCatFeaturePerfectHashDefaultValue& catFeaturePerfectHashDefaultValue
+    ) {
+        s << "{SrcValue=" << catFeaturePerfectHashDefaultValue.SrcValue
+            << ",DstValueWithCount=" << DbgDump(catFeaturePerfectHashDefaultValue.DstValueWithCount)
+            << ",Fraction=" << catFeaturePerfectHashDefaultValue.Fraction << '}';
+    }
+};
+
+template <>
+struct TDumper<NCB::TCatFeaturePerfectHash> {
+    template <class S>
+    static inline void Dump(S& s, const NCB::TCatFeaturePerfectHash& catFeaturePerfectHash) {
+        s << "{DefaultMap=";
+        if (catFeaturePerfectHash.DefaultMap) {
+            s << DbgDump(*catFeaturePerfectHash.DefaultMap);
+        } else {
+            s << "None";
+        }
+        s << "Map=" << DbgDump(catFeaturePerfectHash.Map) << "}\n";
+    }
+};
+
+
 namespace NCB {
 
     class TCatFeaturesPerfectHash {
     public:
         // for IBinSaver
-        TCatFeaturesPerfectHash()
-            : StorageTempFile(TString::Join("cat_feature_index.", CreateGuidAsString(), ".tmp"))
-        {}
+        TCatFeaturesPerfectHash() = default;
 
-        TCatFeaturesPerfectHash(ui32 catFeatureCount, const TString& storageFile, bool allowWriteFiles)
-            : StorageTempFile(storageFile)
-            , CatFeatureUniqValuesCountsVector(catFeatureCount)
+        TCatFeaturesPerfectHash(ui32 catFeatureCount)
+            : CatFeatureUniqValuesCountsVector(catFeatureCount)
             , FeaturesPerfectHash(catFeatureCount)
-            , AllowWriteFiles(allowWriteFiles)
-        {
-            HasHashInRam = true;
-        }
+        {}
 
         ~TCatFeaturesPerfectHash() = default;
 
@@ -156,22 +193,22 @@ namespace NCB {
             return (size_t)*catFeatureIdx < CatFeatureUniqValuesCountsVector.size();
         }
 
-        void SetAllowWriteFiles(bool allowWriteFiles) {
-            AllowWriteFiles = allowWriteFiles;
-        }
-
-        void FreeRamIfPossible() const {
-            if (AllowWriteFiles) {
-                Save();
-                TVector<TCatFeaturePerfectHash> empty;
-                FeaturesPerfectHash.swap(empty);
-                HasHashInRam = false;
+        void FreeRam(const TString& tmpDir) const {
+            if (!StorageTempFile) {
+                StorageTempFile = MakeHolder<TTempFile>(
+                    JoinFsPaths(tmpDir, TString::Join("cat_feature_index.", CreateGuidAsString(), ".tmp"))
+                );
             }
+            Save();
+            TVector<TCatFeaturePerfectHash> empty;
+            FeaturesPerfectHash.swap(empty);
+            HasHashInRam = false;
         }
 
         void Load() const {
-            if (NFs::Exists(StorageTempFile.Name()) && !HasHashInRam) {
-                TIFStream inputStream(StorageTempFile.Name());
+            if (!HasHashInRam) {
+                Y_VERIFY(StorageTempFile);
+                TIFStream inputStream(StorageTempFile->Name());
                 FeaturesPerfectHash.clear();
                 ::Load(&inputStream, FeaturesPerfectHash);
                 HasHashInRam = true;
@@ -186,7 +223,8 @@ namespace NCB {
 
     private:
         void Save() const {
-            TOFStream out(StorageTempFile.Name());
+            Y_VERIFY(StorageTempFile);
+            TOFStream out(StorageTempFile->Name());
             ::Save(&out, FeaturesPerfectHash);
         }
 
@@ -202,10 +240,9 @@ namespace NCB {
         }
 
     private:
-        TTempFile StorageTempFile;
         TVector<TCatFeatureUniqueValuesCounts> CatFeatureUniqValuesCountsVector; // [catFeatureIdx]
         mutable TVector<TCatFeaturePerfectHash> FeaturesPerfectHash; // [catFeatureIdx]
         mutable bool HasHashInRam = true;
-        bool AllowWriteFiles = true;
+        mutable THolder<TTempFile> StorageTempFile;
     };
 }

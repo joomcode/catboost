@@ -17,6 +17,7 @@
 #include <util/string/builder.h>
 #include <util/system/compiler.h>
 
+#include <cmath>
 #include <functional>
 #include <utility>
 
@@ -24,16 +25,61 @@
 using namespace NCB;
 
 
-static void CheckRawTarget(TMaybeData<TConstArrayRef<TString>> rawTarget, ui32 objectCount) {
-    if (rawTarget) {
-        auto targetData = *rawTarget;
-        CheckDataSize(targetData.size(), (size_t)objectCount, "Target", false);
+static void CheckTarget(const TVector<TSharedVector<float>>& target, ui32 objectCount) {
+    for (auto i : xrange(target.size())) {
+        CheckDataSize(target[i]->size(), (size_t)objectCount, "Target[" + ToString(i) + "]", false);
+    }
+}
 
-        for (auto i : xrange(targetData.size())) {
-            CB_ENSURE(!targetData[i].empty(), "Target[" << i << "] is empty");
+
+static void CheckContainsOnlyIntegers(const ITypedSequence<float>& typedSequence) {
+    typedSequence.ForEach(
+        [] (float value) {
+            float integerPart;
+            CB_ENSURE_INTERNAL(
+                std::modf(value, &integerPart) == 0.0f,
+                "targetType is Integer but target values contain non-integer data"
+            );
+        }
+    );
+}
+
+
+static void CheckRawTarget(ERawTargetType targetType, const TVector<TRawTarget>& target, ui32 objectCount) {
+    CB_ENSURE_INTERNAL(
+        !target.empty() || (targetType == ERawTargetType::None),
+        "Target data is specified but targetType is None"
+    );
+
+    for (auto i : xrange(target.size())) {
+        if (const ITypedSequencePtr<float>* typedSequence = GetIf<ITypedSequencePtr<float>>(&target[i])) {
+            CB_ENSURE_INTERNAL(
+                (targetType == ERawTargetType::Float) || (targetType == ERawTargetType::Integer),
+                "target data contains float values but targetType is " << targetType
+            );
+            CheckDataSize(
+                (*typedSequence)->GetSize(),
+                objectCount,
+                "Target[" + ToString(i) + "]",
+                false
+            );
+            if (targetType == ERawTargetType::Integer) {
+                CheckContainsOnlyIntegers(**typedSequence);
+            }
+        } else {
+            CB_ENSURE_INTERNAL(
+                targetType == ERawTargetType::String,
+                "target data contains float values but targetType is " << targetType
+            );
+            const TVector<TString>& stringVector = Get<TVector<TString>>(target[i]);
+            CheckDataSize(stringVector.size(), (size_t)objectCount, "Target[" + ToString(i) + "]", false);
+            for (auto j : xrange(stringVector.size())) {
+                CB_ENSURE(!stringVector[j].empty(), "Target[" << i << ", " << j << "] is empty");
+            }
         }
     }
 }
+
 
 static void CheckOneBaseline(TConstArrayRef<float> baseline, size_t idx, ui32 objectCount) {
     CheckDataSize(
@@ -204,9 +250,52 @@ static void CheckGroupWeights(const TWeights<float>& groupWeights, const TObject
 }
 
 
+bool EqualAsFloatTarget(const ITypedSequencePtr<float>& lhs, const TVector<TString>& rhs) {
+    bool haveUnequalElements = false;
+    size_t i = 0;
+    lhs->ForEach(
+        [&] (float lhsElement) {
+            if (!FuzzyEquals(lhsElement, FromString<float>(rhs[i++]))) {
+                haveUnequalElements = true;
+            }
+        }
+    );
+    return !haveUnequalElements;
+}
+
+bool Equal(const TRawTarget& lhs, const TRawTarget& rhs) {
+    if (const ITypedSequencePtr<float>* lhsTypedSequence = GetIf<ITypedSequencePtr<float>>(&lhs)) {
+        if (const ITypedSequencePtr<float>* rhsTypedSequence = GetIf<ITypedSequencePtr<float>>(&rhs)) {
+            return (*lhsTypedSequence)->EqualTo(**rhsTypedSequence, /*strict*/ false);
+        } else {
+            return EqualAsFloatTarget(*lhsTypedSequence, Get<TVector<TString>>(rhs));
+        }
+    } else {
+        const TVector<TString>& lhsStringVector = Get<TVector<TString>>(lhs);
+        if (const TVector<TString>* rhsStringVector = GetIf<TVector<TString>>(&rhs)) {
+            return lhsStringVector == *rhsStringVector;
+        } else {
+            return EqualAsFloatTarget(Get<ITypedSequencePtr<float>>(rhs), lhsStringVector);
+        }
+    }
+}
+
+bool Equal(const TVector<TRawTarget>& lhs, const TVector<TRawTarget>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (auto i : xrange(lhs.size())) {
+        if (!Equal(lhs[i], rhs[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
 bool TRawTargetData::operator==(const TRawTargetData& rhs) const {
-    return (Target == rhs.Target) && (Baseline == rhs.Baseline) && (Weights == rhs.Weights) &&
-        (GroupWeights == rhs.GroupWeights) && EqualAsMultiSets(Pairs, rhs.Pairs);
+    return (TargetType == rhs.TargetType) && Equal(Target, rhs.Target) && (Baseline == rhs.Baseline) &&
+        (Weights == rhs.Weights) && (GroupWeights == rhs.GroupWeights) && EqualAsMultiSets(Pairs, rhs.Pairs);
 }
 
 
@@ -224,7 +313,7 @@ void TRawTargetData::Check(
 
     tasks.emplace_back(
         [&, this]() {
-            CheckRawTarget(Target, objectCount);
+            CheckRawTarget(TargetType, Target, objectCount);
         }
     );
 
@@ -258,7 +347,10 @@ void TRawTargetData::PrepareForInitialization(
     ui32 objectCount,
     ui32 prevTailSize
 ) {
-    NCB::PrepareForInitialization(metaInfo.HasTarget, objectCount, prevTailSize, &Target);
+    TargetType = metaInfo.TargetType;
+
+    // Target is properly initialized at the end of building
+    Target.resize(metaInfo.TargetCount);
 
     Baseline.resize(metaInfo.BaselineCount);
     for (auto& dim : Baseline) {
@@ -270,6 +362,25 @@ void TRawTargetData::PrepareForInitialization(
     SetTrivialWeights(objectCount);
 
     Pairs.clear();
+}
+
+
+ERawTargetType TRawTargetDataProvider::GetTargetType() const {
+    return Data.TargetType;
+}
+
+void TRawTargetDataProvider::GetNumericTarget(TArrayRef<TArrayRef<float>> dst) const {
+    CB_ENSURE(dst.size() == Data.Target.size());
+    for (auto targetIdx : xrange(Data.Target.size())) {
+        ToArray(*Get<ITypedSequencePtr<float>>(Data.Target[targetIdx]), dst[targetIdx]);
+    }
+}
+
+void TRawTargetDataProvider::GetStringTargetRef(TVector<TConstArrayRef<TString>>* dst) const {
+    dst->resize(Data.Target.size());
+    for (auto targetIdx : xrange(Data.Target.size())) {
+        (*dst)[targetIdx] = Get<TVector<TString>>(Data.Target[targetIdx]);
+    }
 }
 
 
@@ -298,6 +409,29 @@ void TRawTargetDataProvider::SetBaseline(TConstArrayRef<TConstArrayRef<float>> b
     Data.Baseline = std::move(newBaselineStorage);
 
     SetBaselineViewFromBaseline();
+}
+
+static void GetRawTargetSubset(
+    const TRawTarget& src,
+    const TArraySubsetIndexing<ui32>& subset,
+    NPar::TLocalExecutor* localExecutor,
+    TRawTarget* dst
+) {
+    if (const ITypedSequencePtr<float>* srcTypedSequence = GetIf<ITypedSequencePtr<float>>(&src)) {
+        ITypedArraySubsetPtr<float> typedArraySubset = (*srcTypedSequence)->GetSubset(&subset);
+        TVector<float> dstData;
+        dstData.yresize(subset.Size());
+        TArrayRef<float> dstDataRef = dstData;
+        typedArraySubset->ParallelForEach(
+            [dstDataRef] (ui32 idx, float value) { dstDataRef[idx] = value; },
+            localExecutor
+        );
+        (*dst) = (ITypedSequencePtr<float>)MakeIntrusive<TTypeCastArrayHolder<float, float>>(
+            std::move(dstData)
+        );
+    } else {
+        (*dst) = GetSubset<TString>(Get<TVector<TString>>(src), subset, localExecutor);
+    }
 }
 
 
@@ -362,18 +496,26 @@ TRawTargetDataProvider TRawTargetDataProvider::GetSubset(
     const TArraySubsetIndexing<ui32>& objectsSubsetIndexing = objectsGroupingSubset.GetObjectsIndexing();
 
     TRawTargetData subsetData;
+    subsetData.TargetType = Data.TargetType;
 
     TVector<std::function<void()>> tasks;
 
-    tasks.emplace_back(
-        [&, this]() {
-            subsetData.Target = GetSubsetOfMaybeEmpty<TString>(
-                GetTarget(),
-                objectsSubsetIndexing,
-                localExecutor
+    if (TMaybeData<TConstArrayRef<TRawTarget>> maybeTarget = GetTarget()) {
+        TConstArrayRef<TRawTarget> target = *maybeTarget;
+        subsetData.Target.resize(target.size());
+        for (auto targetIdx : xrange(target.size())) {
+            tasks.emplace_back(
+                [&, target, targetIdx]() {
+                    GetRawTargetSubset(
+                        target[targetIdx],
+                        objectsSubsetIndexing,
+                        localExecutor,
+                        &subsetData.Target[targetIdx]
+                    );
+                }
             );
         }
-    );
+    }
 
     tasks.emplace_back(
         [&, this]() {
@@ -495,7 +637,18 @@ bool TProcessedTargetData::operator==(const TProcessedTargetData& rhs) const {
     if (!compareHashMaps(
             Targets,
             rhs.Targets,
-            [](const auto& lhs, const auto& rhs) { return *lhs == *rhs; }))
+            [](const auto& lhs, const auto& rhs) {
+                if (lhs.size() != rhs.size()) {
+                    return false;
+                }
+                for (auto i : xrange(lhs.size())) {
+                    if (*(lhs[i]) != *(rhs[i])) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        ))
     {
         return false;
     }
@@ -548,7 +701,7 @@ void TProcessedTargetData::Check(const TObjectsGrouping& objectsGrouping) const 
     }
 
     for (const auto& [name, targetsData] : Targets) {
-        CheckDataSize(targetsData->size(), (size_t)objectCount, "Target " + name);
+        CheckTarget(targetsData, objectCount);
     }
     for (const auto& [name, weightsData] : Weights) {
         CheckDataSize(weightsData->GetSize(), objectCount, "Weights " + name);
@@ -591,8 +744,29 @@ void TProcessedTargetData::Load(IBinSaver* binSaver) {
     LoadMulti(binSaver, &cache);
 
     LoadMulti(binSaver, &TargetsClassCount);
-    LoadWithCache(cache.Targets, binSaver, &Targets);
     LoadWithCache(cache.Weights, binSaver, &Weights);
+
+    ui32 targetCount = 0;
+    LoadMulti(binSaver, &targetCount);
+    for (ui32 targetIdx : xrange(targetCount)) {
+        Y_UNUSED(targetIdx);
+
+        TString name;
+        ui32 dimensionCount;
+        LoadMulti(binSaver, &name, &dimensionCount);
+
+        TVector<TSharedVector<float>> target;
+        target.reserve(dimensionCount);
+        for (ui32 dimensionIdx : xrange(dimensionCount)) {
+            Y_UNUSED(dimensionIdx);
+
+            ui64 id;
+            LoadMulti(binSaver, &id);
+            target.push_back(cache.Targets.at(id));
+        }
+
+        Targets.emplace(name, std::move(target));
+    }
 
     ui32 baselineCount = 0;
     LoadMulti(binSaver, &baselineCount);
@@ -661,8 +835,18 @@ void TProcessedTargetData::Save(IBinSaver* binSaver) const {
         IBinSaver targetDataWithIdsBinSaver(out2, false);
 
         SaveMulti(&targetDataWithIdsBinSaver, TargetsClassCount);
-        SaveWithCache(Targets, &targetDataWithIdsBinSaver, &cache.Targets);
         SaveWithCache(Weights, &targetDataWithIdsBinSaver, &cache.Weights);
+
+        {
+            SaveMulti(&targetDataWithIdsBinSaver, SafeIntegerCast<ui32>(Targets.size()));
+            for (const auto& [name, dataPart] : Targets) {
+                const ui32 dimensionCount = dataPart.size();
+                SaveMulti(&targetDataWithIdsBinSaver, name, dimensionCount);
+                for (const auto& oneTarget : dataPart) {
+                    AddToCacheAndSaveId(oneTarget, &targetDataWithIdsBinSaver, &cache.Targets);
+                }
+            }
+        }
 
         {
             SaveMulti(&targetDataWithIdsBinSaver, SafeIntegerCast<ui32>(Baselines.size()));
@@ -705,6 +889,14 @@ TTargetDataProvider::TTargetDataProvider(
         }
         BaselineViews.emplace(name, std::move(baselineView));
     }
+
+    for (const auto& [name, targetData] : Data.Targets) {
+        TVector<TConstArrayRef<float>> targetView(targetData.size());
+        for (auto i : xrange(targetData.size())) {
+            targetView[i] = *(targetData[i]);
+        }
+        TargetViews.emplace(name, std::move(targetView));
+    }
 }
 
 bool TTargetDataProvider::operator==(const TTargetDataProvider& rhs) const {
@@ -712,7 +904,7 @@ bool TTargetDataProvider::operator==(const TTargetDataProvider& rhs) const {
 }
 
 
-void GetObjectsFloatDataSubsetImpl(
+static void GetObjectsFloatDataSubsetImpl(
     const TSharedVector<float> src,
     const TObjectsGroupingSubset& objectsGroupingSubset,
     NPar::TLocalExecutor* localExecutor,
@@ -724,7 +916,7 @@ void GetObjectsFloatDataSubsetImpl(
 }
 
 
-void GetObjectWeightsSubsetImpl(
+static void GetObjectWeightsSubsetImpl(
     const TSharedWeights<float> src,
     const TObjectsGroupingSubset& objectsGroupingSubset,
     NPar::TLocalExecutor* localExecutor,
@@ -849,6 +1041,7 @@ using TSrcToSubsetDataCache = TTargetSingleTypeDataCache<TSharedDataPtr, TShared
 
 struct TSubsetTargetDataCache {
     TSrcToSubsetDataCache<TSharedVector<float>> Targets;
+
     TSrcToSubsetDataCache<TSharedWeights<float>> Weights;
 
     // multidim baselines are stored as separate pointers for simplicity
@@ -958,7 +1151,9 @@ TIntrusivePtr<TTargetDataProvider> TTargetDataProvider::GetSubset(
     TSubsetTargetDataCache subsetTargetDataCache;
 
     for (const auto& [name, targetsData] : Data.Targets) {
-        subsetTargetDataCache.Targets.emplace(targetsData, TSharedVector<float>());
+        for (const auto& oneTarget : targetsData) {
+            subsetTargetDataCache.Targets.emplace(oneTarget, TSharedVector<float>());
+        }
     }
     for (const auto& [name, weightsData] : Data.Weights) {
         subsetTargetDataCache.Weights.emplace(weightsData, TSharedWeights<float>());
@@ -981,7 +1176,13 @@ TIntrusivePtr<TTargetDataProvider> TTargetDataProvider::GetSubset(
     subsetData.TargetsClassCount = Data.TargetsClassCount;
 
     for (const auto& [name, targetsData] : Data.Targets) {
-        subsetData.Targets.emplace(name, subsetTargetDataCache.Targets.at(targetsData));
+        TVector<TSharedVector<float>> subsetTargetData;
+
+        for (const auto& oneTarget : targetsData) {
+            subsetTargetData.emplace_back(subsetTargetDataCache.Targets.at(oneTarget));
+        }
+
+        subsetData.Targets.emplace(name, std::move(subsetTargetData));
     }
     for (const auto& [name, weightsData] : Data.Weights) {
         subsetData.Weights.emplace(name, subsetTargetDataCache.Weights.at(weightsData));
@@ -1024,5 +1225,3 @@ void TTargetSerialization::SaveNonSharedPart(
 ) {
     targetDataProvider.SaveDataNonSharedPart(binSaver);
 }
-
-

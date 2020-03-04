@@ -6,6 +6,8 @@
 #include <catboost/libs/data/ut/lib/for_loader.h>
 #include <catboost/libs/train_lib/train_model.h>
 
+#include <library/json/json_value.h>
+
 #include <util/string/builder.h>
 #include <util/folder/tempdir.h>
 
@@ -23,7 +25,8 @@ TFullModel TrainFloatCatboostModel(int iterations, int seed) {
     dataProviders.Learn = CreateDataProvider(
         [&] (IRawFeaturesOrderDataVisitor* visitor) {
             TDataMetaInfo metaInfo;
-            metaInfo.HasTarget = true;
+            metaInfo.TargetType = ERawTargetType::Float;
+            metaInfo.TargetCount = 1;
             metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                 factorCount,
                 TVector<ui32>{},
@@ -47,7 +50,7 @@ TFullModel TrainFloatCatboostModel(int iterations, int seed) {
             for (auto& val : vec) {
                 val = rng.GenRandReal1();
             }
-            visitor->AddTarget(vec);
+            visitor->AddTarget(MakeIntrusive<TTypeCastArrayHolder<float, float>>(std::move(vec)));
 
             visitor->Finish();
         }
@@ -105,10 +108,13 @@ TDataProviderPtr GetAdultPool() {
 
     TVector<THolder<TTempFile>> srcDataFiles;
     SaveSrcData(srcData, &readDatasetMainParams, &srcDataFiles);
-    TVector<TString> classNames;
+    TVector<NJson::TJsonValue> classLabels;
 
     return ReadDataset(
+        /*taskType*/Nothing(),
         readDatasetMainParams.PoolPath,
+        TPathWithScheme(),
+        TPathWithScheme(),
         TPathWithScheme(),
         TPathWithScheme(),
         TPathWithScheme(),
@@ -117,32 +123,80 @@ TDataProviderPtr GetAdultPool() {
         EObjectsOrder::Undefined,
         /*threadCount*/ 16,
         /*verbose*/true,
-        &classNames
+        &classLabels
+    );
+}
+
+TDataProviderPtr GetMultiClassPool() {
+    TSrcData srcData;
+    srcData.DatasetFileData = // Cloudness pool first 9 features
+        "0\t0\t1481112000\t1\t52.3699989319\t143.179992676\t1481112000\t41924.0\t0.545332845052\t1\n"
+        "1\t0\t1484784000\t1\t52.0999984741\t102.699996948\t1484784000\t41777.0\t9.84666646322\t1\n"
+        "2\t0\t1479567600\t1\t59.0166702271\t54.6500015259\t1479567600\t41493.0\t21.6433334351\t1\n"
+        "2\t0\t1486112400\t1\t53.3499984741\t75.4499969482\t1486112400\t40746.0\t17.0299997965\t1\n"
+        "2\t0\t1479772800\t1\t53.8824996948\t28.0307006836\t1479772800\t33919.0\t4.86871337891\t0\n"
+        "0\t0\t1481760000\t1\t48.2200012207\t46.7299995422\t1481760000\t49599.0\t6.11533330282\t0\n"
+        "2\t0\t1481878800\t1\t59.6500015259\t154.270004272\t1481878800\t41483.0\t22.2846669515\t0\n"
+        "1\t0\t1482742800\t1\t54.2999992371\t155.916671753\t1482742800\t41947.0\t22.3944447835\t0\n"
+        "2\t0\t1480431600\t1\t48.0666694641\t46.1166687012\t1480431600\t49598.0\t21.0744445801\t0\n"
+        "1\t0\t1484872200\t1\t56.3802986145\t85.2082977295\t1484872200\t33961.0\t8.68055318197\t0\n"
+        "2\t0\t1486090800\t1\t51.8699989319\t58.1800003052\t1486090800\t41961.0\t9.87866668701\t0\n"
+        "2\t0\t1485896400\t1\t58.5200004578\t58.8499984741\t1485896400\t41495.0\t3.92333323161\t0\n"
+        "0\t0\t1485653400\t1\t46.8886985779\t142.718002319\t1485653400\t33779.0\t13.514533488\t1\n"
+        "2\t0\t1482323400\t1\t55.9725990295\t37.4146003723\t1482323400\t34193.0\t17.4943066915\t0\n"
+        "1\t0\t1485066600\t1\t51.0222015381\t71.4669036865\t1485066600\t33632.0\t13.7644602458\t1\n"
+        "0\t0\t1480644000\t1\t55.3058013916\t61.5032997131\t1480644000\t34003.0\t9.10021998088\t0";
+
+    TStringBuilder cdOutput;
+    cdOutput << "0\tTarget\n" << "9\tCateg" << Endl;
+
+    TReadDatasetMainParams readDatasetMainParams;
+
+    TVector<THolder<TTempFile>> srcDataFiles;
+    SaveSrcData(srcData, &readDatasetMainParams, &srcDataFiles);
+    TVector<NJson::TJsonValue> classLabels;
+
+    return ReadDataset(
+        /*taskType*/Nothing(),
+        readDatasetMainParams.PoolPath,
+        TPathWithScheme(),
+        TPathWithScheme(),
+        TPathWithScheme(),
+        TPathWithScheme(),
+        TPathWithScheme(),
+        readDatasetMainParams.ColumnarPoolFormatParams,
+        /*ignoredFeatures*/ {},
+        EObjectsOrder::Undefined,
+        /*threadCount*/ 16,
+        /*verbose*/true,
+        &classLabels
     );
 }
 
 TFullModel SimpleFloatModel(size_t treeCount) {
     TFullModel model;
-    TObliviousTrees* trees = model.ObliviousTrees.GetMutable();
-    trees->FloatFeatures = {
-        TFloatFeature{
-            false, 0, 0,
-            {}, // bin splits 0, 1
-            ""
-        },
-        TFloatFeature{
-            false, 1, 1,
-            {0.5f}, // bin split 2
-            ""
-        },
-        TFloatFeature{
-            false, 2, 2,
-            {0.5f}, // bin split 3
-            ""
+    TModelTrees* trees = model.ModelTrees.GetMutable();
+    trees->SetFloatFeatures(
+        {
+            TFloatFeature{
+                false, 0, 0,
+                {}, // bin splits 0, 1
+                ""
+            },
+            TFloatFeature{
+                false, 1, 1,
+                {0.5f}, // bin split 2
+                ""
+            },
+            TFloatFeature{
+                false, 2, 2,
+                {0.5f}, // bin split 3
+                ""
+            }
         }
-    };
+    );
     for (auto i : xrange(301)) {
-        trees->FloatFeatures[0].Borders.push_back(-298.0f + i);
+        trees->AddFloatFeatureBorder(0, -298.0f + i);
     }
     {
         double tenPower = 1.0;
@@ -150,7 +204,7 @@ TFullModel SimpleFloatModel(size_t treeCount) {
             TVector<int> tree = {300, 301, 302};
             trees->AddBinTree(tree);
             for (int leafIndex = 0; leafIndex < 8; ++leafIndex) {
-                trees->LeafValues.push_back(leafIndex * tenPower);
+                trees->AddLeafValue(leafIndex * tenPower);
             }
             tenPower *= 10.0;
         }
@@ -231,7 +285,7 @@ TFullModel SimpleTextModel(
         }
     }
 
-    treeBuilder.Build(model.ObliviousTrees.GetMutable());
+    treeBuilder.Build(model.ModelTrees.GetMutable());
     model.UpdateDynamicData();
 
     return model;
@@ -239,13 +293,13 @@ TFullModel SimpleTextModel(
 
 TFullModel SimpleDeepTreeModel(size_t treeDepth) {
     TFullModel model;
-    TObliviousTrees* trees = model.ObliviousTrees.GetMutable();
+    TModelTrees* trees = model.ModelTrees.GetMutable();
     for (size_t featureIndex : xrange(treeDepth)) {
         const auto feature = TFloatFeature(false, featureIndex, featureIndex, {0.5f}, "");
-        trees->FloatFeatures.push_back(feature);
+        trees->AddFloatFeature(feature);
     }
     for (size_t val : xrange(1 << treeDepth)) {
-        trees->LeafValues.push_back(val);
+        trees->AddLeafValue(val);
     }
     TVector<int> tree = xrange(treeDepth);
     trees->AddBinTree(tree);
@@ -317,7 +371,7 @@ TFullModel SimpleAsymmetricModel() {
     builder.AddTree(std::move(treeHead));
 
     TFullModel model;
-    builder.Build(model.ObliviousTrees.GetMutable());
+    builder.Build(model.ModelTrees.GetMutable());
     model.UpdateDynamicData();
     return model;
 }
@@ -329,7 +383,8 @@ TFullModel TrainCatOnlyModel() {
     dataProviders.Learn = CreateDataProvider(
         [&] (IRawFeaturesOrderDataVisitor* visitor) {
             TDataMetaInfo metaInfo;
-            metaInfo.HasTarget = true;
+            metaInfo.TargetType = ERawTargetType::Float;
+            metaInfo.TargetCount = 1;
             metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                 (ui32)3,
                 TVector<ui32>{0, 1, 2},
@@ -342,7 +397,9 @@ TFullModel TrainCatOnlyModel() {
             visitor->AddCatFeature(1, TConstArrayRef<TStringBuf>{"d", "e", "f"});
             visitor->AddCatFeature(2, TConstArrayRef<TStringBuf>{"g", "h", "k"});
 
-            visitor->AddTarget({1.0f, 0.0f, 0.2f});
+            visitor->AddTarget(
+                MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{1.0f, 0.0f, 0.2f})
+            );
 
             visitor->Finish();
         }
@@ -373,29 +430,33 @@ TFullModel TrainCatOnlyModel() {
 
 TFullModel MultiValueFloatModel() {
     TFullModel model;
-    TObliviousTrees* trees = model.ObliviousTrees.GetMutable();
-    trees->FloatFeatures = {
-        TFloatFeature{
-            false, 0, 0,
-            {0.5f}, // bin split 0
-            ""
-        },
-        TFloatFeature{
-            false, 1, 1,
-            {0.5f}, // bin split 1
-            ""
+    TModelTrees* trees = model.ModelTrees.GetMutable();
+    trees->SetFloatFeatures(
+        {
+            TFloatFeature{
+                false, 0, 0,
+                {0.5f}, // bin split 0
+                ""
+            },
+            TFloatFeature{
+                false, 1, 1,
+                {0.5f}, // bin split 1
+                ""
+            }
         }
-    };
+    );
     {
         TVector<int> tree = {0, 1};
         trees->AddBinTree(tree);
-        trees->LeafValues = {
-            00., 10., 20.,
-            01., 11., 21.,
-            02., 12., 22.,
-            03., 13., 23.
-        };
-        trees->ApproxDimension = 3;
+        trees->SetLeafValues(
+            {
+                00., 10., 20.,
+                01., 11., 21.,
+                02., 12., 22.,
+                03., 13., 23.
+            }
+        );
+        trees->SetApproxDimension(3);
     }
     model.UpdateDynamicData();
     return model;

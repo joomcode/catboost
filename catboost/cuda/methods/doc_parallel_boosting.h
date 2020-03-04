@@ -149,7 +149,7 @@ namespace NCatboostCuda {
                     "You can't use boost_from_average with baseline now.");
                 cursors->StartingPoint = NCB::CalcOptimumConstApprox(
                     CatBoostOptions.LossFunctionDescription,
-                    DataProvider->TargetData->GetTarget().GetOrElse(TConstArrayRef<float>()),
+                    DataProvider->TargetData->GetOneDimensionalTarget().GetOrElse(TConstArrayRef<float>()),
                     GetWeights(*DataProvider->TargetData));
             }
 
@@ -168,8 +168,8 @@ namespace NCatboostCuda {
                     }
                     for (ui32 dim = 0; dim < approxDim; ++dim) {
                         TVector<float> baseline = loadBalancingPermutation.Gather(dataProviderBaseline[dim]);
-                        for (ui32 i = 0; i < baselineBias.size(); ++i) {
-                            baseline[i] -= baselineBias[i];
+                        for (ui32 j = 0; j < baselineBias.size(); ++j) {
+                            baseline[j] -= baselineBias[j];
                         }
                         CB_ENSURE(baseline.size() == cursors->Cursors[i].GetObjectsSlice().Size());
                         cursors->Cursors[i].ColumnView(dim).Write(baseline);
@@ -501,7 +501,7 @@ namespace NCatboostCuda {
                 cursors->BestTestCursor.Get()
             );
             auto& modelToExport = models[inputData->GetEstimationPermutation()];
-            modelToExport.ShiftFirstWeakModelValues(cursors->StartingPoint.GetOrElse(0.0f));
+            modelToExport.SetBias(cursors->StartingPoint.GetOrElse(0.0f));
             return new TResultModel(modelToExport);
         }
 
@@ -578,7 +578,7 @@ namespace NCatboostCuda {
                 outputOptions->SetMetricPeriod(1);
                 const auto trainDir = JoinFsPaths(
                     outputOptions->GetTrainDir(),
-                    ModelBasedEvalConfig.GetExperimentName(featureSetIdx, experimentIdx)
+                    NCatboostOptions::GetExperimentName(featureSetIdx, experimentIdx)
                 );
                 outputOptions->SetTrainDir(trainDir);
                 outputOptions->SetSnapshotFilename(catboostOptions->ModelBasedEvalOptions->BaselineModelSnapshot.Get());
@@ -589,6 +589,11 @@ namespace NCatboostCuda {
                     ignoredFeatures.erase(feature);
                 }
                 TBinarizedFeaturesManager featureManager(FeaturesManager, {ignoredFeatures.begin(), ignoredFeatures.end()});
+                if (featureManager.GetDataProviderFeatureIds().empty()) {
+                    CATBOOST_WARNING_LOG << "Feature set " << featureSetIdx
+                        << " is not evaluated because it consists of ignored or constant features" << Endl;
+                    continue;
+                }
                 auto inputData = CreateInputData(permutationCount, &featureManager);
                 auto weak = MakeWeakLearner<TWeakLearner>(featureManager, CatBoostOptions);
 

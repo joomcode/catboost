@@ -185,10 +185,13 @@ namespace {
 }
 
 class TZLibCompress::TImpl: public TAdditionalStorage<TImpl>, private TZLibCommon {
-    template <class T>
-    static inline T Type(T type) {
+    static inline ZLib::StreamType Type(ZLib::StreamType type) {
         if (type == ZLib::Auto) {
             return ZLib::ZLib;
+        }
+
+        if (type >= ZLib::Invalid) {
+            ythrow TZLibError() << "invalid compression type: " << static_cast<unsigned long>(type);
         }
 
         return type;
@@ -200,6 +203,13 @@ public:
     {
         if (deflateInit2(Z(), Min<size_t>(9, p.CompressionLevel), Z_DEFLATED, opts[Type(p.Type)], 8, Z_DEFAULT_STRATEGY)) {
             ythrow TZLibCompressorError() << "can not init inflate engine";
+        }
+
+        // Create exactly the same files on all platforms by fixing OS field in the header.
+        if (p.Type == ZLib::GZip) {
+            GZHeader_ = new gz_header{};
+            GZHeader_->os = 3; // UNIX
+            deflateSetHeader(Z(), GZHeader_.Get());
         }
 
         if (p.Dict.size()) {
@@ -302,6 +312,7 @@ private:
 
 private:
     IOutputStream* Stream_;
+    THolder<gz_header> GZHeader_;
 };
 
 TZLibDecompress::TZLibDecompress(IZeroCopyInput* input, ZLib::StreamType type, TStringBuf dict)

@@ -85,7 +85,7 @@ public:
     }
 
     void AddLeaf(int splitIdx, double leafApprox, const TBucketStats& leafStats) override {
-        Scores[splitIdx] += 2 * leafApprox * leafStats.SumWeightedDelta - leafApprox * leafApprox * leafStats.SumWeight;
+        Scores[splitIdx] += leafApprox * leafStats.SumWeightedDelta;
     }
 
     void AddLeafPlain(int splitIdx, const TBucketStats& leftStats, const TBucketStats& rightStats) override;
@@ -102,3 +102,14 @@ int CalcSplitsCount(
     int bucketCount,
     ui32 oneHotMaxSize
 );
+
+inline THolder<IPointwiseScoreCalcer> MakePointwiseScoreCalcer(EScoreFunction scoreFunction) {
+    switch(scoreFunction) {
+        case EScoreFunction::Cosine:
+            return MakeHolder<TCosineScoreCalcer>();
+        case EScoreFunction::L2:
+            return MakeHolder<TL2ScoreCalcer>();
+        default:
+            Y_UNREACHABLE();
+    }
+}

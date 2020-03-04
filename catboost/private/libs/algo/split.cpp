@@ -60,6 +60,7 @@ TModelSplit TSplit::GetModelSplit(
         split.OnlineCtr.Ctr.Shift = shift[Ctr.PriorIdx];
         split.OnlineCtr.Ctr.Scale = ctrInfo.BorderCount / norm[Ctr.PriorIdx];
         split.OnlineCtr.Border = EmulateUi8Rounding(BinBorder);
+        split.OnlineCtr.Canonize();
     }
     return split;
 }
@@ -69,7 +70,8 @@ int GetBucketCount(
     const TSplitEnsemble& splitEnsemble,
     const NCB::TQuantizedFeaturesInfo& quantizedFeaturesInfo,
     size_t packedBinaryFeaturesCount,
-    TConstArrayRef<NCB::TExclusiveFeaturesBundle> exclusiveFeaturesBundles
+    TConstArrayRef<NCB::TExclusiveFeaturesBundle> exclusiveFeaturesBundles,
+    TConstArrayRef<NCB::TFeaturesGroup> featuresGroups
 ) {
     switch (splitEnsemble.Type) {
         case ESplitEnsembleType::OneFeature:
@@ -103,5 +105,8 @@ int GetBucketCount(
             }
         case ESplitEnsembleType::ExclusiveBundle:
             return exclusiveFeaturesBundles[splitEnsemble.ExclusiveFeaturesBundleRef.BundleIdx].GetBinCount();
+        case ESplitEnsembleType::FeaturesGroup:
+            return featuresGroups[splitEnsemble.FeaturesGroupRef.GroupIdx].TotalBucketCount;
     }
+    Y_UNREACHABLE();
 }

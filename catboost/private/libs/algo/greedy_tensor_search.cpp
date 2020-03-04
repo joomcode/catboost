@@ -5,23 +5,27 @@
 #include "index_calcer.h"
 #include "leafwise_scoring.h"
 #include "learn_context.h"
+#include "monotonic_constraint_utils.h"
+#include "nonsymmetric_index_calcer.h"
 #include "scoring.h"
 #include "split.h"
 #include "tensor_search_helpers.h"
 #include "tree_print.h"
-#include "monotonic_constraint_utils.h"
 
 #include <catboost/libs/data/feature_index.h>
 #include <catboost/libs/data/packed_binary_features.h>
-#include <catboost/private/libs/distributed/master.h>
 #include <catboost/libs/helpers/interrupt.h>
 #include <catboost/libs/helpers/query_info_helper.h>
 #include <catboost/libs/helpers/parallel_tasks.h>
 #include <catboost/libs/logging/profile_info.h>
+#include <catboost/private/libs/algo_helpers/langevin_utils.h>
+#include <catboost/private/libs/distributed/master.h>
 
 #include <library/fast_log/fast_log.h>
 
 #include <util/generic/cast.h>
+#include <util/generic/queue.h>
+#include <util/generic/scope.h>
 #include <util/generic/xrange.h>
 #include <util/string/builder.h>
 #include <util/system/mem_info.h>
@@ -31,6 +35,24 @@ using namespace NCB;
 
 
 constexpr size_t MAX_ONLINE_CTR_FEATURES = 50;
+
+namespace {
+    struct TSplitLeafCandidate {
+        TIndexType Leaf;
+        double Gain;
+        TCandidateInfo BestCandidate;
+
+        TSplitLeafCandidate(TIndexType leaf, double gain, const TCandidateInfo& bestCandidate)
+            : Leaf(leaf)
+            , Gain(gain)
+            , BestCandidate(bestCandidate)
+        {}
+
+        bool operator<(const TSplitLeafCandidate& other) const {
+            return Gain < other.Gain;
+        }
+    };
+}
 
 void TrimOnlineCTRcache(const TVector<TFold*>& folds) {
     for (auto& fold : folds) {
@@ -87,6 +109,7 @@ static double CalcDerivativesStDevFromZero(
         case EBoostingType::Plain:
             return CalcDerivativesStDevFromZeroPlainBoosting(fold, localExecutor);
     }
+    Y_UNREACHABLE();
 }
 
 static double CalcDerivativesStDevFromZeroMultiplier(int learnSampleCount, double modelLength) {
@@ -168,9 +191,11 @@ static void CompressCandidates(
     auto& candList = candidatesContext->CandidateList;
     auto& selectedFeaturesInBundles = candidatesContext->SelectedFeaturesInBundles;
     auto& perBinaryPackMasks = candidatesContext->PerBinaryPackMasks;
+    auto& selectedFeaturesInGroups = candidatesContext->SelectedFeaturesInGroups;
 
     selectedFeaturesInBundles.assign(learnObjectsData.GetExclusiveFeatureBundlesSize(), TVector<ui32>());
     perBinaryPackMasks.assign(learnObjectsData.GetBinaryFeaturesPacksSize(), TBinaryFeaturesPack(0));
+    selectedFeaturesInGroups.assign(learnObjectsData.GetFeaturesGroupsSize(), TVector<ui32>());
 
     TCandidateList updatedCandList;
     updatedCandList.reserve(candList.size());
@@ -182,18 +207,22 @@ static void CompressCandidates(
 
         TMaybe<TExclusiveBundleIndex> maybeExclusiveBundleIndex;
         TMaybe<TPackedBinaryIndex> maybePackedBinaryIndex;
+        TMaybe<TFeaturesGroupIndex> maybeFeaturesGroupIndex;
 
         if (splitCandidate.Type == ESplitType::FloatFeature) {
             auto floatFeatureIdx = TFloatFeatureIdx(splitCandidate.FeatureIdx);
             maybeExclusiveBundleIndex = learnObjectsData.GetFeatureToExclusiveBundleIndex(floatFeatureIdx);
             maybePackedBinaryIndex = learnObjectsData.GetFeatureToPackedBinaryIndex(floatFeatureIdx);
+            maybeFeaturesGroupIndex = learnObjectsData.GetFeatureToFeaturesGroupIndex(floatFeatureIdx);
         } else {
             auto catFeatureIdx = TCatFeatureIdx(splitCandidate.FeatureIdx);
             maybeExclusiveBundleIndex = learnObjectsData.GetFeatureToExclusiveBundleIndex(catFeatureIdx);
             maybePackedBinaryIndex = learnObjectsData.GetFeatureToPackedBinaryIndex(catFeatureIdx);
         }
         CB_ENSURE_INTERNAL(
-            !maybeExclusiveBundleIndex || !maybePackedBinaryIndex,
+            maybeExclusiveBundleIndex.Defined()
+                + maybePackedBinaryIndex.Defined()
+                + maybeFeaturesGroupIndex.Defined() <= 1,
             "Feature #"
             << learnObjectsData.GetFeaturesLayout()->GetExternalFeatureIdx(
                 splitCandidate.FeatureIdx,
@@ -201,13 +230,17 @@ static void CompressCandidates(
                     EFeatureType::Float :
                     EFeatureType::Categorical
             )
-            << " is both in an exclusive bundle and in a binary pack");
+            << " is mis-included into more than one aggregated column");
 
         if (maybeExclusiveBundleIndex) {
             selectedFeaturesInBundles[maybeExclusiveBundleIndex->BundleIdx].push_back(
                 maybeExclusiveBundleIndex->InBundleIdx);
         } else if (maybePackedBinaryIndex) {
             MarkFeatureAsIncluded(*maybePackedBinaryIndex, &perBinaryPackMasks);
+        } else if (maybeFeaturesGroupIndex) {
+            selectedFeaturesInGroups[maybeFeaturesGroupIndex->GroupIdx].push_back(
+                maybeFeaturesGroupIndex->InGroupIdx
+            );
         } else {
             updatedCandList.push_back(std::move(candSubList));
         }
@@ -233,6 +266,19 @@ static void CompressCandidates(
         updatedCandList.emplace_back(TCandidatesInfoList(candidate));
     }
 
+    for (auto groupIdx : xrange(SafeIntegerCast<ui32>(selectedFeaturesInGroups.size()))) {
+        auto& group = selectedFeaturesInGroups[groupIdx];
+        if (group.empty()) {
+            continue;
+        }
+
+        Sort(group);
+
+        TCandidateInfo candidate;
+        candidate.SplitEnsemble = TSplitEnsemble{TFeaturesGroupRef{groupIdx}};
+        updatedCandList.emplace_back(TCandidatesInfoList(candidate));
+    }
+
     candList = std::move(updatedCandList);
 }
 
@@ -245,6 +291,7 @@ static void SelectCandidatesAndCleanupStatsFromPrevTree(
     auto& candList = candidatesContext->CandidateList;
     auto& selectedFeaturesInBundles = candidatesContext->SelectedFeaturesInBundles;
     auto& perBinaryPackMasks = candidatesContext->PerBinaryPackMasks;
+    auto& selectedFeaturesInGroups = candidatesContext->SelectedFeaturesInGroups;
 
     TCandidateList updatedCandList;
     updatedCandList.reserve(candList.size());
@@ -294,6 +341,24 @@ static void SelectCandidatesAndCleanupStatsFromPrevTree(
                     }
                     selectedFeaturesInBundle = std::move(filteredFeaturesInBundle);
                     addCandSubListToResult = !selectedFeaturesInBundle.empty();
+                }
+                break;
+            case ESplitEnsembleType::FeaturesGroup:
+                {
+                    TVector<ui32>& selectedFeaturesInGroup
+                        = selectedFeaturesInGroups[splitEnsemble.FeaturesGroupRef.GroupIdx];
+
+                    TVector<ui32> filteredFeaturesInGroup;
+                    filteredFeaturesInGroup.reserve(selectedFeaturesInGroup.size());
+                    for (auto inGroupIdx : selectedFeaturesInGroup) {
+                        const bool addToCandidates
+                            = ctx->LearnProgress->Rand.GenRandReal1() <= ctx->Params.ObliviousTreeOptions->Rsm;
+                        if (addToCandidates) {
+                            filteredFeaturesInGroup.push_back(inGroupIdx);
+                        }
+                    }
+                    selectedFeaturesInGroup = std::move(filteredFeaturesInGroup);
+                    addCandSubListToResult = !selectedFeaturesInGroup.empty();
                 }
                 break;
         }
@@ -418,8 +483,8 @@ static void AddTreeCtrs(
     binAndOneHotFeaturesTree.OneHotFeatures = currentTree.GetOneHotFeatures();
     seenProj.insert(binAndOneHotFeaturesTree);
 
-    for (const auto& ctrSplit : currentTree.GetCtrSplits()) {
-        seenProj.insert(ctrSplit.Projection);
+    for (const auto& ctr : currentTree.GetUsedCtrs()) {
+        seenProj.insert(ctr.Projection);
     }
 
     TSeenProjHash addedProjHash;
@@ -575,17 +640,7 @@ static void CalcBestScore(
                     if (IsPairwiseScoring(ctx->Params.LossFunctionDescription->GetLossFunction())) {
                         scoreCalcer.Reset(new TPairwiseScoreCalcer);
                     } else {
-                        switch (ctx->Params.ObliviousTreeOptions->ScoreFunction) {
-                            case EScoreFunction::Cosine:
-                                scoreCalcer.Reset(new TCosineScoreCalcer);
-                                break;
-                            case EScoreFunction::L2:
-                                scoreCalcer.Reset(new TL2ScoreCalcer);
-                                break;
-                            default:
-                                CB_ENSURE(false, "Error: score function for CPU should be Cosine or L2");
-                                break;
-                        }
+                        scoreCalcer = MakePointwiseScoreCalcer(ctx->Params.ObliviousTreeOptions->ScoreFunction);
                     }
 
                     CalcStatsAndScores(
@@ -642,35 +697,23 @@ static void DoBootstrap(const TVector<TIndexType>& indices, TFold* fold, TLearnC
             &ctx->LearnProgress->Rand,
             IsLeafwiseScoringApplicable(ctx->Params),
             leavesCount);
+        if (ctx->Params.BoostingOptions->Langevin) {
+            for (auto& bodyTail : fold->BodyTailArr) {
+                AddLangevinNoiseToDerivatives(
+                    ctx->Params.BoostingOptions->DiffusionTemperature,
+                    ctx->Params.BoostingOptions->LearningRate,
+                    ctx->LearnProgress->Rand.GenRand(),
+                    &bodyTail.WeightedDerivatives,
+                    ctx->LocalExecutor
+                );
+            }
+        }
     }
-}
-
-static void CalcBestScoreForOneCandidate(
-    const TTrainingForCPUDataProviders& data,
-    ui64 randSeed,
-    double scoreStDev,
-    const TCandidatesContext& candidatesContext,
-    TCandidatesInfoList* candidate,
-    TFold* fold,
-    TLearnContext* ctx
-) {
-    auto candidateScores = CalcScoresForOneCandidate(
-        *data.Learn->ObjectsData,
-        *candidate,
-        ctx->SampledDocs,
-        *fold,
-        ctx);
-
-    SetBestScore(
-        randSeed,
-        candidateScores,
-        scoreStDev,
-        candidatesContext,
-        &candidate->Candidates);
 }
 
 static void CalcBestScoreLeafwise(
     const TTrainingForCPUDataProviders& data,
+    const TVector<TIndexType>& leafs,
     ui64 randSeed,
     double scoreStDev,
     TCandidatesContext* candidatesContext,
@@ -698,14 +741,20 @@ static void CalcBestScoreLeafwise(
                 }
             }
 
-            CalcBestScoreForOneCandidate(
-                data,
+            const auto candidateScores = CalcScoresForOneCandidate(
+                *data.Learn->ObjectsData,
+                candidate,
+                ctx->SampledDocs,
+                *fold,
+                leafs,
+                ctx);
+
+            SetBestScore(
                 randSeed + candId,
+                candidateScores,
                 scoreStDev,
                 *candidatesContext,
-                &candidate,
-                fold,
-                ctx);
+                &candidate.Candidates);
 
             if (splitEnsemble.IsSplitOfType(ESplitType::OnlineCtr) && candidate.ShouldDropCtrAfterCalc) {
                 fold->GetCtrRef(splitEnsemble.SplitCandidate.Ctr.Projection).Feature.clear();
@@ -716,19 +765,28 @@ static void CalcBestScoreLeafwise(
         NPar::TLocalExecutor::WAIT_COMPLETE);
 }
 
+static double CalcScoreStDev(
+    ui32 learnSampleCount,
+    double modelLength,
+    const TFold& fold,
+    TLearnContext* ctx) {
+
+    const double derivativesStDevFromZero = ctx->Params.SystemOptions->IsSingleHost()
+        ? CalcDerivativesStDevFromZero(fold, ctx->Params.BoostingOptions->BoostingType, ctx->LocalExecutor)
+        : MapCalcDerivativesStDevFromZero(learnSampleCount, ctx);
+    return ctx->Params.ObliviousTreeOptions->RandomStrength
+        * derivativesStDevFromZero
+        * CalcDerivativesStDevFromZeroMultiplier(learnSampleCount, modelLength);
+}
+
 static void CalcScores(
     const TTrainingForCPUDataProviders& data,
     const TSplitTree& currentSplitTree,
-    const double modelLength,
+    const double scoreStDev,
     TCandidatesContext* candidatesContext,
     TFold* fold,
     TLearnContext* ctx) {
 
-    ui32 learnSampleCount = data.Learn->ObjectsData->GetObjectCount();
-    const auto scoreStDev =
-        ctx->Params.ObliviousTreeOptions->RandomStrength
-        * CalcDerivativesStDevFromZero(*fold, ctx->Params.BoostingOptions->BoostingType, ctx->LocalExecutor)
-        * CalcDerivativesStDevFromZeroMultiplier(learnSampleCount, modelLength);
     if (!ctx->Params.SystemOptions->IsSingleHost()) {
         if (IsPairwiseScoring(ctx->Params.LossFunctionDescription->GetLossFunction())) {
             MapRemotePairwiseCalcScore(scoreStDev, candidatesContext, ctx);
@@ -740,6 +798,7 @@ static void CalcScores(
         if (IsLeafwiseScoringApplicable(ctx->Params)) {
             CalcBestScoreLeafwise(
                 data,
+                xrange(ctx->SampledDocs.LeavesCount),
                 randSeed,
                 scoreStDev,
                 candidatesContext,
@@ -792,89 +851,112 @@ static void SelectBestCandidate(
     }
 }
 
-void GreedyTensorSearch(
+static TCandidatesContext SelectFeaturesForScoring(
+    const TTrainingForCPUDataProviders& data,
+    const TMaybe<TSplitTree>& currentSplitTree,
+    TFold* fold,
+    TLearnContext* ctx
+) {
+    TCandidatesContext candidatesContext;
+    candidatesContext.OneHotMaxSize = ctx->Params.CatFeatureParams->OneHotMaxSize;
+    candidatesContext.BundlesMetaData = data.Learn->ObjectsData->GetExclusiveFeatureBundlesMetaData();
+    candidatesContext.FeaturesGroupsMetaData = data.Learn->ObjectsData->GetFeaturesGroupsMetaData();
+
+    AddFloatFeatures(*data.Learn->ObjectsData, &candidatesContext.CandidateList);
+    AddOneHotFeatures(*data.Learn->ObjectsData, ctx, &candidatesContext.CandidateList);
+    CompressCandidates(*data.Learn->ObjectsData, &candidatesContext);
+    SelectCandidatesAndCleanupStatsFromPrevTree(ctx, &candidatesContext, &ctx->PrevTreeLevelStats);
+
+    AddSimpleCtrs(*data.Learn->ObjectsData, fold, ctx, &ctx->PrevTreeLevelStats, &candidatesContext.CandidateList);
+
+    if (currentSplitTree.Defined()) {
+        AddTreeCtrs(
+            *data.Learn->ObjectsData,
+            currentSplitTree.GetRef(),
+            fold,
+            ctx,
+            &ctx->PrevTreeLevelStats,
+            &candidatesContext.CandidateList);
+    }
+
+    const auto isInCache =
+        [fold](const TProjection& proj) -> bool { return fold->GetCtrRef(proj).Feature.empty(); };
+    const auto cpuUsedRamLimit = ParseMemorySizeDescription(ctx->Params.SystemOptions->CpuUsedRamLimit.Get());
+    const ui32 learnSampleCount = data.Learn->ObjectsData->GetObjectCount();
+    const ui32 testSampleCount = data.GetTestSampleCount();
+    SelectCtrsToDropAfterCalc(
+        cpuUsedRamLimit,
+        learnSampleCount + testSampleCount,
+        ctx->Params.SystemOptions->NumThreads,
+        isInCache,
+        &candidatesContext.CandidateList);
+
+    return candidatesContext;
+}
+
+static size_t CalcMaxFeatureValueCount(const TFold& fold, const TCandidatesContext& candidatesContext) {
+    size_t maxFeatureValueCount = 1;
+    for (const auto& candidate : candidatesContext.CandidateList) {
+        const auto& splitEnsemble = candidate.Candidates[0].SplitEnsemble;
+        if (splitEnsemble.IsSplitOfType(ESplitType::OnlineCtr)) {
+            const auto& proj = splitEnsemble.SplitCandidate.Ctr.Projection;
+            maxFeatureValueCount = Max(
+                maxFeatureValueCount,
+                fold.GetCtr(proj).GetMaxUniqueValueCount());
+        }
+    }
+    return maxFeatureValueCount;
+}
+
+static void ProcessCtrSplit(
+    const TTrainingForCPUDataProviders& data,
+    const TSplit& bestSplit,
+    TFold* fold,
+    TLearnContext* ctx) {
+
+    const auto& ctr = bestSplit.Ctr;
+
+    const ECtrType ctrType = ctx->CtrsHelper.GetCtrInfo(ctr.Projection)[ctr.CtrIdx].Type;
+    ctx->LearnProgress->UsedCtrSplits.insert(std::make_pair(ctrType, ctr.Projection));
+
+    const auto& proj = bestSplit.Ctr.Projection;
+    if (fold->GetCtrRef(proj).Feature.empty()) {
+        ComputeOnlineCTRs(data, *fold, proj, ctx, &fold->GetCtrRef(proj));
+        if (ctx->UseTreeLevelCaching()) {
+            DropStatsForProjection(*fold, *ctx, proj, &ctx->PrevTreeLevelStats);
+        }
+    }
+}
+
+static TSplitTree GreedyTensorSearchOblivious(
     const TTrainingForCPUDataProviders& data,
     double modelLength,
     TProfileInfo& profile,
+    TVector<TIndexType>* indices,
     TFold* fold,
-    TLearnContext* ctx,
-    TSplitTree* resSplitTree) {
+    TLearnContext* ctx) {
 
     TSplitTree currentSplitTree;
-    TrimOnlineCTRcache({fold});
 
-    ui32 learnSampleCount = data.Learn->ObjectsData->GetObjectCount();
-    ui32 testSampleCount = data.GetTestSampleCount();
-    TVector<TIndexType> indices(learnSampleCount); // always for all documents
     CATBOOST_INFO_LOG << "\n";
 
     const bool useLeafwiseScoring = IsLeafwiseScoringApplicable(ctx->Params);
-
-    if (!ctx->Params.SystemOptions->IsSingleHost()) {
-        MapTensorSearchStart(ctx);
-    }
-
     const bool isSamplingPerTree = IsSamplingPerTree(ctx->Params.ObliviousTreeOptions);
-    if (isSamplingPerTree) {
-        DoBootstrap(indices, fold, ctx, /* leavesCount */ 1);
-        if (ctx->UseTreeLevelCaching()) {
-            ctx->PrevTreeLevelStats.GarbageCollect();
-        }
-    }
+    const ui32 learnSampleCount = data.Learn->ObjectsData->GetObjectCount();
+    const double scoreStDev = CalcScoreStDev(learnSampleCount, modelLength, *fold, ctx);
 
     for (ui32 curDepth = 0; curDepth < ctx->Params.ObliviousTreeOptions->MaxDepth; ++curDepth) {
-        TCandidatesContext candidatesContext;
-        candidatesContext.OneHotMaxSize = ctx->Params.CatFeatureParams->OneHotMaxSize;
-        candidatesContext.BundlesMetaData = data.Learn->ObjectsData->GetExclusiveFeatureBundlesMetaData();
-
-        AddFloatFeatures(*data.Learn->ObjectsData, &candidatesContext.CandidateList);
-        AddOneHotFeatures(*data.Learn->ObjectsData, ctx, &candidatesContext.CandidateList);
-        CompressCandidates(*data.Learn->ObjectsData, &candidatesContext);
-        SelectCandidatesAndCleanupStatsFromPrevTree(ctx, &candidatesContext, &ctx->PrevTreeLevelStats);
-
-        AddSimpleCtrs(
-            *data.Learn->ObjectsData,
-            fold,
-            ctx,
-            &ctx->PrevTreeLevelStats,
-            &candidatesContext.CandidateList);
-        AddTreeCtrs(
-            *data.Learn->ObjectsData,
-            currentSplitTree,
-            fold,
-            ctx,
-            &ctx->PrevTreeLevelStats,
-            &candidatesContext.CandidateList);
-
-        auto isInCache =
-            [&fold](const TProjection& proj) -> bool { return fold->GetCtrRef(proj).Feature.empty(); };
-        auto cpuUsedRamLimit = ParseMemorySizeDescription(ctx->Params.SystemOptions->CpuUsedRamLimit.Get());
-        SelectCtrsToDropAfterCalc(
-            cpuUsedRamLimit,
-            learnSampleCount + testSampleCount,
-            ctx->Params.SystemOptions->NumThreads,
-            isInCache,
-            &candidatesContext.CandidateList);
-
+        TCandidatesContext candidatesContext = SelectFeaturesForScoring(data, currentSplitTree, fold, ctx);
         CheckInterrupted(); // check after long-lasting operation
 
         if (!isSamplingPerTree) {  // sampling per tree level
-            DoBootstrap(indices, fold, ctx, /* leavesCount */ 1u << curDepth);
+            DoBootstrap(*indices, fold, ctx, /* leavesCount */ 1u << curDepth);
         }
         profile.AddOperation(TStringBuilder() << "Bootstrap, depth " << curDepth);
 
-        CalcScores(data, currentSplitTree, modelLength, &candidatesContext, fold, ctx);
+        CalcScores(data, currentSplitTree, scoreStDev, &candidatesContext, fold, ctx);
 
-        size_t maxFeatureValueCount = 1;
-        for (const auto& candidate : candidatesContext.CandidateList) {
-            const auto& splitEnsemble = candidate.Candidates[0].SplitEnsemble;
-            if (splitEnsemble.IsSplitOfType(ESplitType::OnlineCtr)) {
-                const auto& proj = splitEnsemble.SplitCandidate.Ctr.Projection;
-                maxFeatureValueCount = Max(
-                    maxFeatureValueCount,
-                    fold->GetCtrRef(proj).GetMaxUniqueValueCount());
-            }
-        }
+        const size_t maxFeatureValueCount = CalcMaxFeatureValueCount(*fold, candidatesContext);
 
         fold->DropEmptyCTRs();
         CheckInterrupted(); // check after long-lasting operation
@@ -888,25 +970,12 @@ void GreedyTensorSearch(
         }
         Y_ASSERT(bestSplitCandidate != nullptr);
 
-        const auto& bestSplitEnsemble = bestSplitCandidate->SplitEnsemble;
-        if (bestSplitEnsemble.IsSplitOfType(ESplitType::OnlineCtr)) {
-            const auto& ctr = bestSplitEnsemble.SplitCandidate.Ctr;
-
-            ECtrType ctrType = ctx->CtrsHelper.GetCtrInfo(ctr.Projection)[ctr.CtrIdx].Type;
-            ctx->LearnProgress->UsedCtrSplits.insert(std::make_pair(ctrType, ctr.Projection));
-        }
-        TSplit bestSplit = bestSplitCandidate->GetBestSplit(
+        const TSplit bestSplit = bestSplitCandidate->GetBestSplit(
             *data.Learn->ObjectsData,
             candidatesContext.OneHotMaxSize);
 
         if (bestSplit.Type == ESplitType::OnlineCtr) {
-            const auto& proj = bestSplit.Ctr.Projection;
-            if (fold->GetCtrRef(proj).Feature.empty()) {
-                ComputeOnlineCTRs(data, *fold, proj, ctx, &fold->GetCtrRef(proj));
-                if (ctx->UseTreeLevelCaching()) {
-                    DropStatsForProjection(*fold, *ctx, proj, &ctx->PrevTreeLevelStats);
-                }
-            }
+            ProcessCtrSplit(data, bestSplit, fold, ctx);
         }
 
         if (ctx->Params.SystemOptions->IsSingleHost()) {
@@ -915,13 +984,13 @@ void GreedyTensorSearch(
                 *data.Learn->ObjectsData,
                 curDepth + 1,
                 *fold,
-                &indices,
+                indices,
                 ctx->LocalExecutor);
             if (isSamplingPerTree) {
                 if (useLeafwiseScoring) {
-                    ctx->SampledDocs.UpdateIndicesInLeafwiseSortedFold(indices, ctx->LocalExecutor);
+                    ctx->SampledDocs.UpdateIndicesInLeafwiseSortedFold(*indices, ctx->LocalExecutor);
                 } else {
-                    ctx->SampledDocs.UpdateIndices(indices, ctx->LocalExecutor);
+                    ctx->SampledDocs.UpdateIndices(*indices, ctx->LocalExecutor);
                 }
                 if (ctx->UseTreeLevelCaching() && !useLeafwiseScoring) {
                     ctx->SmallestSplitSideDocs.SelectSmallestSplitSide(
@@ -941,7 +1010,7 @@ void GreedyTensorSearch(
 
         int redundantIdx = -1;
         if (ctx->Params.SystemOptions->IsSingleHost()) {
-            redundantIdx = GetRedundantSplitIdx(GetIsLeafEmpty(curDepth + 1, indices));
+            redundantIdx = GetRedundantSplitIdx(GetIsLeafEmpty(curDepth + 1, *indices));
         } else {
             redundantIdx = MapGetRedundantSplitIdx(ctx);
         }
@@ -951,5 +1020,278 @@ void GreedyTensorSearch(
             break;
         }
     }
-    *resSplitTree = std::move(currentSplitTree);
+    return currentSplitTree;
+}
+
+
+static void SplitDocsSubset(
+    const TIndexedSubset<ui32>& subsetToSplit,
+    TConstArrayRef<TIndexType> indices,
+    TIndexType leftChildIdx,
+    TIndexedSubset<ui32>* leftChildSubset,
+    TIndexedSubset<ui32>* rightChildSubset) {
+
+    // TODO(ilyzhin) it can be parallel
+    for (auto doc : subsetToSplit) {
+        if (indices[doc] == leftChildIdx) {
+            leftChildSubset->push_back(doc);
+        } else{
+            rightChildSubset->push_back(doc);
+        }
+    }
+}
+
+static TNonSymmetricTreeStructure GreedyTensorSearchLossguide(
+    const TTrainingForCPUDataProviders& data,
+    double modelLength,
+    TProfileInfo& profile,
+    TVector<TIndexType>* indices,
+    TFold* fold,
+    TLearnContext* ctx) {
+
+    Y_ASSERT(IsSamplingPerTree(ctx->Params.ObliviousTreeOptions));
+
+    TNonSymmetricTreeStructure currentStructure;
+
+    const ui32 learnSampleCount = data.Learn->ObjectsData->GetObjectCount();
+    TArrayRef<TIndexType> indicesRef(*indices);
+
+    const double scoreStDev = CalcScoreStDev(learnSampleCount, modelLength, *fold, ctx);
+
+    TPriorityQueue<TSplitLeafCandidate> queue;
+    TVector<ui32> leafDepth(ctx->Params.ObliviousTreeOptions->MaxLeaves);
+    const auto findBestCandidate = [&](TIndexType leaf) {
+        Y_DEFER { profile.AddOperation(TStringBuilder() << "Find best candidate for leaf " << leaf); };
+        const auto leafBounds = ctx->SampledDocs.LeavesBounds[leaf];
+        const bool needSplit = leafDepth[leaf] < ctx->Params.ObliviousTreeOptions->MaxDepth
+            && leafBounds.GetSize() >= ctx->Params.ObliviousTreeOptions->MinDataInLeaf;
+        if (!needSplit) {
+            return;
+        }
+        auto candidatesContext = SelectFeaturesForScoring(data, {}, fold, ctx);
+        CalcBestScoreLeafwise(data, {leaf}, ctx->LearnProgress->Rand.GenRand(), scoreStDev, &candidatesContext, fold, ctx);
+        const size_t maxFeatureValueCount = CalcMaxFeatureValueCount(*fold, candidatesContext);
+        fold->DropEmptyCTRs();
+        CheckInterrupted(); // check after long-lasting operation
+
+        double bestScore = MINIMAL_SCORE;
+        const TCandidateInfo* bestSplitCandidate = nullptr;
+        SelectBestCandidate(*ctx, candidatesContext, maxFeatureValueCount, fold, &bestScore, &bestSplitCandidate);
+        if (bestSplitCandidate == nullptr) {
+            return;
+        }
+        const double scoreBeforeSplit = CalcScoreWithoutSplit(leaf, *fold, *ctx);
+        const double gain = bestScore - scoreBeforeSplit;
+        CATBOOST_DEBUG_LOG << "Best gain for leaf #" << leaf << " = " << gain << Endl;
+        if (gain < 1e-9) {
+            return;
+        }
+        queue.emplace(leaf, gain, *bestSplitCandidate);
+    };
+    findBestCandidate(0);
+
+    TVector<TIndexedSubset<ui32>> subsetsForLeafs(ctx->Params.ObliviousTreeOptions->MaxLeaves);
+    subsetsForLeafs[0] = xrange(learnSampleCount).operator TIndexedSubset<ui32>();
+
+    while (!queue.empty() && currentStructure.GetLeafCount() < ctx->Params.ObliviousTreeOptions->MaxLeaves) {
+        const TSplitLeafCandidate curSplitLeaf = queue.top();
+        queue.pop();
+
+        const TSplit bestSplit = curSplitLeaf.BestCandidate.GetBestSplit(
+            *data.Learn->ObjectsData,
+            ctx->Params.CatFeatureParams->OneHotMaxSize);
+        if (bestSplit.Type == ESplitType::OnlineCtr) {
+            ProcessCtrSplit(data, bestSplit, fold, ctx);
+        }
+        const auto& node = currentStructure.AddSplit(bestSplit, curSplitLeaf.Leaf);
+        const TIndexType splittedNodeIdx = curSplitLeaf.Leaf;
+        const TIndexType leftChildIdx = ~node.Left;
+        const TIndexType rightChildIdx = ~node.Right;
+        UpdateIndices(
+            node,
+            *data.Learn->ObjectsData,
+            subsetsForLeafs[splittedNodeIdx],
+            *fold,
+            ctx->LocalExecutor,
+            indicesRef
+        );
+
+        TIndexedSubset<ui32> leftChildSubset, rightChildSubset;
+        Y_ASSERT(leftChildIdx == splittedNodeIdx);
+        SplitDocsSubset(subsetsForLeafs[splittedNodeIdx], indicesRef, leftChildIdx, &leftChildSubset, &rightChildSubset);
+        subsetsForLeafs[leftChildIdx] = std::move(leftChildSubset);
+        subsetsForLeafs[rightChildIdx] = std::move(rightChildSubset);
+
+        ctx->SampledDocs.UpdateIndicesInLeafwiseSortedFoldForSingleLeaf(
+            splittedNodeIdx,
+            leftChildIdx,
+            rightChildIdx,
+            *indices,
+            ctx->LocalExecutor);
+        const int newDepth = leafDepth[splittedNodeIdx] + 1;
+        leafDepth[leftChildIdx] = newDepth;
+        leafDepth[rightChildIdx] = newDepth;
+        CATBOOST_DEBUG_LOG << "For node #" << splittedNodeIdx << " built childs: " << leftChildIdx << " and " << rightChildIdx
+            << "with split: " << BuildDescription(*ctx->Layout, bestSplit) << " and score = " << curSplitLeaf.Gain << Endl;
+        findBestCandidate(leftChildIdx);
+        findBestCandidate(rightChildIdx);
+    }
+
+    return currentStructure;
+}
+
+
+static TNonSymmetricTreeStructure GreedyTensorSearchDepthwise(
+    const TTrainingForCPUDataProviders& data,
+    double modelLength,
+    TProfileInfo& profile,
+    TVector<TIndexType>* indices,
+    TFold* fold,
+    TLearnContext* ctx) {
+
+    TNonSymmetricTreeStructure currentStructure;
+
+    const ui32 learnSampleCount = data.Learn->ObjectsData->GetObjectCount();
+    TArrayRef<TIndexType> indicesRef(*indices);
+
+    const double scoreStDev = CalcScoreStDev(learnSampleCount, modelLength, *fold, ctx);
+
+    TVector<TIndexedSubset<ui32>> subsetsForLeafs(1 << ctx->Params.ObliviousTreeOptions->MaxDepth);
+    subsetsForLeafs[0] = xrange(learnSampleCount).operator TIndexedSubset<ui32>();
+
+    const bool isSamplingPerTree = IsSamplingPerTree(ctx->Params.ObliviousTreeOptions);
+
+    TVector<TIndexType> curLevelLeafs = {0};
+    for (ui32 curDepth = 0; curDepth < ctx->Params.ObliviousTreeOptions->MaxDepth; ++curDepth) {
+        TCandidatesContext candidatesContext = SelectFeaturesForScoring(data, {}, fold, ctx);
+        CheckInterrupted(); // check after long-lasting operation
+
+        if (!isSamplingPerTree) {  // sampling per tree level
+            DoBootstrap(*indices, fold, ctx, currentStructure.GetLeafCount());
+        }
+        profile.AddOperation(TStringBuilder() << "Bootstrap, depth " << curDepth);
+
+        TVector<TIndexType> splittedLeafs;
+        TVector<TIndexType> nextLevelLeafs;
+        const size_t maxFeatureValueCount = CalcMaxFeatureValueCount(*fold, candidatesContext);
+        for (TIndexType leafToSplit : curLevelLeafs) {
+            const auto& leafBounds = ctx->SampledDocs.LeavesBounds[leafToSplit];
+            if (leafBounds.GetSize() < ctx->Params.ObliviousTreeOptions->MinDataInLeaf) {
+                continue;
+            }
+            CalcBestScoreLeafwise(data, {leafToSplit}, ctx->LearnProgress->Rand.GenRand(), scoreStDev, &candidatesContext, fold, ctx);
+
+            double bestScore = MINIMAL_SCORE;
+            const TCandidateInfo* bestSplitCandidate = nullptr;
+            SelectBestCandidate(*ctx, candidatesContext, maxFeatureValueCount, fold, &bestScore, &bestSplitCandidate);
+            if (bestSplitCandidate == nullptr) {
+                continue;
+            }
+            const double scoreBeforeSplit = CalcScoreWithoutSplit(leafToSplit, *fold, *ctx);
+            const double gain = bestScore - scoreBeforeSplit;
+            if (gain < 1e-9) {
+                continue;
+            }
+            const TSplit bestSplit = bestSplitCandidate->GetBestSplit(
+                *data.Learn->ObjectsData,
+                ctx->Params.CatFeatureParams->OneHotMaxSize);
+            if (bestSplit.Type == ESplitType::OnlineCtr) {
+                ProcessCtrSplit(data, bestSplit, fold, ctx);
+            }
+            const auto& node = currentStructure.AddSplit(bestSplit, leafToSplit);
+            const TIndexType leftChildIdx = ~node.Left;
+            const TIndexType rightChildIdx = ~node.Right;
+            splittedLeafs.push_back(leafToSplit);
+            nextLevelLeafs.push_back(leftChildIdx);
+            nextLevelLeafs.push_back(rightChildIdx);
+
+            UpdateIndices(
+                node,
+                *data.Learn->ObjectsData,
+                subsetsForLeafs[leafToSplit],
+                *fold,
+                ctx->LocalExecutor,
+                indicesRef
+            );
+
+            TIndexedSubset<ui32> leftChildSubset, rightChildSubset;
+            Y_ASSERT(leftChildIdx == leafToSplit);
+            SplitDocsSubset(subsetsForLeafs[leafToSplit], indicesRef, leftChildIdx, &leftChildSubset, &rightChildSubset);
+            subsetsForLeafs[leftChildIdx] = std::move(leftChildSubset);
+            subsetsForLeafs[rightChildIdx] = std::move(rightChildSubset);
+        }
+        if (isSamplingPerTree) {
+            ctx->SampledDocs.UpdateIndicesInLeafwiseSortedFold(
+                splittedLeafs,
+                nextLevelLeafs,
+                *indices,
+                ctx->LocalExecutor);
+        }
+        curLevelLeafs = std::move(nextLevelLeafs);
+
+        fold->DropEmptyCTRs();
+        CheckInterrupted(); // check after long-lasting operation
+        profile.AddOperation(TStringBuilder() << "Build level " << curDepth);
+    }
+
+    return currentStructure;
+}
+
+
+void GreedyTensorSearch(
+    const TTrainingForCPUDataProviders& data,
+    double modelLength,
+    TProfileInfo& profile,
+    TFold* fold,
+    TLearnContext* ctx,
+    TVariant<TSplitTree, TNonSymmetricTreeStructure>* resTreeStructure) {
+
+    TrimOnlineCTRcache({fold});
+
+    ui32 learnSampleCount = data.Learn->ObjectsData->GetObjectCount();
+    TVector<TIndexType> indices(learnSampleCount); // always for all documents
+
+    if (!ctx->Params.SystemOptions->IsSingleHost()) {
+        MapTensorSearchStart(ctx);
+    }
+
+    if (IsSamplingPerTree(ctx->Params.ObliviousTreeOptions)) {
+        DoBootstrap(indices, fold, ctx, /* leavesCount */ 1);
+        if (ctx->UseTreeLevelCaching()) {
+            ctx->PrevTreeLevelStats.GarbageCollect();
+        }
+    }
+
+    const auto growPolicy = ctx->Params.ObliviousTreeOptions.Get().GrowPolicy;
+    switch(growPolicy) {
+        case EGrowPolicy::SymmetricTree:
+            *resTreeStructure = GreedyTensorSearchOblivious(
+                data,
+                modelLength,
+                profile,
+                &indices,
+                fold,
+                ctx);
+            break;
+        case EGrowPolicy::Lossguide:
+            *resTreeStructure = GreedyTensorSearchLossguide(
+                data,
+                modelLength,
+                profile,
+                &indices,
+                fold,
+                ctx);
+            break;
+        case EGrowPolicy::Depthwise:
+            *resTreeStructure = GreedyTensorSearchDepthwise(
+                data,
+                modelLength,
+                profile,
+                &indices,
+                fold,
+                ctx);
+            break;
+        default:
+            CB_ENSURE(false, "GrowPolicy " << growPolicy << " is unimplemented for CPU.");
+    }
 }

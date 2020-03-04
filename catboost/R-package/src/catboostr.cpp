@@ -116,6 +116,7 @@ extern "C" {
 SEXP CatBoostCreateFromFile_R(SEXP poolFileParam,
                               SEXP cdFileParam,
                               SEXP pairsFileParam,
+                              SEXP featureNamesFileParam,
                               SEXP delimiterParam,
                               SEXP hasHeaderParam,
                               SEXP threadCountParam,
@@ -134,18 +135,23 @@ SEXP CatBoostCreateFromFile_R(SEXP poolFileParam,
     }
 
     TStringBuf pairsPathWithScheme(CHAR(asChar(pairsFileParam)));
+    TStringBuf featureNamesPathWithScheme(CHAR(asChar(featureNamesFileParam)));
 
-    TDataProviderPtr poolPtr = ReadDataset(TPathWithScheme(CHAR(asChar(poolFileParam)), "dsv"),
+    TDataProviderPtr poolPtr = ReadDataset(/*taskType*/Nothing(),
+                                           TPathWithScheme(CHAR(asChar(poolFileParam)), "dsv"),
                                            !pairsPathWithScheme.empty() ?
                                                TPathWithScheme(pairsPathWithScheme, "dsv") : TPathWithScheme(),
                                            /*groupWeightsFilePath=*/TPathWithScheme(),
+                                           /*timestampsFilePath=*/TPathWithScheme(),
                                            /*baselineFilePath=*/TPathWithScheme(),
+                                           !featureNamesPathWithScheme.empty() ?
+                                                TPathWithScheme(featureNamesPathWithScheme, "dsv") : TPathWithScheme(),
                                            columnarPoolFormatParams,
                                            TVector<ui32>(),
                                            EObjectsOrder::Undefined,
                                            UpdateThreadCount(asInteger(threadCountParam)),
                                            asLogical(verboseParam),
-                                           /*classNames=*/Nothing());
+                                           /*classLabels=*/Nothing());
     result = PROTECT(R_MakeExternalPtr(poolPtr.Get(), R_NilValue, R_NilValue));
     R_RegisterCFinalizerEx(result, _Finalizer<TPoolHandle>, TRUE);
     Y_UNUSED(poolPtr.Release());
@@ -170,6 +176,13 @@ SEXP CatBoostCreateFromMatrix_R(SEXP matrixParam,
     SEXP dataDim = getAttrib(matrixParam, R_DimSymbol);
     ui32 dataRows = SafeIntegerCast<ui32>(INTEGER(dataDim)[0]);
     ui32 dataColumns = SafeIntegerCast<ui32>(INTEGER(dataDim)[1]);
+    SEXP targetDim = getAttrib(targetParam, R_DimSymbol);
+    ui32 targetRows = 0;
+    ui32 targetColumns = 0;
+    if (targetDim != R_NilValue) {
+        targetRows = SafeIntegerCast<ui32>(INTEGER(targetDim)[0]);
+        targetColumns = SafeIntegerCast<ui32>(INTEGER(targetDim)[1]);
+    }
     SEXP baselineDim = getAttrib(baselineParam, R_DimSymbol);
     size_t baselineRows = 0;
     size_t baselineColumns = 0;
@@ -194,16 +207,27 @@ SEXP CatBoostCreateFromMatrix_R(SEXP matrixParam,
             TVector<ui32>{}, // TODO(d-kruchinin) support text features in R
             featureId);
 
-        metaInfo.HasTarget = targetParam != R_NilValue;
+        metaInfo.TargetType = targetColumns ? ERawTargetType::Float : ERawTargetType::None;
+        metaInfo.TargetCount = targetColumns;
         metaInfo.BaselineCount = baselineColumns;
         metaInfo.HasGroupId = groupIdParam != R_NilValue;
         metaInfo.HasGroupWeight = groupWeightParam != R_NilValue;
         metaInfo.HasSubgroupIds = subgroupIdParam != R_NilValue;
         metaInfo.HasWeights = weightParam != R_NilValue;
+        metaInfo.HasTimestamp = false;
 
         visitor->Start(metaInfo, dataRows, EObjectsOrder::Undefined, {});
 
-        TVector<float> target(metaInfo.HasTarget ? dataRows : 0);
+        for (auto targetIdx : xrange(targetColumns)) {
+            TVector<float> target(targetRows);
+            for (auto docIdx : xrange(targetRows)) {
+                target[docIdx] = static_cast<float>(REAL(targetParam)[docIdx + targetRows * targetIdx]);
+            }
+            visitor->AddTarget(
+                targetIdx,
+                MakeIntrusive<TTypeCastArrayHolder<float, float>>(std::move(target))
+            );
+        }
         TVector<float> weights(metaInfo.HasWeights ? dataRows : 0);
         TVector<float> groupWeights(metaInfo.HasGroupWeight ? dataRows : 0);
 
@@ -215,18 +239,12 @@ SEXP CatBoostCreateFromMatrix_R(SEXP matrixParam,
                 visitor->AddSubgroupId(i, static_cast<uint32_t>(INTEGER(subgroupIdParam)[i]));
             }
 
-            if (targetParam != R_NilValue) {
-                target[i] = static_cast<float>(REAL(targetParam)[i]);
-            }
             if (weightParam != R_NilValue) {
                 weights[i] = static_cast<float>(REAL(weightParam)[i]);
             }
             if (groupWeightParam != R_NilValue) {
                 groupWeights[i] = static_cast<float>(REAL(groupWeightParam)[i]);
             }
-        }
-        if (metaInfo.HasTarget) {
-            visitor->AddTarget(target);
         }
         if (metaInfo.HasWeights) {
             visitor->AddWeights(weights);
@@ -365,7 +383,7 @@ SEXP CatBoostPoolSlice_R(SEXP poolParam, SEXP sizeParam, SEXP offsetParam) {
 
     result = PROTECT(allocVector(VECSXP, size));
     ui32 featureCount = pool->MetaInfo.GetFeatureCount();
-    auto target = *pool->RawTargetData.GetTarget();
+    auto target = pool->RawTargetData.GetTarget();
     const auto& weights = pool->RawTargetData.GetWeights();
 
 
@@ -389,24 +407,46 @@ SEXP CatBoostPoolSlice_R(SEXP poolParam, SEXP sizeParam, SEXP offsetParam) {
         = dynamic_cast<const TRawObjectsDataProvider&>(*sliceObjectsData);
 
     TVector<double*> rows;
+    const auto targetCount = pool->MetaInfo.TargetCount;
 
     for (size_t i = offset; i < sliceEnd; ++i) {
         ui32 featureCount = pool->MetaInfo.GetFeatureCount();
-        SEXP row = PROTECT(allocVector(REALSXP, featureCount + 2));
-        REAL(row)[0] = FromString<double>(target[i]);
-        REAL(row)[1] = weights[i];
+        SEXP row = PROTECT(allocVector(REALSXP, featureCount + targetCount + 1));
+        REAL(row)[targetCount] = weights[i];
         rows.push_back(REAL(row));
         SET_VECTOR_ELT(result, i - offset, row);
     }
 
+    for (auto targetIdx : xrange(targetCount)) {
+        if (const ITypedSequencePtr<float>* typedSequence
+                = GetIf<ITypedSequencePtr<float>>(&((*target)[targetIdx])))
+        {
+            TIntrusivePtr<ITypedArraySubset<float>> subset = (*typedSequence)->GetSubset(
+                &objectsGroupingSubset.GetObjectsIndexing()
+            );
+            subset->ForEach(
+                [&rows, targetIdx] (ui32 i, float value) {
+                    rows[i][targetIdx] = value;
+                }
+            );
+        } else {
+            TConstArrayRef<TString> stringTargetPart = Get<TVector<TString>>((*target)[targetIdx]);
+
+            for (size_t i = offset; i < sliceEnd; ++i) {
+                rows[i - offset][targetIdx] = FromString<double>(stringTargetPart[i]);
+            }
+        }
+    }
+
+
     for (auto flatFeatureIdx : xrange(featureCount)) {
         TMaybeData<const TFloatValuesHolder*> maybeFeatureData
-            = rawObjectsData->GetFloatFeature(flatFeatureIdx);
+            = sliceRawObjectsData.GetFloatFeature(flatFeatureIdx);
         if (maybeFeatureData) {
             if (const auto* arrayColumn = dynamic_cast<const TFloatArrayValuesHolder*>(*maybeFeatureData)) {
                 arrayColumn->GetData()->ForEach(
                     [&] (ui32 i, float value) {
-                        rows[i][flatFeatureIdx + 2] = value;
+                        rows[i][flatFeatureIdx + targetCount + 1] = value;
                     }
                 );
             } else {
@@ -414,7 +454,7 @@ SEXP CatBoostPoolSlice_R(SEXP poolParam, SEXP sizeParam, SEXP offsetParam) {
             }
         } else {
             for (auto i : xrange(sliceRawObjectsData.GetObjectCount())) {
-                rows[i][flatFeatureIdx + 2] = 0.0f;
+                rows[i][flatFeatureIdx + targetCount + 1] = 0.0f;
             }
         }
     }
@@ -430,6 +470,7 @@ SEXP CatBoostFit_R(SEXP learnPoolParam, SEXP testPoolParam, SEXP fitParamsAsJson
     TPoolHandle learnPool = reinterpret_cast<TPoolHandle>(R_ExternalPtrAddr(learnPoolParam));
     TDataProviders pools;
     pools.Learn = learnPool;
+    pools.Learn->Ref();
 
     auto fitParams = LoadFitParams(fitParamsAsJsonParam);
     TFullModelPtr modelPtr = std::make_unique<TFullModel>();
@@ -437,6 +478,7 @@ SEXP CatBoostFit_R(SEXP learnPoolParam, SEXP testPoolParam, SEXP fitParamsAsJson
         TEvalResult evalResult;
         TPoolHandle testPool = reinterpret_cast<TPoolHandle>(R_ExternalPtrAddr(testPoolParam));
         pools.Test.emplace_back(testPool);
+        pools.Test.back()->Ref();
         TrainModel(
             fitParams,
             nullptr,
@@ -449,7 +491,6 @@ SEXP CatBoostFit_R(SEXP learnPoolParam, SEXP testPoolParam, SEXP fitParamsAsJson
             modelPtr.get(),
             {&evalResult}
         );
-        Y_UNUSED(pools.Test.back().Release());
     }
     else {
         TrainModel(
@@ -465,7 +506,6 @@ SEXP CatBoostFit_R(SEXP learnPoolParam, SEXP testPoolParam, SEXP fitParamsAsJson
             {}
         );
     }
-    Y_UNUSED(pools.Learn.Release());
     result = PROTECT(R_MakeExternalPtr(modelPtr.get(), R_NilValue, R_NilValue));
     R_RegisterCFinalizerEx(result, _Finalizer<TFullModelHandle>, TRUE);
     modelPtr.release();
@@ -513,6 +553,7 @@ SEXP CatBoostCV_R(SEXP fitParamsAsJsonParam,
 
     R_API_BEGIN();
     TPoolPtr pool = reinterpret_cast<TPoolHandle>(R_ExternalPtrAddr(poolParam));
+    pool->Ref();
     auto fitParams = LoadFitParams(fitParamsAsJsonParam);
 
     TCrossValidationParams cvParams;
@@ -534,7 +575,6 @@ SEXP CatBoostCV_R(SEXP fitParamsAsJsonParam,
         pool,
         cvParams,
         &cvResults);
-    Y_UNUSED(pool.Release());
 
     metricCount = cvResults.size();
     TVector<size_t> offsets(metricCount);
@@ -741,7 +781,7 @@ SEXP CatBoostShrinkModel_R(SEXP modelParam, SEXP treeCountStartParam, SEXP treeC
 SEXP CatBoostDropUnusedFeaturesFromModel_R(SEXP modelParam) {
     R_API_BEGIN();
     TFullModelHandle model = reinterpret_cast<TFullModelHandle>(R_ExternalPtrAddr(modelParam));
-    model->ObliviousTrees.GetMutable()->DropUnusedFeatures();
+    model->ModelTrees.GetMutable()->DropUnusedFeatures();
     R_API_END();
     return ScalarLogical(1);
 }
@@ -761,9 +801,12 @@ SEXP CatBoostCalcRegularFeatureEffect_R(SEXP modelParam, SEXP poolParam, SEXP fs
     SEXP resultDim = NULL;
     R_API_BEGIN();
     TFullModelHandle model = reinterpret_cast<TFullModelHandle>(R_ExternalPtrAddr(modelParam));
-    TDataProviderPtr pool = reinterpret_cast<TPoolHandle>(R_ExternalPtrAddr(poolParam));
+    TDataProviderPtr pool = Rf_isNull(poolParam) ? nullptr :
+                            reinterpret_cast<TPoolHandle>(R_ExternalPtrAddr(poolParam));
+    if (pool) {
+        pool->Ref();
+    }
     EFstrType fstrType = FromString<EFstrType>(CHAR(asChar(fstrTypeParam)));
-
     const int threadCount = UpdateThreadCount(asInteger(threadCountParam));
     const bool multiClass = model->GetDimensionsCount() > 1;
     const bool verbose = false;
@@ -815,7 +858,6 @@ SEXP CatBoostCalcRegularFeatureEffect_R(SEXP modelParam, SEXP poolParam, SEXP fs
         INTEGER(resultDim)[1] = numCols;
         setAttrib(result, R_DimSymbol, resultDim);
     }
-    Y_UNUSED(pool.Release());
     R_API_END();
     UNPROTECT(2);
     return result;

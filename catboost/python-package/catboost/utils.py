@@ -143,6 +143,7 @@ def read_cd(cd_file, column_count=None, data_file=None, canonize_column_types=Fa
     column_type_to_indices = {}
     column_dtypes = {}
     cat_feature_indices = []
+    text_feature_indices = []
     column_names = []
     non_feature_column_indices = []
 
@@ -181,13 +182,16 @@ def read_cd(cd_file, column_count=None, data_file=None, canonize_column_types=Fa
             if len(line_columns) == 3:
                 column_name = line_columns[2]
 
-            if column_type in ['Num', 'Categ']:
+            if column_type in ['Num', 'Categ', 'Text']:
                 feature_idx = column_idx - len(non_feature_column_indices)
                 if column_name is None:
                     column_name = 'feature_%i' % feature_idx
                 if column_type == 'Categ':
                     cat_feature_indices.append(feature_idx)
                     column_dtypes[column_name] = 'category'
+                elif column_type == 'Text':
+                    text_feature_indices.append(feature_idx)
+                    column_dtypes[column_name] = object
                 else:
                     column_dtypes[column_name] = np.float32
             else:
@@ -205,6 +209,7 @@ def read_cd(cd_file, column_count=None, data_file=None, canonize_column_types=Fa
         'column_type_to_indices' : column_type_to_indices,
         'column_dtypes' : column_dtypes,
         'cat_feature_indices' : cat_feature_indices,
+        'text_feature_indices' : text_feature_indices,
         'column_names' : column_names,
         'non_feature_column_indices' : non_feature_column_indices
     }
@@ -216,28 +221,28 @@ def eval_metric(label, approx, metric, weight=None, group_id=None, subgroup_id=N
 
     Parameters
     ----------
-    label : list or numpy.arrays or pandas.DataFrame or pandas.Series
+    label : list or numpy.ndarrays or pandas.DataFrame or pandas.Series
         Object labels.
 
-    approx : list or numpy.arrays or pandas.DataFrame or pandas.Series
+    approx : list or numpy.ndarrays or pandas.DataFrame or pandas.Series
         Object approxes.
 
     metric : string
         Metric name.
 
-    weight : list or numpy.array or pandas.DataFrame or pandas.Series, optional (default=None)
+    weight : list or numpy.ndarray or pandas.DataFrame or pandas.Series, optional (default=None)
         Object weights.
 
-    group_id : list or numpy.array or pandas.DataFrame or pandas.Series, optional (default=None)
+    group_id : list or numpy.ndarray or pandas.DataFrame or pandas.Series, optional (default=None)
         Object group ids.
 
-    subgroup_id : list or numpy.array, optional (default=None)
+    subgroup_id : list or numpy.ndarray, optional (default=None)
         subgroup id for each instance.
         If not None, giving 1 dimensional array like data.
 
-    pairs : list or numpy.array or pandas.DataFrame or string
+    pairs : list or numpy.ndarray or pandas.DataFrame or string
         The pairs description.
-        If list or numpy.arrays or pandas.DataFrame, giving 2 dimensional.
+        If list or numpy.ndarrays or pandas.DataFrame, giving 2 dimensional.
         The shape should be Nx2, where N is the pairs' count. The first element of the pair is
         the index of winner object in the training set. The second element of the pair is
         the index of loser object in the training set.
@@ -251,6 +256,8 @@ def eval_metric(label, approx, metric, weight=None, group_id=None, subgroup_id=N
     -------
     metric results : list with metric values.
     """
+    if len(label) > 0 and not isinstance(label[0], ARRAY_TYPES):
+        label = [label]
     if len(approx) == 0:
         approx = [[]]
     if not isinstance(approx[0], ARRAY_TYPES):
@@ -464,10 +471,11 @@ def select_threshold(model=None, data=None, curve=None, FPR=None, FNR=None, thre
         for pool in data:
             if not isinstance(pool, Pool):
                 raise CatBoostError('one of data pools is not catboost.Pool')
+        return _select_threshold(model._object, data, None, FPR, FNR, thread_count)
     elif curve is not None:
         if not (isinstance(curve, list) or isinstance(curve, tuple)) or len(curve) != 3:
             raise CatBoostError('curve must be list or tuple of three arrays (fpr, tpr, thresholds).')
+        return _select_threshold(None, None, curve, FPR, FNR, thread_count)
     else:
         raise CatBoostError('One of the parameters data and curve should be set.')
 
-    return _select_threshold(model._object, data, curve, FPR, FNR, thread_count)

@@ -2,6 +2,7 @@
 
 #include <catboost/libs/train_lib/train_model.h>
 #include <catboost/libs/data/data_provider_builders.h>
+#include <library/threading/local_executor/local_executor.h>
 #include <util/generic/singleton.h>
 #include <util/stream/file.h>
 #include <util/string/builder.h>
@@ -33,11 +34,13 @@ static TDataProviderPtr MakeDataProvider(
     IRawFeaturesOrderDataVisitor* builderVisitor;
 
     CreateDataProviderBuilderAndVisitor(builderOptions,
+                                        &NPar::LocalExecutor(),
                                         &dataProviderBuilder,
                                         &builderVisitor);
 
     TDataMetaInfo metaInfo;
-    metaInfo.HasTarget = true;
+    metaInfo.TargetType = ERawTargetType::Float;
+    metaInfo.TargetCount = 1;
     metaInfo.HasWeights = weights.data() != nullptr;
     if (baseline.data() != nullptr) {
         metaInfo.BaselineCount = baseline.size() / labels.size();
@@ -59,7 +62,9 @@ static TDataProviderPtr MakeDataProvider(
     }
 
 
-    builderVisitor->AddTarget(labels);
+    builderVisitor->AddTarget(
+        MakeIntrusive<TTypeCastArrayHolder<float, float>>(
+            TMaybeOwningConstArrayHolder<float>::CreateNonOwning(labels)));
     if (weights.data() != nullptr) {
         builderVisitor->AddWeights(weights);
     }
@@ -94,39 +99,39 @@ static inline TDataProviderPtr MakeProvider(bool gpu, const TDataSet& ds) {
 
 extern "C" {
 
-EXPORT const char* GetErrorString() {
+CATBOOST_API const char* GetErrorString() {
     return Singleton<TErrorMessageHolder>()->Message.data();
 }
 
-EXPORT void FreeHandle(ResultHandle* modelHandle) {
+CATBOOST_API void FreeHandle(ResultHandle* modelHandle) {
     if (*modelHandle != nullptr) {
         delete RESULT_PTR(*modelHandle);
     }
     *modelHandle = nullptr;
 }
 
-EXPORT int TreesCount(ResultHandle handle) {
+CATBOOST_API int TreesCount(ResultHandle handle) {
     if (handle != nullptr) {
-        return (int) RESULT_PTR(handle)->ObliviousTrees->GetTreeCount();
+        return (int) RESULT_PTR(handle)->ModelTrees->GetTreeCount();
     }
     return 0;
 }
 
-EXPORT int OutputDim(ResultHandle handle) {
+CATBOOST_API int OutputDim(ResultHandle handle) {
     if (handle != nullptr) {
         return (int) RESULT_PTR(handle)->GetDimensionsCount();
     }
     return 0;
 }
 
-EXPORT int TreeDepth(ResultHandle handle, int treeIndex) {
+CATBOOST_API int TreeDepth(ResultHandle handle, int treeIndex) {
     if (handle) {
-        return (int) RESULT_PTR(handle)->ObliviousTrees->TreeSizes[treeIndex];
+        return (int) RESULT_PTR(handle)->ModelTrees->GetTreeSizes()[treeIndex];
     }
     return 0;
 }
 
-EXPORT bool CopyTree(
+CATBOOST_API bool CopyTree(
     ResultHandle handle,
     int treeIndex,
     int* features,
@@ -135,32 +140,32 @@ EXPORT bool CopyTree(
     float* weights) {
     if (handle) {
         try {
-            const auto obliviousTrees = RESULT_PTR(handle)->ObliviousTrees.GetMutable();
+            const auto modelTrees = RESULT_PTR(handle)->ModelTrees.GetMutable();
 
-            size_t treeLeafCount = (1uLL << obliviousTrees->TreeSizes[treeIndex]) * obliviousTrees->ApproxDimension;
-            auto srcLeafValues = obliviousTrees->GetFirstLeafPtrForTree(treeIndex);
-            const auto& srcWeights = obliviousTrees->LeafWeights;
+            size_t treeLeafCount = (1uLL << modelTrees->GetTreeSizes()[treeIndex]) * modelTrees->GetDimensionsCount();
+            auto srcLeafValues = modelTrees->GetFirstLeafPtrForTree(treeIndex);
+            const auto& srcWeights = modelTrees->GetLeafWeights();
 
             for (size_t idx = 0; idx < treeLeafCount; ++idx) {
                 leaves[idx] = (float) srcLeafValues[idx];
             }
 
-            const size_t weightOffset = obliviousTrees->GetFirstLeafOffsets()[treeIndex] / obliviousTrees->ApproxDimension;
-            for (size_t idx = 0; idx < (1uLL << obliviousTrees->TreeSizes[treeIndex]); ++idx) {
+            const size_t weightOffset = modelTrees->GetFirstLeafOffsets()[treeIndex] / modelTrees->GetDimensionsCount();
+            for (size_t idx = 0; idx < (1uLL << modelTrees->GetTreeSizes()[treeIndex]); ++idx) {
                 weights[idx] = (float) srcWeights[idx + weightOffset];
             }
 
             int treeSplitEnd;
-            if (treeIndex + 1 < obliviousTrees->TreeStartOffsets.ysize()) {
-                treeSplitEnd = obliviousTrees->TreeStartOffsets[treeIndex + 1];
+            if (treeIndex + 1 < modelTrees->GetTreeStartOffsets().ysize()) {
+                treeSplitEnd = modelTrees->GetTreeStartOffsets()[treeIndex + 1];
             } else {
-                treeSplitEnd = obliviousTrees->TreeSplits.ysize();
+                treeSplitEnd = modelTrees->GetTreeSplits().ysize();
             }
-            const auto& binFeatures = obliviousTrees->GetBinFeatures();
+            const auto& binFeatures = modelTrees->GetBinFeatures();
 
-            const auto offset = obliviousTrees->TreeStartOffsets[treeIndex];
+            const auto offset = modelTrees->GetTreeStartOffsets()[treeIndex];
             for (int idx = offset; idx < treeSplitEnd; ++idx) {
-                auto split = binFeatures[obliviousTrees->TreeSplits[idx]];
+                auto split = binFeatures[modelTrees->GetTreeSplits()[idx]];
                 CB_ENSURE(split.Type == ESplitType::FloatFeature);
                 features[idx - offset] = split.FloatFeature.FloatFeature;
                 conditions[idx - offset] = split.FloatFeature.Split;
@@ -173,10 +178,10 @@ EXPORT bool CopyTree(
     return true;
 }
 
-EXPORT bool TrainCatBoost(const TDataSet* trainPtr,
-                          const TDataSet* testPtr,
-                          const char* paramsJson,
-                          ResultHandle* handlePtr) {
+CATBOOST_API bool TrainCatBoost(const TDataSet* trainPtr,
+                                const TDataSet* testPtr,
+                                const char* paramsJson,
+                                ResultHandle* handlePtr) {
     const auto& train = *trainPtr;
     const auto& test = *testPtr;
     THolder<TFullModel> model = new TFullModel;

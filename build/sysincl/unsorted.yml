@@ -88,7 +88,6 @@
   - file.h
   - flags.h
   - floatingpoint.h
-  - fontconfig/fontconfig.h
   - fp.h
   - fp_class.h
   - fsio.h
@@ -230,7 +229,6 @@
   - cpptl/forwards.h
   - cpptl/smallmap.h
   - forwards.h
-  - json_tool.h
   - json_valueiterator.inl
   - value.h
   - gnulib/printf.h
@@ -277,6 +275,8 @@
   - cusolverDn.h
   - cupti.h
   - curand.h
+  - curand_mtgp32_host.h
+  - curand_mtgp32dc_p_11213.h
   - cusparse.h
   - cooperative_groups.h
   - driver_types.h
@@ -315,8 +315,21 @@
   - machine/fpu.h
   - malloc_np.h
   - netinet/sctp_uio.h
+  - netinet/ip_options.h
+  - netinet/sctp_kdtrace.h
+  - netinet/sctp_lock_bsd.h
+  - netinet/sctp_lock_empty.h
+  - netinet/sctp_os_bsd.h
+  - netinet6/in6_pcb.h
+  - netinet6/ip6_var.h
+  - netinet6/ip6protosw.h
+  - netinet6/scope6_var.h
+  - netipsec/ipsec.h
+  - netipsec/ipsec6.h
+  - netipsec/key.h
   - opie.h
   - osreldate.h
+  - opt_sctp.h
   - pthread_np.h
   - ripemd.h
   - sha.h
@@ -326,15 +339,21 @@
   - sys/cpuset.h
   - sys/disklabel.h
   - sys/endian.h
+  - sys/eventhandler.h
   - sys/exec.h
   - sys/extattr.h
+  - sys/filedesc.h
+  - sys/gsb_crc32.h
   - sys/jail.h
   - sys/ktrace.h
   - sys/machine.h
   - sys/module.h
   - sys/mpctl.h
   - sys/mutex.h
+  - sys/rwlock.h
+  - sys/smp.h
   - sys/stdint.h
+  - sys/systm.h
   - sys/thr.h
   - sys/timespec.h
   - sys/umtx.h
@@ -504,6 +523,7 @@
   - ioLib.h
   - iosLib.h
   - resolvLib.h
+  - rtpLib.h
   - pipeDrv.h
   - selectLib.h
   #endif
@@ -546,6 +566,7 @@
   - perliol.h
   #endif
   #if defined(__NetBSD__)
+  - lwp.h
   - perfuse.h
   #endif
   #if V8_OS_QNX
@@ -553,6 +574,7 @@
   #endif
   #if V8_OS_AIX
   - sys/systemcfg.h
+  - sys/thread.h
   #endif
   - mbarrier.h
   - iostream.h
@@ -574,8 +596,6 @@
   - win32.h
   - bsd/stdlib.h
   - bsd/unistd.h
-  - hb-ot.h
-  - fontconfig/fcfreetype.h
   - sys/videoio.h
   - libv4l2.h
   - soundcard.h
@@ -616,6 +636,7 @@
   - tpf/sysapi.h
   #endif
   - asm/page.h
+  - asm/sgidefs.h
   - wrl\client.h
   - wrl\event.h
   - wrl\wrappers\corewrappers.h
@@ -648,7 +669,6 @@
   - StorageDefs.h
   #endif
   - fpxcp.h
-  - local.h
   - fptrap.h
   - fortran.h
   - agg_allocator.h
@@ -788,7 +808,6 @@
   #if CONTRIB && TRASH
   - macconfig.h
   - amigaconfig.h
-  - json/config.h
   - json_batchallocator.h
   - json_internalarray.inl
   - json_internalmap.inl

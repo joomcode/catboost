@@ -125,10 +125,11 @@ void YetiRankRecalculation(
     TVector<TQueryInfo>* recalculatedQueriesInfo,
     TVector<float>* recalculatedPairwiseWeights
 ) {
+    Y_ASSERT(ff.LearnTarget.size() == 1);
     *recalculatedQueriesInfo = ff.LearnQueriesInfo;
     UpdatePairsForYetiRank(
         bt.Approx[0],
-        ff.LearnTarget,
+        ff.LearnTarget[0],
         params.LossFunctionDescription.Get(),
         randomSeed,
         0,

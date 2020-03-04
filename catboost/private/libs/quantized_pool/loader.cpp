@@ -8,6 +8,7 @@
 #include <catboost/libs/data/unaligned_mem.h>
 #include <catboost/private/libs/data_util/exists_checker.h>
 #include <catboost/private/libs/data_util/path_with_scheme.h>
+#include <catboost/private/libs/labels/helpers.h>
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/maybe_owning_array_holder.h>
 #include <catboost/libs/logging/logging.h>
@@ -44,6 +45,7 @@ NCB::TCBQuantizedDataLoader::TCBQuantizedDataLoader(TDatasetLoaderPullArgs&& arg
     , PairsPath(args.CommonArgs.PairsFilePath)
     , GroupWeightsPath(args.CommonArgs.GroupWeightsFilePath)
     , BaselinePath(args.CommonArgs.BaselineFilePath)
+    , TimestampsPath(args.CommonArgs.TimestampsFilePath)
     , ObjectsOrder(args.CommonArgs.ObjectsOrder)
     , DatasetSubset(args.CommonArgs.DatasetSubset)
 {
@@ -61,9 +63,12 @@ NCB::TCBQuantizedDataLoader::TCBQuantizedDataLoader(TDatasetLoaderPullArgs&& arg
         "TCBQuantizedDataLoader:GroupWeightsFilePath does not exist");
     CB_ENSURE(!BaselinePath.Inited() || CheckExists(BaselinePath),
         "TCBQuantizedDataLoader:BaselineFilePath does not exist");
-
-    const NCB::TBaselineReader baselineReader(BaselinePath, args.CommonArgs.ClassNames);
-    DataMetaInfo = GetDataMetaInfo(QuantizedPool, GroupWeightsPath.Inited(), PairsPath.Inited(), baselineReader.GetBaselineCount());
+    CB_ENSURE(!TimestampsPath.Inited() || CheckExists(TimestampsPath),
+        "TCBQuantizedDataLoader:TimestampsPath does not exist");
+    CB_ENSURE(!FeatureNamesPath.Inited() || CheckExists(FeatureNamesPath),
+        "TCBQuantizedDataLoader:FeatureNamesPath does not exist");
+    const NCB::TBaselineReader baselineReader(BaselinePath, NCB::ClassLabelsToStrings(args.CommonArgs.ClassLabels));
+    DataMetaInfo = GetDataMetaInfo(QuantizedPool, GroupWeightsPath.Inited(), TimestampsPath.Inited(), PairsPath.Inited(), baselineReader.GetBaselineCount(), args.CommonArgs.FeatureNamesPath);
 
     CB_ENSURE(DataMetaInfo.GetFeatureCount() > 0, "Pool should have at least one factor");
 
@@ -78,7 +83,11 @@ NCB::TCBQuantizedDataLoader::TCBQuantizedDataLoader(TDatasetLoaderPullArgs&& arg
     );
 
     CATBOOST_DEBUG_LOG << "allIgnoredFeatures.size() " << allIgnoredFeatures.size() << Endl;
-    ProcessIgnoredFeaturesList(allIgnoredFeatures, &DataMetaInfo, &IsFeatureIgnored);
+    ProcessIgnoredFeaturesList(
+        allIgnoredFeatures,
+        /*allFeaturesIgnoredMessage*/ "All features are either constant or ignored",
+        &DataMetaInfo,
+        &IsFeatureIgnored);
 }
 
 namespace {
@@ -228,6 +237,7 @@ void NCB::TCBQuantizedDataLoader::AddQuantizedFeatureChunk(
 void NCB::TCBQuantizedDataLoader::AddChunk(
     const TQuantizedPool::TChunkDescription& chunk,
     const EColumn columnType,
+    const size_t* const targetIdx,
     const size_t* const flatFeatureIdx,
     const size_t* const baselineIdx,
     IQuantizedFeaturesDataVisitor* const visitor) const
@@ -240,14 +250,17 @@ void NCB::TCBQuantizedDataLoader::AddChunk(
 
     switch (columnType) {
         case EColumn::Num: {
+            CB_ENSURE(flatFeatureIdx != nullptr, "Feature not found in index");
             AddQuantizedFeatureChunk(chunk, *flatFeatureIdx, visitor);
             break;
         } case EColumn::Label: {
             // TODO(akhropov): will be raw strings as was decided for new data formats for MLTOOLS-140.
-            visitor->AddTargetPart(GetDatasetOffset(chunk), TUnalignedArrayBuf<float>(quants));
+            CB_ENSURE(targetIdx != nullptr, "Target not found in index");
+            visitor->AddTargetPart(*targetIdx, GetDatasetOffset(chunk), TUnalignedArrayBuf<float>(quants));
             break;
         } case EColumn::Baseline: {
             // TODO(akhropov): switch to storing floats - MLTOOLS-2394
+            CB_ENSURE(baselineIdx != nullptr, "Baseline not found in index");
             TVector<float> tmp;
             AssignUnaligned<double>(quants, &tmp);
             visitor->AddBaselinePart(GetDatasetOffset(chunk), *baselineIdx, TUnalignedArrayBuf<float>(tmp.data(), tmp.size() * sizeof(float)));
@@ -265,6 +278,7 @@ void NCB::TCBQuantizedDataLoader::AddChunk(
             visitor->AddSubgroupIdPart(GetDatasetOffset(chunk), TUnalignedArrayBuf<ui32>(quants));
             break;
         } case EColumn::Categ: {
+            CB_ENSURE(flatFeatureIdx != nullptr, "Feature not found in index");
             AddQuantizedCatFeatureChunk(chunk, *flatFeatureIdx, visitor);
             break;
         }
@@ -331,6 +345,7 @@ void NCB::TCBQuantizedDataLoader::Do(IQuantizedFeaturesDataVisitor* visitor) {
         {},
         QuantizationSchemaFromProto(QuantizedPool.QuantizationSchema));
 
+    const auto columnIdxToTargetIdx = GetColumnIndexToTargetIndexMap(QuantizedPool);
     const auto columnIdxToFlatIdx = GetColumnIndexToFlatIndexMap(QuantizedPool);
     const auto columnIdxToBaselineIdx = GetColumnIndexToBaselineIndexMap(QuantizedPool);
     const auto chunkRefs = GatherAndSortChunks(QuantizedPool);
@@ -377,7 +392,8 @@ void NCB::TCBQuantizedDataLoader::Do(IQuantizedFeaturesDataVisitor* visitor) {
         }
 
         const auto* const baselineIdx = columnIdxToBaselineIdx.FindPtr(columnIdx);
-        AddChunk(*chunkRef.Description, columnType, flatFeatureIdx, baselineIdx, visitor);
+        const auto* const targetIdx = columnIdxToTargetIdx.FindPtr(columnIdx);
+        AddChunk(*chunkRef.Description, columnType, targetIdx, flatFeatureIdx, baselineIdx, visitor);
     }
 
     evictor.MaybeEvict(true);
@@ -385,7 +401,8 @@ void NCB::TCBQuantizedDataLoader::Do(IQuantizedFeaturesDataVisitor* visitor) {
     QuantizedPool = TQuantizedPool(); // release memory
     SetGroupWeights(GroupWeightsPath, ObjectCount, DatasetSubset, visitor);
     SetPairs(PairsPath, ObjectCount, DatasetSubset, visitor);
-    SetBaseline(BaselinePath, ObjectCount, DatasetSubset, DataMetaInfo.ClassNames, visitor);
+    SetBaseline(BaselinePath, ObjectCount, DatasetSubset, NCB::ClassLabelsToStrings(DataMetaInfo.ClassLabels), visitor);
+    SetTimestamps(TimestampsPath, ObjectCount, DatasetSubset, visitor);
     visitor->Finish();
 }
 

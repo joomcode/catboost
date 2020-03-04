@@ -25,7 +25,7 @@ NULL
 #' }
 #'
 #' Default value: Required argument
-#' @param label The label vector.
+#' @param label The label vector or label matrix
 #' @param cat_features A vector of categorical features indices.
 #' The indices are zero based and can differ from the given in the Column descriptions file.
 #' @param column_description The path to the input file that contains the column descriptions.
@@ -78,12 +78,12 @@ catboost.load_pool <- function(data, label = NULL, cat_features = NULL, column_d
     if (is.character(data) && length(data) == 1) {
         for (arg in list("label", "cat_features", "weight", "group_id",
                          "group_weight", "subgroup_id", "pairs_weight",
-                         "baseline", "feature_names")) {
+                         "baseline")) {
             if (!is.null(get(arg))) {
                 stop("parameter '", arg, "' should be NULL when the pool is read from file")
             }
         }
-        pool <- catboost.from_file(data, column_description, pairs, delimiter, has_header, thread_count)
+        pool <- catboost.from_file(data, column_description, pairs, delimiter, has_header, thread_count, FALSE, feature_names)
     } else if (is.matrix(data)) {
         pool <- catboost.from_matrix(data, label, cat_features, pairs, weight, group_id, group_weight, subgroup_id, pairs_weight,
                                      baseline, feature_names)
@@ -97,15 +97,18 @@ catboost.load_pool <- function(data, label = NULL, cat_features = NULL, column_d
 }
 
 
-catboost.from_file <- function(pool_path, cd_path = "", pairs_path = "", delimiter = "\t", has_header = FALSE, thread_count = -1, verbose = FALSE) {
+catboost.from_file <- function(pool_path, cd_path = "", pairs_path = "", delimiter = "\t", has_header = FALSE,
+                               thread_count = -1, verbose = FALSE, feature_names_path = "") {
     if (missing(pool_path))
         stop("Need to specify pool path.")
     if (is.null(pairs_path))
         pairs_path <- ""
-    if (!is.character(pool_path) || !is.character(cd_path) || !is.character(pairs_path))
+    if (is.null(feature_names_path))
+        feature_names_path <- ""
+    if (!is.character(pool_path) || !is.character(cd_path) || !is.character(pairs_path) || !is.character(feature_names_path))
         stop("Path must be a string.")
 
-    pool <- .Call("CatBoostCreateFromFile_R", pool_path, cd_path, pairs_path, delimiter, has_header, thread_count, verbose)
+    pool <- .Call("CatBoostCreateFromFile_R", pool_path, cd_path, pairs_path, feature_names_path, delimiter, has_header, thread_count, verbose)
     attributes(pool) <- list(.Dimnames = list(NULL, NULL), class = "catboost.Pool")
     return(pool)
 }
@@ -119,8 +122,12 @@ catboost.from_matrix <- function(data, label = NULL, cat_features = NULL, pairs 
 
   if (!is.double(label) && !is.integer(label) && !is.null(label))
       stop("Unsupported label type, expecting double or int, got: ", typeof(label))
-  if (length(label) != nrow(data) && !is.null(label))
-      stop("Data has ", nrow(data), " rows, label has ", length(label), " rows.")
+  if (!is.null(label) && !is.matrix(label))
+      label <- as.matrix(label)
+  if (!is.null(label) && !is.double(label))
+      label <- as.matrix(as.double(as.double(label)), nrow=nrow(label), ncol=ncol(label))
+  if (!is.null(label) && nrow(label) != nrow(data))
+      stop("Data has ", nrow(data), " rows, label has ", nrow(label), " rows.")
 
   if (!all(cat_features == as.integer(cat_features)) && !is.null(cat_features))
       stop("Unsupported cat_features type, expecting integer, got: ", typeof(cat_features))
@@ -168,9 +175,6 @@ catboost.from_matrix <- function(data, label = NULL, cat_features = NULL, pairs 
       stop("Unsupported feature_names type, expecting list, got: ", typeof(feature_names))
   if (length(feature_names) != ncol(data) && !is.null(feature_names))
       stop("Data has ", ncol(data), " columns, feature_names has ", length(feature_names), " columns.")
-
-  if (!is.double(label) && !is.null(label))
-      label <- as.double(label)
 
   pool <- .Call("CatBoostCreateFromMatrix_R",
                 data, label, cat_features, pairs, weight, group_id, group_weight, subgroup_id,
@@ -1429,9 +1433,7 @@ catboost.train <- function(learn_pool, test_pool = NULL, params = list()) {
     if (length(params) == 0)
         message("Training catboost with default parameters! See help(catboost.train).")
 
-    params <- prepare_train_params(params)
-
-    json_params <- jsonlite::toJSON(params, auto_unbox = TRUE)
+    json_params <- prepare_train_export_parameters(params)
     handle <- .Call("CatBoostFit_R", learn_pool, test_pool, json_params)
     raw <- .Call("CatBoostSerializeModel_R", handle)
     model <- list(handle = handle, raw = raw)
@@ -1445,7 +1447,18 @@ catboost.train <- function(learn_pool, test_pool = NULL, params = list()) {
     return(model)
 }
 
-prepare_train_params <- function(params) {
+prepare_train_export_parameters <- function(params) {
+
+    if (length(params) == 0) {
+        return ("{}")   
+    }
+
+    if (!is.null(params$early_stopping_rounds)) {
+        params$od_type <- "Iter"
+        params$od_pval <- NULL
+        params$od_wait <- params$early_stopping_rounds
+        params$early_stopping_rounds <- NULL
+    }
 
     if (!is.null(params$per_float_feature_quantization)) {
         params$per_float_feature_quantization <- as.list(params$per_float_feature_quantization)
@@ -1454,8 +1467,8 @@ prepare_train_params <- function(params) {
     if (!is.null(params$ignored_features)) {
         params$ignored_features <- as.character(params$ignored_features)
     }
-
-    return(params)
+   
+    return(jsonlite::toJSON(params, auto_unbox = TRUE))
 }
 
 #' Cross-validate model.
@@ -1488,7 +1501,7 @@ catboost.cv <- function(pool, params = list(),
         params$od_wait <- early_stopping_rounds
     }
 
-    json_params <- jsonlite::toJSON(params, auto_unbox = TRUE)
+    json_params <- prepare_train_export_parameters(params)
     result <- .Call("CatBoostCV_R", json_params, pool, fold_count, type, partition_random_seed, shuffle, stratified)
 
     return(data.frame(result))
@@ -1563,6 +1576,7 @@ catboost.load_model <- function(model_path, file_format = "cbm") {
     raw <- .Call("CatBoostSerializeModel_R", handle)
     model <- list(handle = handle, raw = raw)
     class(model) <- "catboost.Model"
+    model$tree_count <- catboost.ntrees(model)
     return(model)
 }
 
@@ -1609,7 +1623,7 @@ catboost.save_model <- function(model, model_path,
         stop("Expected catboost.Pool, got: ", class(pool))
     params_string <- ""
     if (!is.null(export_parameters))
-        params_string <- jsonlite::toJSON(params, auto_unbox = TRUE)
+        params_string <- jsonlite::toJSON(export_parameters, auto_unbox = TRUE)
 
     if (is.null.handle(model$handle))
         model$handle <- .Call("CatBoostDeserializeModel_R", model$raw)
@@ -1824,9 +1838,11 @@ catboost.get_feature_importance <- function(model, pool = NULL, type = "FeatureI
     if (type == "Interaction") {
         colnames(importances) <- c("feature1_index", "feature2_index", "score")
     } else if (type == "ShapValues") {
-        dimnames(importances)[[length(dim(importances))]] <- c(colnames(pool), "<base>")
+        if (is.list(colnames(importances))) {
+            dimnames(importances)[[length(dim(importances))]] <- c(colnames(pool), "<base>")
+        }
     } else if (type == "PredictionValuesChange" || type == "FeatureImportance" || type == "LossFunctionChange") {
-        if (dim(importances)[1] == length(colnames(pool))) {
+        if (!is.null(pool) && dim(importances)[1] == length(colnames(pool))) {
             rownames(importances) <- colnames(pool)
         }
     } else {

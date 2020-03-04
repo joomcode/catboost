@@ -37,7 +37,8 @@ static TDataProviderPtr SmallFloatPool() {
     return CreateDataProvider(
         [&] (IRawFeaturesOrderDataVisitor* visitor) {
             TDataMetaInfo metaInfo;
-            metaInfo.HasTarget = true;
+            metaInfo.TargetType = ERawTargetType::Float;
+            metaInfo.TargetCount = 1;
             metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                 (ui32)3,
                 TVector<ui32>{},
@@ -59,7 +60,9 @@ static TDataProviderPtr SmallFloatPool() {
                 MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{-2.0f, -1.0f, +6.0f})
             );
 
-            visitor->AddTarget(TVector<float>{1.0f, 0.0f, 0.2f});
+            visitor->AddTarget(
+                MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{1.0f, 0.0f, 0.2f})
+            );
 
             visitor->Finish();
         }
@@ -99,7 +102,9 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
                         2,
                         MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{-2.5f})
                     );
-                    visitor->AddTarget(TVector<float>{1.0f});
+                    visitor->AddTarget(
+                        MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{1.0f})
+                    );
 
                     visitor->Finish();
                 }
@@ -197,7 +202,8 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
             dataProviders.Learn = CreateDataProvider(
                 [&] (IRawFeaturesOrderDataVisitor* visitor) {
                     TDataMetaInfo metaInfo;
-                    metaInfo.HasTarget = true;
+                    metaInfo.TargetType = ERawTargetType::Float;
+                    metaInfo.TargetCount = 1;
                     metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                         numericFeatureCount,
                         TVector<ui32>{},
@@ -212,7 +218,7 @@ Y_UNIT_TEST_SUITE(TrainModelTests) {
                             MakeIntrusive<TTypeCastArrayHolder<float, float>>(std::move(factors[featureIdx]))
                         );
                     }
-                    visitor->AddTarget(target);
+                    visitor->AddTarget(MakeIntrusive<TTypeCastArrayHolder<float, float>>(std::move(target)));
 
                     visitor->Finish();
                 }

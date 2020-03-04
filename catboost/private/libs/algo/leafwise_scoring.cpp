@@ -1,6 +1,7 @@
 #include "leafwise_scoring.h"
 
 #include <catboost/libs/data/columns.h>
+#include <catboost/libs/helpers/parallel_tasks.h>
 #include <catboost/private/libs/algo_helpers/scoring_helpers.h>
 
 // TODO(ilyzhin) sampling with groups
@@ -11,11 +12,13 @@ using namespace NCB;
 
 bool IsLeafwiseScoringApplicable(const NCatboostOptions::TCatBoostOptions& params) {
     // TODO(ilyzhin) support these constraints
-    return params.BoostingOptions->BoostingType == EBoostingType::Plain
+    return (params.BoostingOptions->BoostingType == EBoostingType::Plain
            && !IsPairwiseScoring(params.LossFunctionDescription->GetLossFunction())
            && params.SystemOptions->IsSingleHost()
            && params.ObliviousTreeOptions->MonotoneConstraints.Get().empty()
-           && params.DataProcessingOptions->DevLeafwiseScoring;
+           && params.DataProcessingOptions->DevLeafwiseScoring)
+           || params.ObliviousTreeOptions->GrowPolicy == EGrowPolicy::Lossguide
+           || params.ObliviousTreeOptions->GrowPolicy == EGrowPolicy::Depthwise;
 }
 
 
@@ -27,20 +30,43 @@ inline static void SetBucketIndex(
     const ui32* bucketIndexing, // can be nullptr for simple case, use bucketBeginOffset instead then
     const int bucketBeginOffset,
     TIndexRange<ui32> docIndexRange,
+    int groupSize,
+    const TVector<ui32>& groupPartsBucketsOffsets,
     TVector<TBucketIndexType>* bucketIdx // already of proper size
 ) {
     const TArrayRef<TBucketIndexType> bucketIdxRef(*bucketIdx);
 
-    if (bucketIndexing == nullptr) {
-        for (auto doc : docIndexRange.Iter()) {
-            bucketIdxRef[doc] = column[bucketBeginOffset + doc];
+    if (groupSize == 1) {
+        if (bucketIndexing == nullptr) {
+            for (auto doc : docIndexRange.Iter()) {
+                bucketIdxRef[doc] = column[bucketBeginOffset + doc];
+            }
+        } else {
+            for (auto doc : docIndexRange.Iter()) {
+                const ui32 originalDocIdx = bucketIndexing[doc];
+                bucketIdxRef[doc] = column[originalDocIdx];
+            }
         }
     } else {
-        for (auto doc : docIndexRange.Iter()) {
-            const ui32 originalDocIdx = bucketIndexing[doc];
-            bucketIdxRef[doc] = column[originalDocIdx];
+        int pos = docIndexRange.Begin * groupSize;
+        if (bucketIndexing == nullptr) {
+            for (auto doc : docIndexRange.Iter()) {
+                for (auto partIdx : xrange(groupSize)) {
+                    bucketIdxRef[pos++] = groupPartsBucketsOffsets[partIdx] +
+                        GetPartValueFromGroup(column[bucketBeginOffset + doc], partIdx);
+                }
+            }
+        } else {
+            for (auto doc : docIndexRange.Iter()) {
+                const ui32 originalDocIdx = bucketIndexing[doc];
+                for (auto partIdx : xrange(groupSize)) {
+                    bucketIdxRef[pos++] = groupPartsBucketsOffsets[partIdx] +
+                        GetPartValueFromGroup(column[originalDocIdx], partIdx);
+                }
+            }
         }
     }
+
 }
 
 
@@ -49,6 +75,8 @@ inline static void ExtractBucketIndex(
     const TCalcScoreFold& fold,
     const TTypedFeatureValuesHolder<T, FeatureValuesType>& column,
     TIndexRange<ui32> docIndexRange,
+    int groupSize,
+    const TVector<ui32>& groupPartsBucketsOffsets,
     TVector<TBucketIndexType>* bucketIdx // already of proper size
 ) {
     if (const auto* denseColumnData
@@ -72,6 +100,8 @@ inline static void ExtractBucketIndex(
                     docInDataProviderIndexing,
                     docInDataProviderBeginOffset,
                     docIndexRange,
+                    groupSize,
+                    groupPartsBucketsOffsets,
                     bucketIdx
                 );
             }
@@ -90,6 +120,8 @@ inline static void ExtractBucketIndex(
     const std::tuple<const TOnlineCTRHash&, const TOnlineCTRHash&>& allCtrs,
     const TSplitEnsemble& splitEnsemble,
     TIndexRange<ui32> docIndexRange,
+    int groupSize,
+    const TVector<ui32>& groupPartsBucketsOffsets,
     TVector<TBucketIndexType>* bucketIdx // already of proper size
 ) {
     if (splitEnsemble.IsSplitOfType(ESplitType::OnlineCtr)) {
@@ -103,6 +135,8 @@ inline static void ExtractBucketIndex(
             docInFoldIndexing,
             0,
             docIndexRange,
+            groupSize,
+            groupPartsBucketsOffsets,
             bucketIdx
         );
     } else {
@@ -111,6 +145,8 @@ inline static void ExtractBucketIndex(
                 fold,
                 column,
                 docIndexRange,
+                groupSize,
+                groupPartsBucketsOffsets,
                 bucketIdx
             );
         };
@@ -142,6 +178,13 @@ inline static void ExtractBucketIndex(
                         splitEnsemble.ExclusiveFeaturesBundleRef.BundleIdx
                     )
                 );
+                break;
+            case ESplitEnsembleType::FeaturesGroup:
+                extractBucketIndexFunc(
+                    objectsDataProvider.GetFeaturesGroup(
+                        splitEnsemble.FeaturesGroupRef.GroupIdx
+                    )
+                );
         }
     }
 }
@@ -152,12 +195,17 @@ inline void UpdateWeighted(
     const double* weightedDer,
     const float* sampleWeights,
     TIndexRange<ui32> docIndexRange,
+    int indicesPerDoc,
     TBucketStats* stats
 ) {
+    int pos = docIndexRange.Begin * indicesPerDoc;
     for (auto doc : docIndexRange.Iter()) {
-        TBucketStats& leafStats = stats[bucketIdx[doc]];
-        leafStats.SumWeightedDelta += weightedDer[doc];
-        leafStats.SumWeight += sampleWeights[doc];
+        for (auto idx : xrange(indicesPerDoc)) {
+            Y_UNUSED(idx);
+            TBucketStats& leafStats = stats[bucketIdx[pos++]];
+            leafStats.SumWeightedDelta += weightedDer[doc];
+            leafStats.SumWeight += sampleWeights[doc];
+        }
     }
 }
 
@@ -168,7 +216,8 @@ inline void CalcStatsKernel(
     int dim,
     int bucketCount,
     TIndexRange<ui32> docIndexRange,
-    const TVector<TBucketIndexType>& bucketIdx, // has the same size as docs
+    const TVector<TBucketIndexType>& bucketIdx, // has size = docs * indicesPerDoc
+    int indicesPerDoc,
     TBucketStats* stats
 ) {
     Fill(stats, stats + bucketCount, TBucketStats{0, 0, 0, 0});
@@ -178,6 +227,7 @@ inline void CalcStatsKernel(
         GetDataPtr(bt.SampleWeightedDerivatives[dim]),
         GetDataPtr(fold.SampleWeights),
         docIndexRange,
+        indicesPerDoc,
         stats
     );
 }
@@ -189,6 +239,7 @@ static void CalcScoresForSubCandidate(
     int bucketCount,
     const TCalcScoreFold& fold,
     const TFold& initialFold,
+    const TVector<TIndexType>& leafs,
     TLearnContext* ctx,
     TScoreCalcer* scoreCalcer
 ) {
@@ -196,12 +247,20 @@ static void CalcScoresForSubCandidate(
 
     const int approxDimension = fold.GetApproxDimension();
     const ui32 oneHotMaxSize = ctx->Params.CatFeatureParams.Get().OneHotMaxSize.Get();
-    const TSplitEnsembleSpec& splitEnsembleSpec = TSplitEnsembleSpec(
+    const TSplitEnsembleSpec splitEnsembleSpec(
         candidateInfo.SplitEnsemble,
-        objectsDataProvider.GetExclusiveFeatureBundlesMetaData());
+        objectsDataProvider.GetExclusiveFeatureBundlesMetaData(),
+        objectsDataProvider.GetFeaturesGroupsMetaData());
 
     TVector<TBucketIndexType> bucketIdx;
-    bucketIdx.yresize(fold.GetDocCount());
+    int groupSize = 1;
+    TVector<ui32> bucketOffsets(1);
+    if (candidateInfo.SplitEnsemble.Type == ESplitEnsembleType::FeaturesGroup) {
+        const auto groupIdx = candidateInfo.SplitEnsemble.FeaturesGroupRef.GroupIdx;
+        groupSize = objectsDataProvider.GetFeaturesGroupMetaData(groupIdx).Parts.ysize();
+        bucketOffsets = objectsDataProvider.GetFeaturesGroupMetaData(groupIdx).BucketOffsets;
+    }
+    bucketIdx.yresize(fold.GetDocCount() * groupSize);
 
     auto extractBucketIndex = [&] (TIndexRange<ui32> docIndexRange) {
         ExtractBucketIndex(
@@ -210,6 +269,8 @@ static void CalcScoresForSubCandidate(
             initialFold.GetAllCtrs(),
             candidateInfo.SplitEnsemble,
             docIndexRange,
+            groupSize,
+            bucketOffsets,
             &bucketIdx
         );
     };
@@ -222,6 +283,7 @@ static void CalcScoresForSubCandidate(
             bucketCount,
             docIndexRange,
             bucketIdx,
+            groupSize,
             GetDataPtr(stats)
         );
     };
@@ -246,17 +308,18 @@ static void CalcScoresForSubCandidate(
             updateSplitScoreClosure);
     };
 
-    if (!ctx->UseTreeLevelCaching()) {
-        extractBucketIndex(TIndexRange<ui32>(0, fold.GetDocCount()));
-
+    // TODO(ilyzhin) make caching for nonsymmetric trees
+    if (!ctx->UseTreeLevelCaching() || ctx->Params.ObliviousTreeOptions->GrowPolicy != EGrowPolicy::SymmetricTree) {
         TVector<TBucketStats> stats;
         stats.yresize(bucketCount);
 
-        for (const auto& leafBounds : fold.LeavesBounds) {
+        for (auto leaf : leafs) {
+            const auto leafBounds = fold.LeavesBounds[leaf];
             if (leafBounds.Empty()) {
                 continue;
             }
 
+            extractBucketIndex(leafBounds);
             for (int dim : xrange(approxDimension)) {
                 calcStats(leafBounds, dim, stats);
                 calcScores(stats);
@@ -289,13 +352,11 @@ static void CalcScoresForSubCandidate(
                 }
             }
         } else {
-            for (auto idx : xrange(0, static_cast<int>(fold.LeavesCount), 2)) {
+            for (auto idx : xrange(0, static_cast<int>(fold.LeavesCount / 2))) {
                 auto leftLeaf = idx;
-                auto rightLeaf = idx + 1;
+                auto rightLeaf = idx + fold.LeavesCount / 2;
                 ui32 leftLeafSize = fold.LeavesBounds[leftLeaf].GetSize();
                 ui32 rightLeafSize = fold.LeavesBounds[rightLeaf].GetSize();
-                auto realLeftLeafIdx = fold.LeavesIndices[leftLeaf];
-                auto realRightLeafIdx = fold.LeavesIndices[rightLeaf];
 
                 auto smallIndexRange = leftLeafSize < rightLeafSize
                     ? fold.LeavesBounds[leftLeaf]
@@ -303,10 +364,10 @@ static void CalcScoresForSubCandidate(
                 extractBucketIndex(smallIndexRange);
                 for (int dim : xrange(approxDimension)) {
                     TArrayRef leftStatsRef(
-                        GetDataPtr(stats, bucketCount * (realLeftLeafIdx * approxDimension + dim)),
+                        GetDataPtr(stats, bucketCount * (leftLeaf * approxDimension + dim)),
                         bucketCount);
                     TArrayRef rightStatsRef(
-                        GetDataPtr(stats, bucketCount * (realRightLeafIdx * approxDimension + dim)),
+                        GetDataPtr(stats, bucketCount * (rightLeaf * approxDimension + dim)),
                         bucketCount);
                     calcStats(smallIndexRange, dim, rightStatsRef);
                     calcScores(rightStatsRef);
@@ -331,6 +392,7 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
     const TCandidatesInfoList& candidate,
     const TCalcScoreFold& fold,
     const TFold& initialFold,
+    const TVector<TIndexType>& leafs,
     TLearnContext* ctx
 ) {
     TVector<TVector<double>> scores(candidate.Candidates.size());
@@ -349,12 +411,14 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
                 splitEnsemble,
                 *objectsDataProvider.GetQuantizedFeaturesInfo(),
                 objectsDataProvider.GetPackedBinaryFeaturesSize(),
-                objectsDataProvider.GetExclusiveFeatureBundlesMetaData()
+                objectsDataProvider.GetExclusiveFeatureBundlesMetaData(),
+                objectsDataProvider.GetFeaturesGroupsMetaData()
             );
             const int bucketIndexBitCount = GetValueBitCount(bucketCount - 1);
             TSplitEnsembleSpec splitEnsembleSpec(
                 splitEnsemble,
-                objectsDataProvider.GetExclusiveFeatureBundlesMetaData()
+                objectsDataProvider.GetExclusiveFeatureBundlesMetaData(),
+                objectsDataProvider.GetFeaturesGroupsMetaData()
             );
             const ui32 oneHotMaxSize = ctx->Params.CatFeatureParams.Get().OneHotMaxSize.Get();
             const int candidateSplitCount = CalcSplitsCount(
@@ -375,6 +439,7 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
                     bucketCount,
                     fold,
                     initialFold,
+                    leafs,
                     ctx,
                     &scoreCalcer);
             } else if (bucketIndexBitCount <= 16) {
@@ -384,6 +449,7 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
                     bucketCount,
                     fold,
                     initialFold,
+                    leafs,
                     ctx,
                     &scoreCalcer);
             } else {
@@ -404,6 +470,7 @@ TVector<TVector<double>> CalcScoresForOneCandidate(
     const TCandidatesInfoList& candidate,
     const TCalcScoreFold& fold,
     const TFold& initialFold,
+    const TVector<TIndexType>& leafs,
     TLearnContext* ctx
 ) {
     const auto scoreFunction = ctx->Params.ObliviousTreeOptions->ScoreFunction;
@@ -413,6 +480,7 @@ TVector<TVector<double>> CalcScoresForOneCandidate(
             candidate,
             fold,
             initialFold,
+            leafs,
             ctx);
     } else if (scoreFunction == EScoreFunction::L2) {
         return CalcScoresForOneCandidateImpl<TL2ScoreCalcer>(
@@ -420,8 +488,38 @@ TVector<TVector<double>> CalcScoresForOneCandidate(
             candidate,
             fold,
             initialFold,
+            leafs,
             ctx);
     } else {
         CB_ENSURE(false, "Error: score function for CPU should be Cosine or L2");
     }
+}
+
+
+double CalcScoreWithoutSplit(int leaf, const TFold& fold, const TLearnContext& ctx) {
+    // TODO(ilyzhin) make parallel
+    const auto& leafBounds = ctx.SampledDocs.LeavesBounds[leaf];
+    double sumWeightedDerivatives = 0;
+    const auto& ders = ctx.SampledDocs.BodyTailArr[0].SampleWeightedDerivatives;
+    for (auto dim : xrange(ctx.LearnProgress->ApproxDimension)) {
+        sumWeightedDerivatives += Accumulate(
+            ders[dim].begin() + leafBounds.Begin,
+            ders[dim].begin() + leafBounds.End,
+            0.0);
+    }
+    double sumWeights = Accumulate(
+        ctx.SampledDocs.SampleWeights.begin() + leafBounds.Begin,
+        ctx.SampledDocs.SampleWeights.begin() + leafBounds.End,
+        0.0);
+    TBucketStats stats {sumWeightedDerivatives, sumWeights, 0, 0};
+
+    const double sumAllWeights = fold.BodyTailArr[0].BodySumWeight;
+    const int docCount = fold.BodyTailArr[0].BodyFinish;
+    const double scaledL2Regularizer = ScaleL2Reg(ctx.Params.ObliviousTreeOptions->L2Reg, sumAllWeights, docCount);
+
+    auto scoreCalcer = MakePointwiseScoreCalcer(ctx.Params.ObliviousTreeOptions->ScoreFunction);
+    scoreCalcer->SetL2Regularizer(scaledL2Regularizer);
+    scoreCalcer->SetSplitsCount(1);
+    scoreCalcer->AddLeafPlain(0, stats, {});
+    return scoreCalcer->GetScores()[0];
 }

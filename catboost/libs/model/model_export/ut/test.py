@@ -25,7 +25,7 @@ def _get_train_test_pool(dataset):
     return (train_pool, test_pool)
 
 
-def _get_cpp_py_cbm_model(dataset):
+def _get_cpp_py_cbm_model(dataset, parameters=[]):
     train_path, _, cd_path = _get_train_test_cd_path(dataset)
     basename = yatest.common.test_output_path('model')
     cmd = [CATBOOST_APP_PATH, 'fit',
@@ -37,7 +37,7 @@ def _get_cpp_py_cbm_model(dataset):
            '--model-format', 'CPP',
            '--model-format', 'Python',
            '--model-format', 'CatboostBinary',
-           ]
+           ] + parameters
     yatest.common.execute(cmd)
     assert os.path.exists(basename + '.cpp')
     assert os.path.exists(basename + '.py')
@@ -49,9 +49,9 @@ def _check_data(data1, data2, rtol=0.001):
     return np.all(np.isclose(data1, data2, rtol=rtol, equal_nan=True))
 
 
-@pytest.mark.parametrize('dataset', ['adult', 'higgs'])
-def test_cpp_export(dataset):
-    model_cpp, _, model_cbm = _get_cpp_py_cbm_model(dataset)
+@pytest.mark.parametrize('dataset,parameters', [('adult', []), ('adult', ['-I', '3']), ('higgs', [])])
+def test_cpp_export(dataset, parameters):
+    model_cpp, _, model_cbm = _get_cpp_py_cbm_model(dataset, parameters)
     _, test_path, cd_path = _get_train_test_cd_path(dataset)
 
     # form the commands we are going to run
@@ -140,7 +140,7 @@ def _predict_python_on_test(dataset, apply_catboost_model):
     pred_python = []
 
     for _, row in features_data.iterrows():
-        float_features = [float(v) for v in row.values[float_feature_indices]]
+        float_features = [round(v, 9) for v in row.values[float_feature_indices]]
         cat_features = row.values[cat_feature_indices]
         pred_python.append(apply_catboost_model(float_features, cat_features))
     return pred_python
@@ -164,7 +164,6 @@ def test_python_export_from_app(dataset):
 
 @pytest.mark.parametrize('iterations', [2, 40])
 @pytest.mark.parametrize('dataset', ['adult', 'higgs'])
-@pytest.mark.xfail(reason='MLTOOLS-4300')
 def test_python_export_from_python(dataset, iterations):
     train_pool, test_pool = _get_train_test_pool(dataset)
 
@@ -183,7 +182,6 @@ def test_python_export_from_python(dataset, iterations):
 
 
 @pytest.mark.parametrize('dataset', ['adult', 'higgs'])
-@pytest.mark.xfail(reason='MLTOOLS-4300')
 def test_python_after_load(dataset):
     train_pool, test_pool = _get_train_test_pool(dataset)
     model = CatBoostClassifier(iterations=40, random_seed=0)

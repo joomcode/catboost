@@ -7,13 +7,13 @@
 #include "smart_ptr.h"
 #include "utils.h"
 
-#include <library/dns/cache.h>
 #include <library/http/push_parser/http_parser.h>
 #include <library/http/misc/httpcodes.h>
 #include <library/http/misc/parsed_request.h>
 #include <library/neh/asio/executor.h>
 
 #include <util/generic/singleton.h>
+#include <util/generic/vector.h>
 #include <util/network/iovec.h>
 #include <util/stream/output.h>
 #include <util/stream/zlib.h>
@@ -23,6 +23,7 @@
 #include <util/system/spinlock.h>
 #include <util/system/yassert.h>
 #include <util/thread/factory.h>
+#include <util/thread/singleton.h>
 #include <util/system/sanitizers.h>
 
 #include <atomic>
@@ -32,6 +33,8 @@
 #endif
 
 #if defined(_linux_)
+#undef SIOCGSTAMP
+#undef SIOCGSTAMPNS
 #include <linux/sockios.h>
 #define FIONWRITE SIOCOUTQ
 #endif
@@ -80,6 +83,8 @@ static TDuration FixTimeoutForSanitizer(const TDuration timeout) {
 }
 
 TDuration THttp2Options::ConnectTimeout = FixTimeoutForSanitizer(TDuration::MilliSeconds(1000));
+TDuration THttp2Options::InputDeadline = TDuration::Max();
+TDuration THttp2Options::OutputDeadline = TDuration::Max();
 TDuration THttp2Options::SymptomSlowConnect = FixTimeoutForSanitizer(TDuration::MilliSeconds(10));
 size_t THttp2Options::InputBufferSize = 16 * 1024;
 bool THttp2Options::KeepInputBufferForCachedConnections = false;
@@ -105,6 +110,8 @@ bool THttp2Options::Set(TStringBuf name, TStringBuf value) {
     }
 
     HTTP2_TRY_SET(TDuration, ConnectTimeout)
+    else HTTP2_TRY_SET(TDuration, InputDeadline)
+    else HTTP2_TRY_SET(TDuration, OutputDeadline)
     else HTTP2_TRY_SET(TDuration, SymptomSlowConnect) else HTTP2_TRY_SET(size_t, InputBufferSize) else HTTP2_TRY_SET(bool, KeepInputBufferForCachedConnections) else HTTP2_TRY_SET(size_t, AsioThreads) else HTTP2_TRY_SET(size_t, AsioServerThreads) else HTTP2_TRY_SET(bool, EnsureSendingCompleteByAck) else HTTP2_TRY_SET(int, Backlog) else HTTP2_TRY_SET(TDuration, ServerInputDeadline) else HTTP2_TRY_SET(TDuration, ServerOutputDeadline) else HTTP2_TRY_SET(TDuration, ServerInputDeadlineKeepAliveMax) else HTTP2_TRY_SET(TDuration, ServerInputDeadlineKeepAliveMin) else HTTP2_TRY_SET(bool, ServerUseDirectWrite) else HTTP2_TRY_SET(bool, UseResponseAsErrorMessage) else HTTP2_TRY_SET(bool, FullHeadersAsErrorMessage) else HTTP2_TRY_SET(bool, ErrorDetailsAsResponseBody) else HTTP2_TRY_SET(bool, RedirectionNotError) else HTTP2_TRY_SET(bool, TcpKeepAlive) else {
         return false;
     }
@@ -161,8 +168,10 @@ namespace {
     std::atomic<size_t> TDebugStat::RequestFailed = 0;
 #endif
 
-    static inline void PrepareSocket(SOCKET s) {
-        SetNoDelay(s, true);
+    static inline void PrepareSocket(SOCKET s, const TRequestSettings& requestSettings = TRequestSettings()) {
+        if (requestSettings.NoDelay) {
+            SetNoDelay(s, true);
+        }
     }
 
     bool Compress(TData& data, const TString& compressionScheme) {
@@ -235,6 +244,42 @@ namespace {
     struct TRequestFull2: public TRequestFull {
         static inline TStringBuf Name() noexcept {
             return AsStringBuf("full2");
+        }
+    };
+
+    struct TRequestUnixSocketGet: public TRequestGet {
+        static inline TStringBuf Name() noexcept {
+            return AsStringBuf("http+unix");
+        }
+
+        static TRequestSettings RequestSettings() {
+            return TRequestSettings()
+                .SetNoDelay(false)
+                .SetResolverType(EResolverType::EUNIXSOCKET);
+        }
+    };
+
+    struct TRequestUnixSocketPost: public TRequestPost {
+        static inline TStringBuf Name() noexcept {
+            return AsStringBuf("post+unix");
+        }
+
+        static TRequestSettings RequestSettings() {
+            return TRequestSettings()
+                .SetNoDelay(false)
+                .SetResolverType(EResolverType::EUNIXSOCKET);
+        }
+    };
+
+    struct TRequestUnixSocketFull: public TRequestFull {
+        static inline TStringBuf Name() noexcept {
+            return AsStringBuf("full+unix");
+        }
+
+        static TRequestSettings RequestSettings() {
+            return TRequestSettings()
+                .SetNoDelay(false)
+                .SetResolverType(EResolverType::EUNIXSOCKET);
         }
     };
 
@@ -318,8 +363,8 @@ namespace {
 
         typedef TIntrusivePtr<THandle> THandleRef;
 
-        static void Run(THandleRef& h, const TMessage& msg, TRequestBuilder f) {
-            THttpRequestRef req(new THttpRequest(h, msg, f));
+        static void Run(THandleRef& h, const TMessage& msg, TRequestBuilder f, const TRequestSettings& s) {
+            THttpRequestRef req(new THttpRequest(h, msg, f, s));
             req->WeakThis_ = req;
             h->SetRequest(req->WeakThis_);
             req->Run(req);
@@ -330,12 +375,13 @@ namespace {
         }
 
     private:
-        THttpRequest(THandleRef& h, const TMessage& msg, TRequestBuilder f)
+        THttpRequest(THandleRef& h, const TMessage& msg, TRequestBuilder f, const TRequestSettings& s)
             : Hndl_(h)
             , RequestBuilder_(f)
+            , RequestSettings_(s)
             , Msg_(msg)
             , Loc_(msg.Addr)
-            , Addr_(CachedResolve(TResolveInfo(Loc_.Host, Loc_.GetPort())))
+            , Addr_(Resolve(TString{Loc_.Host}, Loc_.GetPort(), RequestSettings_.ResolverType))
             , AddrIter_(Addr_->Addr.Begin())
             , Canceled_(false)
             , RequestSendedCompletely_(false)
@@ -347,6 +393,10 @@ namespace {
     public:
         THttpRequestBuffersPtr BuildRequest() {
             return new THttpRequestBuffers(RequestBuilder_(Msg_, Loc_));
+        }
+
+        TRequestSettings RequestSettings() {
+            return RequestSettings_;
         }
 
         //can create a spare socket in an attempt to decrease connecting time
@@ -429,6 +479,7 @@ namespace {
         TSpinLock SL_; //guaranted calling notify() only once (prevent race between asio thread and current)
         THandleRef Hndl_;
         TRequestBuilder RequestBuilder_;
+        TRequestSettings RequestSettings_;
         const TMessage Msg_;
         const TParsedLocation Loc_;
         const TResolvedHost* Addr_;
@@ -632,7 +683,7 @@ namespace {
                 }
 
                 try {
-                    PrepareSocket(AS_.Native());
+                    PrepareSocket(AS_.Native(), req->RequestSettings());
                     if (THttp2Options::TcpKeepAlive) {
                         SetKeepAlive(AS_.Native(), true);
                     }
@@ -675,7 +726,7 @@ namespace {
                 StartRead();
             } else {
                 NAsio::TTcpSocket::TSendedData sd(bfs.Release());
-                AS_.AsyncWrite(sd, std::bind(&THttpConn::OnWrite, THttpConnRef(this), _1, _2, _3));
+                AS_.AsyncWrite(sd, std::bind(&THttpConn::OnWrite, THttpConnRef(this), _1, _2, _3), THttp2Options::OutputDeadline);
             }
         }
 
@@ -694,7 +745,7 @@ namespace {
         inline void StartRead() {
             if (!InAsyncRead_ && !Canceled_) {
                 InAsyncRead_ = true;
-                AS_.AsyncPollRead(std::bind(&THttpConn::OnCanRead, THttpConnRef(this), _1, _2));
+                AS_.AsyncPollRead(std::bind(&THttpConn::OnCanRead, THttpConnRef(this), _1, _2), THttp2Options::InputDeadline);
             }
         }
 
@@ -734,7 +785,7 @@ namespace {
                         }
                     }
                     //continue async. read from socket
-                    ctx.ContinueUseHandler();
+                    ctx.ContinueUseHandler(THttp2Options::InputDeadline);
 
                     return;
                 }
@@ -763,7 +814,7 @@ namespace {
                     Buff_.Destroy();
                 }
                 //continue async. read from socket
-                ctx.ContinueUseHandler();
+                ctx.ContinueUseHandler(THttp2Options::InputDeadline);
 
                 PutSelfToCache();
             } catch (...) {
@@ -1867,7 +1918,7 @@ namespace {
         THandleRef ScheduleRequest(const TMessage& msg, IOnRecv* fallback, TServiceStatRef& ss) override {
             THttpRequest::THandleRef ret(new THttpRequest::THandle(fallback, msg, !ss ? nullptr : new TStatCollector(ss)));
             try {
-                THttpRequest::Run(ret, msg, &T::Build);
+                THttpRequest::Run(ret, msg, &T::Build, T::RequestSettings());
             } catch (...) {
                 ret->ResetOnRecv();
                 throw;
@@ -1904,6 +1955,15 @@ namespace NNeh {
     IProtocol* Full2Protocol() {
         return Singleton<THttp2Protocol<TRequestFull2>>();
     }
+    IProtocol* UnixSocketGetProtocol() {
+        return Singleton<THttp2Protocol<TRequestUnixSocketGet>>();
+    }
+    IProtocol* UnixSocketPostProtocol() {
+        return Singleton<THttp2Protocol<TRequestUnixSocketPost>>();
+    }
+    IProtocol* UnixSocketFullProtocol() {
+        return Singleton<THttp2Protocol<TRequestUnixSocketFull>>();
+    }
 
     void SetHttp2OutputConnectionsLimits(size_t softLimit, size_t hardLimit) {
         HttpConnManager()->SetLimits(softLimit, hardLimit);
@@ -1929,6 +1989,40 @@ namespace NNeh {
     void SetHttp2InputConnectionsTimeouts(unsigned minSeconds, unsigned maxSeconds) {
         THttp2Options::ServerInputDeadlineKeepAliveMin = TDuration::Seconds(minSeconds);
         THttp2Options::ServerInputDeadlineKeepAliveMax = TDuration::Seconds(maxSeconds);
+    }
+
+    class TUnixSocketResolver {
+    public:
+        NDns::TResolvedHost* Resolve(const TString& path) {
+            TString unixSocketPath = path;
+            if (path.size() > 2 && path[0] == '[' && path[path.size() - 1] == ']') {
+                unixSocketPath = path.substr(1, path.size() - 2);
+            }
+
+            if (auto resolvedUnixSocket = ResolvedUnixSockets_.FindPtr(unixSocketPath)) {
+                return resolvedUnixSocket->Get();
+            }
+
+            TNetworkAddress na{TUnixSocketPath(unixSocketPath)};
+            ResolvedUnixSockets_[unixSocketPath] = MakeHolder<NDns::TResolvedHost>(unixSocketPath, na);
+
+            return ResolvedUnixSockets_[unixSocketPath].Get();
+        }
+
+    private:
+        THashMap<TString, THolder<NDns::TResolvedHost>> ResolvedUnixSockets_;
+    };
+
+    TUnixSocketResolver* UnixSocketResolver() {
+        return FastTlsSingleton<TUnixSocketResolver>();
+    }
+
+    const NDns::TResolvedHost* Resolve(const TString& host, ui16 port, NHttp::EResolverType resolverType) {
+        if (resolverType == EResolverType::EUNIXSOCKET) {
+            return UnixSocketResolver()->Resolve(host);
+        }
+        return NDns::CachedResolve(NDns::TResolveInfo(host, port));
+
     }
 }
 

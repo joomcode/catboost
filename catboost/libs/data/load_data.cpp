@@ -8,6 +8,7 @@
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/int_cast.h>
 #include <catboost/libs/logging/logging.h>
+#include <catboost/private/libs/data_util/exists_checker.h>
 
 #include <util/datetime/base.h>
 
@@ -15,20 +16,23 @@
 namespace NCB {
 
     TDataProviderPtr ReadDataset(
+        TMaybe<ETaskType> taskType,
         const TPathWithScheme& poolPath,
         const TPathWithScheme& pairsFilePath, // can be uninited
         const TPathWithScheme& groupWeightsFilePath, // can be uninited
+        const TPathWithScheme& timestampsFilePath, // can be uninited
         const TPathWithScheme& baselineFilePath, // can be uninited
+        const TPathWithScheme& featureNamesPath, // can be uninited
         const NCatboostOptions::TColumnarPoolFormatParams& columnarPoolFormatParams,
         const TVector<ui32>& ignoredFeatures,
         EObjectsOrder objectsOrder,
         TDatasetSubset loadSubset,
-        TMaybe<TVector<TString>*> classNames,
+        TMaybe<TVector<NJson::TJsonValue>*> classLabels,
         NPar::TLocalExecutor* localExecutor
     ) {
-        CB_ENSURE_INTERNAL(!baselineFilePath.Inited() || classNames, "ClassNames must be specified if baseline file is specified");
-        if (classNames) {
-            UpdateClassNamesFromBaselineFile(baselineFilePath, *classNames);
+        CB_ENSURE_INTERNAL(!baselineFilePath.Inited() || classLabels, "ClassLabels must be specified if baseline file is specified");
+        if (classLabels) {
+            UpdateClassLabelsFromBaselineFile(baselineFilePath, *classLabels);
         }
         auto datasetLoader = GetProcessor<IDatasetLoader>(
             poolPath, // for choosing processor
@@ -41,7 +45,9 @@ namespace NCB {
                     pairsFilePath,
                     groupWeightsFilePath,
                     baselineFilePath,
-                    classNames ? **classNames : TVector<TString>(),
+                    timestampsFilePath,
+                    featureNamesPath,
+                    classLabels ? **classLabels : TVector<NJson::TJsonValue>(),
                     columnarPoolFormatParams.DsvFormat,
                     MakeCdProviderFromFile(columnarPoolFormatParams.CdFilePath),
                     ignoredFeatures,
@@ -53,9 +59,15 @@ namespace NCB {
             }
         );
 
+        TDataProviderBuilderOptions builderOptions;
+        builderOptions.GpuDistributedFormat = !loadSubset.HasFeatures && taskType && *taskType == ETaskType::GPU
+            && EDatasetVisitorType::QuantizedFeatures == datasetLoader->GetVisitorType()
+            && poolPath.Inited() && IsSharedFs(poolPath);
+        builderOptions.PoolPath = poolPath;
+
         THolder<IDataProviderBuilder> dataProviderBuilder = CreateDataProviderBuilder(
             datasetLoader->GetVisitorType(),
-            TDataProviderBuilderOptions{},
+            builderOptions,
             loadSubset,
             localExecutor
         );
@@ -70,16 +82,19 @@ namespace NCB {
 
 
     TDataProviderPtr ReadDataset(
+        TMaybe<ETaskType> taskType,
         const TPathWithScheme& poolPath,
         const TPathWithScheme& pairsFilePath, // can be uninited
         const TPathWithScheme& groupWeightsFilePath, // can be uninited
+        const TPathWithScheme& timestampsFilePath, // can be uninited
         const TPathWithScheme& baselineFilePath, // can be uninited
+        const TPathWithScheme& featureNamesPath, // can be uninited
         const NCatboostOptions::TColumnarPoolFormatParams& columnarPoolFormatParams,
         const TVector<ui32>& ignoredFeatures,
         EObjectsOrder objectsOrder,
         int threadCount,
         bool verbose,
-        TMaybe<TVector<TString>*> classNames
+        TMaybe<TVector<NJson::TJsonValue>*> classLabels
     ) {
         NPar::TLocalExecutor localExecutor;
         localExecutor.RunAdditionalThreads(threadCount - 1);
@@ -87,15 +102,18 @@ namespace NCB {
         TSetLoggingVerboseOrSilent inThisScope(verbose);
 
         TDataProviderPtr dataProviderPtr = ReadDataset(
+            taskType,
             poolPath,
             pairsFilePath,
             groupWeightsFilePath,
+            timestampsFilePath,
             baselineFilePath,
+            featureNamesPath,
             columnarPoolFormatParams,
             ignoredFeatures,
             objectsOrder,
             TDatasetSubset::MakeColumns(),
-            classNames,
+            classLabels,
             &localExecutor
         );
 
@@ -107,12 +125,14 @@ namespace NCB {
         THolder<ILineDataReader> poolReader,
         const TPathWithScheme& pairsFilePath, // can be uninited
         const TPathWithScheme& groupWeightsFilePath, // can be uninited
+        const TPathWithScheme& timestampsFilePath, // can be uninited
         const TPathWithScheme& baselineFilePath, // can be uninited
-        const NCB::TDsvFormatOptions& poolFormat,
+        const TPathWithScheme& featureNamesPath, // can be uninited
+        const TDsvFormatOptions& poolFormat,
         const TVector<TColumn>& columnsDescription, // TODO(smirnovpavel): TVector<EColumn>
         const TVector<ui32>& ignoredFeatures,
         EObjectsOrder objectsOrder,
-        TMaybe<TVector<TString>*> classNames,
+        TMaybe<TVector<NJson::TJsonValue>*> classLabels,
         NPar::TLocalExecutor* localExecutor
     ) {
         const auto loadSubset = TDatasetSubset::MakeColumns();
@@ -135,7 +155,9 @@ namespace NCB {
                     pairsFilePath,
                     groupWeightsFilePath,
                     baselineFilePath,
-                    classNames ? **classNames : TVector<TString>(),
+                    timestampsFilePath,
+                    featureNamesPath,
+                    classLabels ? **classLabels : TVector<NJson::TJsonValue>(),
                     poolFormat,
                     MakeCdProviderFromArray(columnsDescription),
                     ignoredFeatures,
@@ -151,15 +173,20 @@ namespace NCB {
     }
 
     TDataProviders ReadTrainDatasets(
+        TMaybe<ETaskType> taskType,
         const NCatboostOptions::TPoolLoadParams& loadOptions,
         EObjectsOrder objectsOrder,
         bool readTestData,
         TDatasetSubset trainDatasetSubset,
-        TMaybe<TVector<TString>*> classNames,
+        TMaybe<TVector<NJson::TJsonValue>*> classLabels,
         NPar::TLocalExecutor* const executor,
         TProfileInfo* const profile
     ) {
-        loadOptions.Validate();
+        if (readTestData) {
+            loadOptions.Validate();
+        } else {
+            loadOptions.ValidateLearn();
+        }
 
         TDataProviders dataProviders;
 
@@ -167,15 +194,18 @@ namespace NCB {
             CATBOOST_DEBUG_LOG << "Loading features..." << Endl;
             auto start = Now();
             dataProviders.Learn = ReadDataset(
+                taskType,
                 loadOptions.LearnSetPath,
                 loadOptions.PairsFilePath,
                 loadOptions.GroupWeightsFilePath,
+                loadOptions.TimestampsFilePath,
                 loadOptions.BaselineFilePath,
+                loadOptions.FeatureNamesPath,
                 loadOptions.ColumnarPoolFormatParams,
                 loadOptions.IgnoredFeatures,
                 objectsOrder,
                 trainDatasetSubset,
-                classNames,
+                classLabels,
                 executor
             );
             CATBOOST_DEBUG_LOG << "Loading features time: " << (Now() - start).Seconds() << Endl;
@@ -193,19 +223,24 @@ namespace NCB {
                         testIdx == 0 ? loadOptions.TestPairsFilePath : NCB::TPathWithScheme();
                 const NCB::TPathWithScheme& testGroupWeightsFilePath =
                     testIdx == 0 ? loadOptions.TestGroupWeightsFilePath : NCB::TPathWithScheme();
+                const NCB::TPathWithScheme& testTimestampsFilePath =
+                    testIdx == 0 ? loadOptions.TestTimestampsFilePath : NCB::TPathWithScheme();
                 const NCB::TPathWithScheme& testBaselineFilePath =
                     testIdx == 0 ? loadOptions.TestBaselineFilePath : NCB::TPathWithScheme();
 
                 TDataProviderPtr testDataProvider = ReadDataset(
+                    taskType,
                     testSetPath,
                     testPairsFilePath,
                     testGroupWeightsFilePath,
+                    testTimestampsFilePath,
                     testBaselineFilePath,
+                    loadOptions.FeatureNamesPath,
                     loadOptions.ColumnarPoolFormatParams,
                     loadOptions.IgnoredFeatures,
                     objectsOrder,
                     TDatasetSubset::MakeColumns(),
-                    classNames,
+                    classLabels,
                     executor
                 );
                 dataProviders.Test.push_back(std::move(testDataProvider));

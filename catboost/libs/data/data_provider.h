@@ -391,8 +391,8 @@ namespace NCB {
             }
 
             const auto& targets = TargetData->GetTarget();
-            if (targets.Defined() && !targets->empty()) {
-                auto targetBounds = CalcMinMax(*targets);
+            if (targets.Defined() && MetaInfo.ObjectCount > 0 && targets->size() == 1) {
+                auto targetBounds = CalcMinMax(MakeConstArrayRef(targets->front()));
                 MetaInfo.TargetStats = {targetBounds.Min, targetBounds.Max};
             }
         }

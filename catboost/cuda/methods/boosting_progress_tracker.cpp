@@ -25,6 +25,7 @@ namespace NCatboostCuda {
                                                        bool testHasTarget,
                                                        ui32 cpuApproxDim,
                                                        bool hasWeights,
+                                                       TMaybe<ui32> learnAndTestCheckSum,
                                                        ITrainingCallbacks* trainingCallbacks)
         : CatboostOptions(catBoostOptions)
         , OutputOptions(outputFilesOptions)
@@ -45,6 +46,7 @@ namespace NCatboostCuda {
         , IsSkipOnTestFlags(GetSkipMetricOnTest(testHasTarget, GetCpuMetrics(Metrics)))
         , CalcEvalMetricOnEveryIteration(forceCalcEvalMetricOnEveryIteration || ErrorTracker.IsActive())
         , HasWeights(hasWeights)
+        , LearnAndTestQuantizedFeaturesCheckSum(learnAndTestCheckSum)
     {
         if (OutputOptions.AllowWriteFiles()) {
             InitializeFileLoggers(CatboostOptions,
@@ -159,6 +161,9 @@ namespace NCatboostCuda {
 
         try {
             TProgressHelper(GpuProgressLabel()).CheckedLoad(OutputFiles.SnapshotFile, [&](TIFStream* in) {
+                if (!TrainingCallbacks->OnLoadSnapshot(in)) {
+                    return;
+                }
                 TString taskOptionsStr;
                 ::Load(in, taskOptionsStr);
                 const bool paramsCompatible = NCatboostOptions::IsParamsCompatible(CatBoostOptionsStr, taskOptionsStr);
@@ -169,8 +174,15 @@ namespace NCatboostCuda {
                 ::Load(in, profileData);
                 ProfileInfo.InitProfileInfo(std::move(profileData));
 
+                TMaybe<ui32> learnAndTestCheckSum;
+                ::Load(in, learnAndTestCheckSum);
+                if (learnAndTestCheckSum.Defined() && LearnAndTestQuantizedFeaturesCheckSum.Defined()) {
+                    CB_ENSURE(
+                        learnAndTestCheckSum.GetRef() == LearnAndTestQuantizedFeaturesCheckSum.GetRef(),
+                        "Saved model's learn and test checksum is different from current model's learn and test checksum");
+                }
+
                 loader(in);
-                TrainingCallbacks->OnSnapshotLoaded(in);
             });
         } catch (const TCatBoostException&) {
             throw;
@@ -216,13 +228,16 @@ namespace NCatboostCuda {
 
     void TBoostingProgressTracker::MaybeSaveSnapshot(std::function<void(IOutputStream*)> saver) {
         if (IsTimeToSaveSnapshot()) {
-            TProgressHelper(GpuProgressLabel()).Write(OutputFiles.SnapshotFile, [&](IOutputStream* out) {
+            const auto snapshotBackup = OutputFiles.SnapshotFile + ".bak";
+            TProgressHelper(GpuProgressLabel()).Write(snapshotBackup, [&](IOutputStream* out) {
+                TrainingCallbacks->OnSaveSnapshot(out);
                 ::Save(out, CatBoostOptionsStr);
                 ::Save(out, History);
                 ::Save(out, ProfileInfo.DumpProfileInfo());
+                ::Save(out, LearnAndTestQuantizedFeaturesCheckSum);
                 saver(out);
-                TrainingCallbacks->OnSnapshotSaved(out);
             });
+            TFsPath(snapshotBackup).ForceRenameTo(OutputFiles.SnapshotFile);
             LastSnapshotTime = Now();
         }
     }

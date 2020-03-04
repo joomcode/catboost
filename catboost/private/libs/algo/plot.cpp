@@ -2,6 +2,7 @@
 
 #include "apply.h"
 
+#include <catboost/libs/helpers/matrix.h>
 #include <catboost/libs/loggers/catboost_logger_helpers.h>
 #include <catboost/libs/loggers/logger.h>
 #include <catboost/libs/logging/logging.h>
@@ -72,7 +73,7 @@ TMetricsPlotCalcer::TMetricsPlotCalcer(
 
 void TMetricsPlotCalcer::ComputeAdditiveMetric(
     const TVector<TVector<double>>& approx,
-    TConstArrayRef<float> target,
+    TMaybeData<TConstArrayRef<TConstArrayRef<float>>> target,
     TConstArrayRef<float> weights,
     TConstArrayRef<TQueryInfo> queriesInfo,
     ui32 plotLineIndex
@@ -81,7 +82,7 @@ void TMetricsPlotCalcer::ComputeAdditiveMetric(
         approx,
         /*approxDelts*/{},
         /*isExpApprox*/false,
-        target,
+        target.GetOrElse(TConstArrayRef<TConstArrayRef<float>>()),
         weights,
         queriesInfo,
         AdditiveMetrics,
@@ -123,15 +124,25 @@ TMetricsPlotCalcer& TMetricsPlotCalcer::ProceedDataSetForNonAdditiveMetrics(
 ) {
     if (ProcessedIterationsCount == 0) {
         const ui32 newPoolSize
-            = NonAdditiveMetricsData.Target.size() + processedData.ObjectsData->GetObjectCount();
-        NonAdditiveMetricsData.Target.reserve(newPoolSize);
+            = NonAdditiveMetricsData.CumulativePoolSize + processedData.ObjectsData->GetObjectCount();
+        NonAdditiveMetricsData.CumulativePoolSize = newPoolSize;
         NonAdditiveMetricsData.Weights.reserve(newPoolSize);
 
-        const auto target = *processedData.TargetData->GetTarget();
-        NonAdditiveMetricsData.Target.insert(
-            NonAdditiveMetricsData.Target.end(),
-            target.begin(),
-            target.end());
+        if (const auto target = processedData.TargetData->GetTarget()) {
+            const ui32 targetDim = target->size();
+            if (NonAdditiveMetricsData.Target.empty()) {
+                NonAdditiveMetricsData.Target = TVector<TVector<float>>(targetDim);
+            }
+
+            for (auto targetIdx : xrange(targetDim)) {
+                NonAdditiveMetricsData.Target[targetIdx].reserve(newPoolSize);
+                NonAdditiveMetricsData.Target[targetIdx].insert(
+                    NonAdditiveMetricsData.Target[targetIdx].end(),
+                    (*target)[targetIdx].begin(),
+                    (*target)[targetIdx].end()
+                );
+            }
+        }
 
         const auto weights = GetWeights(*processedData.TargetData);
         NonAdditiveMetricsData.Weights.insert(
@@ -280,13 +291,15 @@ TMetricsPlotCalcer& TMetricsPlotCalcer::ProceedDataSet(
 void TMetricsPlotCalcer::ComputeNonAdditiveMetrics(ui32 begin, ui32 end) {
     const auto& target = NonAdditiveMetricsData.Target;
     const auto& weights = NonAdditiveMetricsData.Weights;
+    CB_ENSURE(target.size() == 1, "Multitarget metrics are not supported yet");
+
     for (auto idx : xrange(begin, end)) {
         auto approx = LoadApprox(idx);
         auto results = EvalErrorsWithCaching(
             approx,
             /*approxDelts*/{},
             /*isExpApprox*/false,
-            target,
+            To2DConstArrayRef<float>(target),
             weights,
             {},
             NonAdditiveMetrics,
@@ -303,12 +316,19 @@ void TMetricsPlotCalcer::ComputeNonAdditiveMetrics(ui32 begin, ui32 end) {
     }
 }
 
-static TVector<float> BuildTargets(const TVector<TProcessedDataProvider>& datasetParts) {
-    TVector<float> result;
-    result.reserve(GetDocCount(datasetParts));
+static TVector<TVector<float>> BuildTargets(const TVector<TProcessedDataProvider>& datasetParts) {
+    const auto targetDim = datasetParts.empty() ? 0 : datasetParts[0].TargetData->GetTargetDimension();
+
+    auto result = TVector<TVector<float>>(targetDim);
+    for (auto targetIdx : xrange(targetDim)) {
+        result[targetIdx].reserve(GetDocCount(datasetParts));
+    }
     for (const auto& datasetPart : datasetParts) {
+        CB_ENSURE(datasetPart.TargetData->GetTargetDimension() == targetDim, "Inconsistent target dimensionality between dataset parts");
         const auto target = *datasetPart.TargetData->GetTarget();
-        result.insert(result.end(), target.begin(), target.end());
+        for (auto targetIdx : xrange(targetDim)) {
+            result[targetIdx].insert(result[targetIdx].end(), target[targetIdx].begin(), target[targetIdx].end());
+        }
     }
     return result;
 }
@@ -335,8 +355,9 @@ static TVector<ui32> GetStartDocIdx(const TVector<TProcessedDataProvider>& datas
 }
 
 void TMetricsPlotCalcer::ComputeNonAdditiveMetrics(const TVector<TProcessedDataProvider>& datasetParts) {
-    TVector<float> allTargets = BuildTargets(datasetParts);
+    TVector<TVector<float>> allTargets = BuildTargets(datasetParts);
     TVector<float> allWeights = BuildWeights(datasetParts);
+    CB_ENSURE(allTargets.size() == 1, "Multitarget metrics are not supported yet");
 
 
     TVector<TVector<double>> curApprox;
@@ -370,7 +391,7 @@ void TMetricsPlotCalcer::ComputeNonAdditiveMetrics(const TVector<TProcessedDataP
             curApprox,
             /*approxDelts*/{},
             /*isExpApprox*/false,
-            allTargets,
+            To2DConstArrayRef<float>(allTargets),
             allWeights,
             {},
             NonAdditiveMetrics,
@@ -423,7 +444,7 @@ void TMetricsPlotCalcer::SaveApproxToFile(ui32 plotLineIndex, const TVector<TVec
 
 TVector<TVector<double>> TMetricsPlotCalcer::LoadApprox(ui32 plotLineIndex) {
     TIFStream input(GetApproxFileName(plotLineIndex));
-    ui32 docCount = NonAdditiveMetricsData.Target.size();
+    ui32 docCount = NonAdditiveMetricsData.CumulativePoolSize;
     TVector<TVector<double>> result(Model.GetDimensionsCount(), TVector<double>(docCount));
     Load(docCount, &input, &result);
     return result;

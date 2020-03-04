@@ -58,10 +58,7 @@ namespace NThreading {
                     state = AtomicGet(State);
                 }
 
-                if (Y_UNLIKELY(state == ExceptionSet)) {
-                    Y_ASSERT(Exception);
-                    std::rethrow_exception(Exception);
-                }
+                TryRethrowWithState(state);
 
                 switch (AtomicGetAndCas(&State, acquireState, ValueSet)) {
                     case ValueSet:
@@ -107,6 +104,11 @@ namespace NThreading {
 
             bool HasValue() const {
                 return AtomicGet(State) >= ValueMoved; // ValueMoved, ValueSet, ValueRead
+            }
+
+            void TryRethrow() const {
+                int state = AtomicGet(State);
+                TryRethrowWithState(state);
             }
 
             bool HasException() const {
@@ -232,6 +234,13 @@ namespace NThreading {
                 Y_ASSERT(readyEvent);
                 return readyEvent->WaitD(deadline);
             }
+
+            void TryRethrowWithState(int state) const {
+                if (Y_UNLIKELY(state == ExceptionSet)) {
+                    Y_ASSERT(Exception);
+                    std::rethrow_exception(Exception);
+                }
+            }
         };
 
         ////////////////////////////////////////////////////////////////////////////////
@@ -269,6 +278,11 @@ namespace NThreading {
                 return AtomicGet(State) == ValueSet;
             }
 
+            void TryRethrow() const {
+                int state = AtomicGet(State);
+                TryRethrowWithState(state);
+            }
+
             bool HasException() const {
                 return AtomicGet(State) == ExceptionSet;
             }
@@ -287,10 +301,7 @@ namespace NThreading {
                     state = AtomicGet(State);
                 }
 
-                if (Y_UNLIKELY(state == ExceptionSet)) {
-                    Y_ASSERT(Exception);
-                    std::rethrow_exception(Exception);
-                }
+                TryRethrowWithState(state);
 
                 Y_ASSERT(state == ValueSet);
             }
@@ -400,6 +411,13 @@ namespace NThreading {
                 Y_ASSERT(readyEvent);
                 return readyEvent->WaitD(deadline);
             }
+
+            void TryRethrowWithState(int state) const {
+                if (Y_UNLIKELY(state == ExceptionSet)) {
+                    Y_ASSERT(Exception);
+                    std::rethrow_exception(Exception);
+                }
+            }
         };
 
         ////////////////////////////////////////////////////////////////////////////////
@@ -428,7 +446,7 @@ namespace NThreading {
         inline void SetValueImpl(TPromise<void>& promise, const TFuture<void>& future) {
             future.Subscribe([=](const TFuture<void>& f) mutable {
                 try {
-                    f.GetValue();
+                    f.TryRethrow();
                     promise.SetValue();
                 } catch (...) {
                     promise.SetException(std::current_exception());
@@ -458,12 +476,12 @@ namespace NThreading {
 
         ////////////////////////////////////////////////////////////////////////////////
 
-        struct TWaitAll: public TAtomicRefCount<TWaitAll> {
+        struct TWaitExceptionOrAll: public TAtomicRefCount<TWaitExceptionOrAll> {
             TPromise<void> Promise;
             size_t Count;
             TSpinLock Lock;
 
-            TWaitAll(size_t count)
+            TWaitExceptionOrAll(size_t count)
                 : Promise(NewPromise())
                 , Count(count)
             {
@@ -473,7 +491,7 @@ namespace NThreading {
             void Set(const TFuture<T>& future) {
                 TGuard<TSpinLock> guard(Lock);
                 try {
-                    future.GetValue();
+                    future.TryRethrow();
                     if (--Count == 0) {
                         Promise.SetValue();
                     }
@@ -481,6 +499,44 @@ namespace NThreading {
                     Y_ASSERT(!Promise.HasValue());
                     if (!Promise.HasException()) {
                         Promise.SetException(std::current_exception());
+                    }
+                }
+            }
+        };
+
+        ////////////////////////////////////////////////////////////////////////////////
+
+        struct TWaitAll: public TAtomicRefCount<TWaitAll> {
+            TPromise<void> Promise;
+            size_t Count;
+            TSpinLock Lock;
+            std::exception_ptr Exception;
+
+            TWaitAll(size_t count)
+                : Promise(NewPromise())
+                , Count(count)
+                , Exception()
+            {
+            }
+
+            template<class T>
+            void Set(const TFuture<T>& future) {
+                TGuard<TSpinLock> guard(Lock);
+
+                if (!Exception) {
+                    try {
+                        future.TryRethrow();
+                    } catch (...) {
+                        Exception = std::current_exception();
+                    }
+                }
+
+                if (--Count == 0) {
+                    Y_ASSERT(!Promise.HasValue() && !Promise.HasException());
+                    if (Exception) {
+                        Promise.SetException(std::move(Exception));
+                    } else {
+                        Promise.SetValue();
                     }
                 }
             }
@@ -501,7 +557,7 @@ namespace NThreading {
             void Set(const TFuture<T>& future) {
                 if (Lock.TryAcquire()) {
                     try {
-                        future.GetValue();
+                        future.TryRethrow();
                         Promise.SetValue();
                     } catch (...) {
                         Y_ASSERT(!Promise.HasValue() && !Promise.HasException());
@@ -570,6 +626,13 @@ namespace NThreading {
     }
 
     template <typename T>
+    inline void TFuture<T>::TryRethrow() const {
+        if (State) {
+            State->TryRethrow();
+        }
+    }
+
+    template <typename T>
     inline bool TFuture<T>::HasException() const {
         return State && State->HasException();
     }
@@ -617,7 +680,7 @@ namespace NThreading {
         auto promise = NewPromise();
         Subscribe([=](const TFuture<T>& future) mutable {
             try {
-                future.GetValue();
+                future.TryRethrow();
                 promise.SetValue();
             } catch (...) {
                 promise.SetException(std::current_exception());
@@ -675,6 +738,12 @@ namespace NThreading {
         GetValue(TDuration::Max());
     }
 
+    inline void TFuture<void>::TryRethrow() const {
+        if (State) {
+            State->TryRethrow();
+        }
+    }
+
     inline bool TFuture<void>::HasException() const {
         return State && State->HasException();
     }
@@ -717,7 +786,7 @@ namespace NThreading {
         auto promise = NewPromise<R>();
         Subscribe([=](const TFuture<void>& future) mutable {
             try {
-                future.GetValue();
+                future.TryRethrow();
                 promise.SetValue(value);
             } catch (...) {
                 promise.SetException(std::current_exception());
@@ -807,6 +876,13 @@ namespace NThreading {
     }
 
     template <typename T>
+    inline void TPromise<T>::TryRethrow() const {
+        if (State) {
+            State->TryRethrow();
+        }
+    }
+
+    template <typename T>
     inline bool TPromise<T>::HasException() const {
         return State && State->HasException();
     }
@@ -887,6 +963,12 @@ namespace NThreading {
     inline bool TPromise<void>::TrySetValue() {
         EnsureInitialized();
         return State->TrySetValue();
+    }
+
+    inline void TPromise<void>::TryRethrow() const {
+        if(State) {
+            State->TryRethrow();
+        }
     }
 
     inline bool TPromise<void>::HasException() const {
@@ -996,6 +1078,50 @@ namespace NThreading {
         using TCallback = NImpl::TCallback<typename TContainer::value_type::value_type>;
 
         TIntrusivePtr<NImpl::TWaitAll> waiter = new NImpl::TWaitAll(futures.size());
+        auto callback = TCallback([=](const auto& future) mutable {
+            waiter->Set(future);
+        });
+
+        for (auto& fut : futures) {
+            fut.Subscribe(callback);
+        }
+
+        return waiter->Promise;
+    }
+
+
+    ////////////////////////////////////////////////////////////////////////////////
+
+    inline TFuture<void> WaitExceptionOrAll(const TFuture<void>& f1) {
+        return f1;
+    }
+
+    inline TFuture<void> WaitExceptionOrAll(const TFuture<void>& f1, const TFuture<void>& f2) {
+        using TCallback = NImpl::TCallback<void>;
+
+        TIntrusivePtr<NImpl::TWaitExceptionOrAll> waiter = new NImpl::TWaitExceptionOrAll(2);
+        auto callback = TCallback([=](const TFuture<void>& future) mutable {
+            waiter->Set(future);
+        });
+
+        f1.Subscribe(callback);
+        f2.Subscribe(callback);
+
+        return waiter->Promise;
+    }
+
+    template <typename TContainer>
+    inline TFuture<void> WaitExceptionOrAll(const TContainer& futures) {
+        if (futures.empty()) {
+            return MakeFuture();
+        }
+        if (futures.size() == 1) {
+            return futures.front().IgnoreResult();
+        }
+
+        using TCallback = NImpl::TCallback<typename TContainer::value_type::value_type>;
+
+        TIntrusivePtr<NImpl::TWaitExceptionOrAll> waiter = new NImpl::TWaitExceptionOrAll(futures.size());
         auto callback = TCallback([=](const auto& future) mutable {
             waiter->Set(future);
         });

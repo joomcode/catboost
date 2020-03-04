@@ -36,19 +36,15 @@ namespace NCB {
         bool CpuCompatibleFormat = true;
         bool GpuCompatibleFormat = true;
         ui64 CpuRamLimit = Max<ui64>();
-        ui32 MaxSubsetSizeForSlowBuildBordersAlgorithms = 200000;
+        ui32 MaxSubsetSizeForBuildBordersAlgorithms = 200000;
         bool BundleExclusiveFeaturesForCpu = true;
         TExclusiveFeaturesBundlingOptions ExclusiveFeaturesBundlingOptions{};
         bool PackBinaryFeaturesForCpu = true;
         bool GroupFeaturesForCpu = false;
         TFeaturesGroupingOptions FeaturesGroupingOptions{};
-        bool AllowWriteFiles = true;
 
         TMaybe<float> DefaultValueFractionToEnableSparseStorage = Nothing();
         ESparseArrayIndexingType SparseArrayIndexingType = ESparseArrayIndexingType::Indices;
-
-        // TODO(akhropov): remove after checking global tests consistency
-        bool CpuCompatibilityShuffleOverFullData = true;
     };
 
     /*
@@ -135,11 +131,10 @@ namespace NCB {
     );
 
     TQuantizedObjectsDataProviderPtr GetQuantizedObjectsData(
-        NCatboostOptions::TCatBoostOptions* params,
+        const NCatboostOptions::TCatBoostOptions& params,
         TDataProviderPtr srcData,
         const TMaybe<TString>& bordersFile,
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
-        bool allowWriteFiles,
         NPar::TLocalExecutor* localExecutor,
         TRestorableFastRng64* rand,
         const TInitialBorders& initialBorders = Nothing()

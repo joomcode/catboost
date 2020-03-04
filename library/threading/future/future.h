@@ -37,6 +37,12 @@ namespace NThreading {
     template <typename TContainer>
     [[nodiscard]] TFuture<void> WaitAll(const TContainer& futures);
 
+    // waits for the first exception or for all futures
+    [[nodiscard]] TFuture<void> WaitExceptionOrAll(const TFuture<void>& f1);
+    [[nodiscard]] TFuture<void> WaitExceptionOrAll(const TFuture<void>& f1, const TFuture<void>& f2);
+    template <typename TContainer>
+    [[nodiscard]] TFuture<void> WaitExceptionOrAll(const TContainer& futures);
+
     // waits for any future
     [[nodiscard]] TFuture<void> WaitAny(const TFuture<void>& f1);
     [[nodiscard]] TFuture<void> WaitAny(const TFuture<void>& f1, const TFuture<void>& f2);
@@ -99,6 +105,7 @@ namespace NThreading {
         T ExtractValue(TDuration timeout = TDuration::Zero());
         T ExtractValueSync();
 
+        void TryRethrow() const;
         bool HasException() const;
 
         void Wait() const;
@@ -142,6 +149,7 @@ namespace NThreading {
         void GetValue(TDuration timeout = TDuration::Zero()) const;
         void GetValueSync() const;
 
+        void TryRethrow() const;
         bool HasException() const;
 
         void Wait() const;
@@ -193,6 +201,7 @@ namespace NThreading {
         bool TrySetValue(const T& value);
         bool TrySetValue(T&& value);
 
+        void TryRethrow() const;
         bool HasException() const;
         void SetException(const TString& e);
         void SetException(std::exception_ptr e);
@@ -229,6 +238,7 @@ namespace NThreading {
         void SetValue();
         bool TrySetValue();
 
+        void TryRethrow() const;
         bool HasException() const;
         void SetException(const TString& e);
         void SetException(std::exception_ptr e);

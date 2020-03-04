@@ -1,23 +1,29 @@
 #include "mappers.h"
 
+#include <catboost/libs/helpers/matrix.h>
+
 #include <catboost/private/libs/algo/approx_calcer.h>
-#include <catboost/private/libs/algo/approx_calcer_multi.h>
+#include <catboost/private/libs/algo/approx_delta_calcer_multi.h>
 #include <catboost/private/libs/algo/approx_updater_helpers.h>
 #include <catboost/private/libs/algo/data.h>
-#include <catboost/private/libs/algo/scoring.h>
 #include <catboost/private/libs/algo/learn_context.h>
 #include <catboost/private/libs/algo/online_ctr.h>
 #include <catboost/private/libs/algo/preprocess.h>
+#include <catboost/private/libs/algo/scoring.h>
+#include <catboost/private/libs/algo/split.h>
 #include <catboost/private/libs/algo_helpers/approx_calcer_helpers.h>
+#include <catboost/private/libs/algo_helpers/approx_calcer_multi_helpers.h>
 #include <catboost/private/libs/algo_helpers/error_functions.h>
 #include <catboost/libs/data/load_data.h>
 #include <catboost/libs/helpers/exception.h>
+#include <catboost/libs/helpers/parallel_tasks.h>
 #include <catboost/libs/helpers/query_info_helper.h>
 #include <catboost/libs/helpers/vector_helpers.h>
 #include <catboost/private/libs/index_range/index_range.h>
 
 #include <util/generic/ymath.h>
 
+#include <limits>
 #include <utility>
 
 
@@ -86,38 +92,37 @@ namespace NCatboostDistributed {
     ) const {
         auto& localData = TLocalTensorSearchData::GetRef();
         if (localData.Rand == nullptr) {
-            localData.Rand = new TRestorableFastRng64(params->Data.RandomSeed + hostId);
+            localData.Rand = new TRestorableFastRng64(params->RandomSeed + hostId);
         }
 
         const int workerCount = ctx->GetHostIdCount();
         CATBOOST_DEBUG_LOG << "Worker count " << workerCount << Endl;
-        const auto workerParts = WorkaroundSplit(params->Data.ObjectsGrouping, workerCount);
+        const auto workerParts = WorkaroundSplit(params->ObjectsGrouping, workerCount);
         const ui32 loadStart = workerParts[hostId].Begin;
         const ui32 loadEnd = workerParts[hostId].End;
 
-        const auto poolLoadOptions = params->Data.PoolLoadOptions;
+        const auto poolLoadOptions = params->PoolLoadOptions;
         TProfileInfo profile;
         CATBOOST_DEBUG_LOG << "Load quantized pool section for worker " << hostId << "..." << Endl;
         auto pools = NCB::ReadTrainDatasets(
+            /*taskType*/ETaskType::CPU,
             poolLoadOptions,
-            params->Data.ObjectsOrder,
+            params->ObjectsOrder,
             /*readTest*/false,
             NCB::TDatasetSubset::MakeRange(loadStart, loadEnd),
-            &localData.ClassNamesFromDataset,
+            &localData.ClassLabelsFromDataset,
             &NPar::LocalExecutor(),
             &profile
         );
 
         NCatboostOptions::TCatBoostOptions catBoostOptions(ETaskType::CPU);
-        catBoostOptions.Load(GetJson(params->Data.TrainOptions));
+        catBoostOptions.Load(GetJson(params->TrainOptions));
         TLabelConverter labelConverter;
         auto quantizedFeaturesInfo = MakeIntrusive<NCB::TQuantizedFeaturesInfo>(
-            params->Data.FeaturesLayout,
+            params->FeaturesLayout,
             catBoostOptions.DataProcessingOptions.Get().IgnoredFeatures.Get(),
             catBoostOptions.DataProcessingOptions->FloatFeaturesBinarization.Get(),
-            catBoostOptions.DataProcessingOptions->PerFloatFeatureQuantization.Get(),
-            /*allowNansInTestOnly*/true,
-            /*allowWriteFiles*/false
+            catBoostOptions.DataProcessingOptions->PerFloatFeatureQuantization.Get()
         );
 
         CATBOOST_DEBUG_LOG << "Create train data for worker " << hostId << "..." << Endl;
@@ -127,6 +132,7 @@ namespace NCatboostDistributed {
                 /*borders*/ Nothing(), // borders are already loaded to quantizedFeaturesInfo
                 /*ensureConsecutiveIfDenseLearnFeaturesDataForCpu*/ true,
                 /*allowWriteFiles*/ false,
+                /*tmpDir*/ TString(), // does not matter, because allowWritingFiles == false
                 quantizedFeaturesInfo,
                 &catBoostOptions,
                 &labelConverter,
@@ -147,11 +153,11 @@ namespace NCatboostDistributed {
         NPar::TCtxPtr<TTrainData> trainData(ctx, SHARED_ID_TRAIN_DATA, hostId);
         auto& localData = TLocalTensorSearchData::GetRef();
         if (localData.Rand == nullptr) { // may be set by TDatasetLoader
-            localData.Rand = new TRestorableFastRng64(params->Data.RandomSeed + hostId);
+            localData.Rand = new TRestorableFastRng64(params->RandomSeed + hostId);
         }
 
-        auto trainParamsJson = GetJson(params->Data.TrainParams);
-        UpdateUndefinedClassNames(localData.ClassNamesFromDataset, &trainParamsJson);
+        auto trainParamsJson = GetJson(params->TrainParams);
+        UpdateUndefinedClassLabels(localData.ClassLabelsFromDataset, &trainParamsJson);
         localData.Params.Load(trainParamsJson);
 
         const auto& trainParams = localData.Params;
@@ -169,22 +175,21 @@ namespace NCatboostDistributed {
             /*isForWorkerLocalData*/ true,
             /*isSingleHost*/ false,
             trainingDataProviders,
-            params->Data.ApproxDimension,
+            params->ApproxDimension,
             TLabelConverter(), // unused in case of localData
-            params->Data.RandomSeed + hostId,
+            params->RandomSeed + hostId,
             /*initRand*/ localData.Rand.Get(),
             foldsCreationParams,
             /*datasetsCanContainBaseline*/ true,
-            params->Data.TargetClassifiers,
+            params->TargetClassifiers,
             /*featuresCheckSum*/ 0, // unused in case of localData
             /*foldCreationParamsCheckSum*/ 0,
-            ParseMemorySizeDescription(trainParams.SystemOptions->CpuUsedRamLimit.Get()),
             /*initModel*/ Nothing(),
             /*initModelApplyCompatiblePools*/ NCB::TDataProviders(),
             &NPar::LocalExecutor());
         Y_ASSERT(localData.Progress->AveragingFold.BodyTailArr.ysize() == 1);
 
-        localData.HessianType = params->Data.HessianType;
+        localData.HessianType = params->HessianType;
 
         localData.StoreExpApprox = foldsCreationParams.StoreExpApproxes;
 
@@ -217,8 +222,8 @@ namespace NCatboostDistributed {
                 trainParams.ObliviousTreeOptions->MaxDepth);
         }
         localData.Indices.yresize(plainFold.GetLearnSampleCount());
-        localData.AllDocCount = params->Data.AllDocCount;
-        localData.SumAllWeights = params->Data.SumAllWeights;
+        localData.AllDocCount = params->AllDocCount;
+        localData.SumAllWeights = params->SumAllWeights;
     }
 
     void TApproxReconstructor::DoMap(
@@ -233,8 +238,8 @@ namespace NCatboostDistributed {
         auto& localData = TLocalTensorSearchData::GetRef();
         Y_ASSERT(IsPlainMode(localData.Params.BoostingOptions->BoostingType));
 
-        const auto& forest = valuedForest->Data.first;
-        const auto& leafValues = valuedForest->Data.second;
+        const auto& forest = valuedForest->first;
+        const auto& leafValues = valuedForest->second;
         Y_ASSERT(forest.size() == leafValues.size());
 
         auto maybeBaseline = GetTrainData(trainData)->TargetData->GetBaseline();
@@ -294,6 +299,26 @@ namespace NCatboostDistributed {
             &NPar::LocalExecutor(),
             &localData.Progress->Rand);
         localData.FlatPairs = UnpackPairsFromQueries(localData.Progress->AveragingFold.LearnQueriesInfo);
+    }
+
+    void TDerivativesStDevFromZeroCalcer::DoMap(
+        NPar::IUserContext* /*ctx*/,
+        int /*hostId*/,
+        TInput* /*unused*/,
+        TOutput* outSum2
+    ) const {
+        auto& localData = TLocalTensorSearchData::GetRef();
+
+        const auto& bodyTailArr = localData.Progress->AveragingFold.BodyTailArr;
+        Y_ASSERT(bodyTailArr.size() == 1);
+        const auto& weightedDerivatives = bodyTailArr.front().WeightedDerivatives;
+        Y_ASSERT(weightedDerivatives.size() > 0);
+
+        double sum2 = 0;
+        for (const auto& perDimensionWeightedDerivatives : weightedDerivatives) {
+            sum2 += NCB::L2NormSquared<double>(perDimensionWeightedDerivatives, &NPar::LocalExecutor());
+        }
+        *outSum2 = sum2;
     }
 
     template <typename TMapFunc, typename TInputType, typename TOutputType>
@@ -390,7 +415,7 @@ namespace NCatboostDistributed {
         auto calcStats3D = [&](const TCandidateInfo& candidate, TStats3D* stats3D) {
             CalcStats3D(trainData, candidate, stats3D);
         };
-        MapCandidateList(calcStats3D, candidateList->Data, &bucketStats->Data);
+        MapCandidateList(calcStats3D, *candidateList, bucketStats);
     }
 
     void TPairwiseScoreCalcer::DoMap(
@@ -404,7 +429,7 @@ namespace NCatboostDistributed {
         auto calcPairwiseStats = [&](const TCandidateInfo& candidate, TPairwiseStats* pairwiseStats) {
             CalcPairwiseStats(trainData, localData.FlatPairs, candidate, pairwiseStats);
         };
-        MapCandidateList(calcPairwiseStats, candidateList->Data, &bucketStats->Data);
+        MapCandidateList(calcPairwiseStats, *candidateList, bucketStats);
     }
 
     // buckets -> workerPairwiseStats
@@ -517,11 +542,11 @@ namespace NCatboostDistributed {
         TInput* bestSplit,
         TOutput* /*unused*/
     ) const {
-        Y_ASSERT(bestSplit->Data.Type != ESplitType::OnlineCtr);
+        Y_ASSERT(bestSplit->Type != ESplitType::OnlineCtr);
         auto& localData = TLocalTensorSearchData::GetRef();
         NPar::TCtxPtr<TTrainData> trainData(ctx, SHARED_ID_TRAIN_DATA, hostId);
         SetPermutedIndices(
-            bestSplit->Data,
+            *bestSplit,
             *GetTrainData(trainData)->ObjectsData,
             localData.Depth + 1,
             localData.Progress->AveragingFold,
@@ -545,7 +570,7 @@ namespace NCatboostDistributed {
         TOutput* isLeafEmpty
     ) const {
         auto& localData = TLocalTensorSearchData::GetRef();
-        isLeafEmpty->Data = GetIsLeafEmpty(localData.Depth + 1, localData.Indices);
+        *isLeafEmpty = GetIsLeafEmpty(localData.Depth + 1, localData.Indices);
         ++localData.Depth; // tree level completed
     }
 
@@ -585,7 +610,7 @@ namespace NCatboostDistributed {
             &localData.Buckets,
             &localData.PairwiseBuckets,
             &weightedDers);
-        sums->Data = std::make_pair(localData.Buckets, localData.PairwiseBuckets);
+        *sums = std::make_pair(localData.Buckets, localData.PairwiseBuckets);
     }
 
     void TCalcApproxStarter::DoMap(
@@ -595,10 +620,11 @@ namespace NCatboostDistributed {
         TOutput* /*unused*/
     ) const {
         auto& localData = TLocalTensorSearchData::GetRef();
+        const auto& error = BuildError(localData.Params, /*custom objective*/Nothing());
         NPar::TCtxPtr<TTrainData> trainData(ctx, SHARED_ID_TRAIN_DATA, hostId);
         localData.Indices = BuildIndices(
             localData.Progress->AveragingFold,
-            splitTree->Data,
+            *splitTree,
             GetTrainData(trainData),
             /*testDataPtrs*/{ },
             &NPar::LocalExecutor());
@@ -612,14 +638,14 @@ namespace NCatboostDistributed {
         for (auto& dimensionDelta : localData.ApproxDeltas) {
             Fill(dimensionDelta.begin(), dimensionDelta.end(), GetNeutralApprox(localData.StoreExpApprox));
         }
-        localData.Buckets.resize(splitTree->Data.GetLeafCount());
+        localData.Buckets.resize(GetLeafCount(*splitTree));
         Fill(localData.Buckets.begin(), localData.Buckets.end(), TSum());
-        localData.MultiBuckets.resize(splitTree->Data.GetLeafCount());
+        localData.MultiBuckets.resize(GetLeafCount(*splitTree));
         Fill(
             localData.MultiBuckets.begin(),
             localData.MultiBuckets.end(),
-            TSumMulti(approxDimension, localData.HessianType));
-        localData.PairwiseBuckets.SetSizes(splitTree->Data.GetLeafCount(), splitTree->Data.GetLeafCount());
+            TSumMulti(approxDimension, error->GetHessianType()));
+        localData.PairwiseBuckets.SetSizes(GetLeafCount(*splitTree), GetLeafCount(*splitTree));
         localData.PairwiseBuckets.FillZero();
         localData.GradientIteration = 0;
     }
@@ -699,14 +725,12 @@ namespace NCatboostDistributed {
         TOutput* sums
     ) const {
         auto& localData = TLocalTensorSearchData::GetRef();
-        const int approxDimension = localData.Progress->ApproxDimension;
-        Y_ASSERT(approxDimension > 1);
         const auto error = BuildError(localData.Params, /*custom objective*/Nothing());
         const auto estimationMethod = localData.Params.ObliviousTreeOptions->LeavesEstimationMethod;
 
         CalcLeafDersMulti(
             localData.Indices,
-            localData.Progress->AveragingFold.LearnTarget,
+            To2DConstArrayRef<float>(localData.Progress->AveragingFold.LearnTarget),
             localData.Progress->AveragingFold.GetLearnWeights(),
             localData.Progress->AveragingFold.BodyTailArr[0].Approx,
             localData.ApproxDeltas,
@@ -716,7 +740,7 @@ namespace NCatboostDistributed {
             estimationMethod,
             &NPar::LocalExecutor(),
             &localData.MultiBuckets);
-        sums->Data = std::make_pair(localData.MultiBuckets, TUnusedInitializedParam());
+        *sums = std::make_pair(localData.MultiBuckets, TUnusedInitializedParam());
     }
 
     void TDeltaMultiUpdater::DoMap(
@@ -729,9 +753,9 @@ namespace NCatboostDistributed {
         UpdateApproxDeltasMulti(
             localData.Indices,
             localData.Progress->AveragingFold.BodyTailArr[0].BodyFinish,
-            &NPar::LocalExecutor(),
-            leafValues,
-            &localData.ApproxDeltas);
+            MakeConstArrayRef(*leafValues),
+            &localData.ApproxDeltas,
+            &NPar::LocalExecutor());
         ++localData.GradientIteration; // gradient iteration completed
     }
 
@@ -760,7 +784,7 @@ namespace NCatboostDistributed {
             localData.Progress->AvrgApprox,
             /*approxDelta*/{},
             /*isExpApprox*/false,
-            GetTrainData(trainData)->TargetData->GetTarget(),
+            GetTrainData(trainData)->TargetData->GetTarget().GetOrElse(TConstArrayRef<TConstArrayRef<float>>()),
             GetWeights(*GetTrainData(trainData)->TargetData),
             GetTrainData(trainData)->TargetData->GetGroupInfo().GetOrElse(TConstArrayRef<TQueryInfo>()),
             selectedMetrics,
@@ -789,6 +813,197 @@ namespace NCatboostDistributed {
             GetWeights(*GetTrainData(trainData)->TargetData));
     }
 
+    void TLeafWeightsGetter::DoReduce(TVector<TOutput>* inLeafWeightsFromWorkers, TOutput* outTotalLeafWeights) const {
+        const auto& leafWeightsFromWorkers = *inLeafWeightsFromWorkers;
+        TOutput totalLeafWeights = leafWeightsFromWorkers[0];
+        for (auto i : xrange(1, SafeIntegerCast<int>(leafWeightsFromWorkers.size()))) {
+            AddElementwise(leafWeightsFromWorkers[i], &totalLeafWeights);
+        }
+        *outTotalLeafWeights = std::move(totalLeafWeights);
+    }
+
+    /*
+     * Prepares data structures for exact quantile approx calculation.
+     * Returns Min and Max values of target for binary search of quantile.
+     */
+    void TQuantileExactApproxStarter::DoMap(
+        NPar::IUserContext* /*ctx*/,
+        int /*hostId*/,
+        TInput* /*input*/,
+        TOutput* outMinMaxDiffs
+    ) const {
+        auto& localData = TLocalTensorSearchData::GetRef();
+        const int leafCount = localData.Buckets.size();
+        const int approxDimension = localData.Progress->AvrgApprox.size();
+        const auto& target = localData.Progress->AveragingFold.LearnTarget;
+        const auto& weights = localData.Progress->AveragingFold.GetLearnWeights();
+        const auto& avrgFoldIndexing = localData.Progress->AveragingFold.LearnPermutation.Get()->GetObjectsIndexing();
+
+        localData.ExactDiff.yresize(approxDimension);
+        localData.SplitBounds.yresize(approxDimension);
+        localData.LastPivot.yresize(approxDimension);
+        localData.LastPartitionPoint.yresize(approxDimension);
+        localData.CollectedLeftSumWeight.yresize(approxDimension);
+        localData.LastSplitLeftSumWeight.yresize(approxDimension);
+
+        TOutput minMaxDiffs(approxDimension);
+        for (auto dimension : xrange(approxDimension)) {
+            localData.ExactDiff[dimension].yresize(leafCount);
+            for (auto leaf : xrange(leafCount)) {
+                localData.ExactDiff[dimension][leaf].clear();
+            }
+            minMaxDiffs[dimension].assign(leafCount, {std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest()});
+            avrgFoldIndexing.ForEach([&](int idx, int srcIdx) {
+                const double diff = target[dimension][srcIdx] - localData.Progress->AvrgApprox[dimension][srcIdx];
+                const double weight = weights.empty() ? 1.0 : weights[srcIdx];
+                const TIndexType leaf = localData.Indices[idx];
+                localData.ExactDiff[dimension][leaf].emplace_back(diff, weight);
+                minMaxDiffs[dimension][leaf].Min = Min(minMaxDiffs[dimension][leaf].Min, diff);
+                minMaxDiffs[dimension][leaf].Max = Max(minMaxDiffs[dimension][leaf].Max, diff);
+            });
+
+            localData.SplitBounds[dimension].yresize(leafCount);
+            localData.LastPartitionPoint[dimension].yresize(leafCount);
+            localData.LastPivot[dimension].yresize(leafCount);
+            localData.CollectedLeftSumWeight[dimension].yresize(leafCount);
+            localData.LastSplitLeftSumWeight[dimension].yresize(leafCount);
+            for (auto leaf : xrange(leafCount)) {
+                const int objectCount = localData.ExactDiff[dimension][leaf].size();
+                localData.SplitBounds[dimension][leaf] = {0, objectCount};
+                localData.LastPivot[dimension][leaf] = std::numeric_limits<double>::max();
+                localData.LastPartitionPoint[dimension][leaf] = objectCount;
+                localData.CollectedLeftSumWeight[dimension][leaf]= 0;
+                localData.LastSplitLeftSumWeight[dimension][leaf] = 0;
+            }
+        }
+
+        *outMinMaxDiffs = std::move(minMaxDiffs);
+    }
+
+    void TQuantileExactApproxStarter::DoReduce(TVector<TOutput>* inMinMaxDiffsFromWorkers,
+                                               TOutput* reducedMinMaxDiffs) const {
+        const auto& minMaxDiffsFromWorkers = *inMinMaxDiffsFromWorkers;
+        TOutput result = minMaxDiffsFromWorkers[0];
+        for (auto worker : xrange(1, SafeIntegerCast<int>(minMaxDiffsFromWorkers.size()))) {
+            const auto& resultFromWorker = minMaxDiffsFromWorkers[worker];
+            for (auto dimension : xrange(result.size())) {
+                for (auto leaf : xrange(result[dimension].size())) {
+                    result[dimension][leaf].Min = Min(result[dimension][leaf].Min, resultFromWorker[dimension][leaf].Min);
+                    result[dimension][leaf].Max = Max(result[dimension][leaf].Max, resultFromWorker[dimension][leaf].Max);
+                }
+            }
+        }
+        *reducedMinMaxDiffs = std::move(result);
+    }
+
+    /*
+     * Split exact diff arrays by pivots
+     * Returns weights of left parts after splitting
+     */
+    void TQuantileArraySplitter::DoMap(
+        NPar::IUserContext* /*ctx*/,
+        int /*hostId*/,
+        TInput* pivots,
+        TOutput* outLeftRightWeights
+    ) const {
+        auto& localData = TLocalTensorSearchData::GetRef();
+        const auto leafCount = localData.Buckets.size();
+        const auto& pivotsRef = *pivots;
+        const auto approxDimension = pivotsRef.size();
+        TOutput leftWeights(approxDimension);
+        for (auto dimension : xrange(approxDimension)) {
+            leftWeights[dimension].assign(leafCount, 0);
+            for (auto leaf : xrange(leafCount)) {
+                auto& lastPivot = localData.LastPivot[dimension][leaf];
+                auto& lastPartitionPoint = localData.LastPartitionPoint[dimension][leaf];
+                auto& splitBounds = localData.SplitBounds[dimension][leaf];
+                auto& exactDiff = localData.ExactDiff[dimension][leaf];
+                auto& collectedLeftSumWeight = localData.CollectedLeftSumWeight[dimension][leaf];
+                auto& lastLeftSumWeight = localData.LastSplitLeftSumWeight[dimension][leaf];
+
+                const double curPivot = pivotsRef[dimension][leaf];
+                if (curPivot < lastPivot) {
+                    splitBounds.Max = lastPartitionPoint;
+                } else {
+                    splitBounds.Min = lastPartitionPoint;
+                    collectedLeftSumWeight += lastLeftSumWeight;
+                }
+                lastPivot = curPivot;
+                const auto partitionBegin = exactDiff.begin() + splitBounds.Min;
+                const auto partitionEnd = exactDiff.begin() + splitBounds.Max;
+                const auto partitionIt = std::partition(
+                    partitionBegin,
+                    partitionEnd,
+                    [curPivot](const std::pair<double, double>& diff) {
+                        return diff.first <= curPivot;
+                    });
+                int curPartitionPoint = partitionIt - exactDiff.begin();
+                lastLeftSumWeight = Accumulate(partitionBegin, partitionIt, 0.0, [](double totalWeight, const std::pair<double, double>& diff) {
+                    return totalWeight + diff.second;
+                });
+                leftWeights[dimension][leaf] = collectedLeftSumWeight + lastLeftSumWeight;
+                lastPartitionPoint = curPartitionPoint;
+            }
+        }
+        *outLeftRightWeights = std::move(leftWeights);
+    }
+
+    void TQuantileArraySplitter::DoReduce(
+        TVector<TOutput>* inLeftWeightsFromWorkers,
+        TOutput* outTotalLeftWeights
+    ) const {
+        const auto& leftWeightsFromWorkers = *inLeftWeightsFromWorkers;
+        TOutput totalLeftWeights = leftWeightsFromWorkers[0];
+        for (auto worker : xrange(1, SafeIntegerCast<int>(leftWeightsFromWorkers.size()))) {
+            for (auto dimension : xrange(totalLeftWeights.size())) {
+                AddElementwise(leftWeightsFromWorkers[worker][dimension], &totalLeftWeights[dimension]);
+            }
+        }
+        *outTotalLeftWeights = std::move(totalLeftWeights);
+    }
+
+    /*
+     * Calculates weight of elements equal to pivots
+     * Needed to adjusting quantile value according to 'delta' parameter of Quantile metric
+     */
+    void TQuantileEqualWeightsCalcer::DoMap(
+        NPar::IUserContext* /*ctx*/,
+        int /*hostId*/,
+        TInput* inPivots,
+        TOutput* outEqualSumWeights
+    ) const {
+        auto& localData = TLocalTensorSearchData::GetRef();
+        const auto& pivots = *inPivots;
+        const auto approxDimension = pivots.size();
+        const auto leafCount = pivots[0].size();
+        TOutput equalSumWeights(approxDimension, TVector<double>(leafCount, 0.0));
+        for (auto dimension : xrange(approxDimension)) {
+            for (auto leaf : xrange(leafCount)) {
+                const auto pivot = pivots[dimension][leaf];
+                const auto& exactDiff = localData.ExactDiff[dimension][leaf];
+                double sumWeights = 0;
+                for (const auto [diff, weight] : exactDiff) {
+                    if (diff == pivot) {
+                        sumWeights += weight;
+                    }
+                }
+                equalSumWeights[dimension][leaf] = sumWeights;
+            }
+        }
+        *outEqualSumWeights = std::move(equalSumWeights);
+    }
+
+    void TQuantileEqualWeightsCalcer::DoReduce(TVector<TOutput>* inEqualSumWeightsFromWorkers, TOutput* outTotalEqualSumWeights) const {
+        const auto& equalSumWeightsFromWorkers = *inEqualSumWeightsFromWorkers;
+        TOutput totalEqualSumWeights = equalSumWeightsFromWorkers[0];
+        for (auto worker : xrange(1, SafeIntegerCast<int>(equalSumWeightsFromWorkers.size()))) {
+            for (auto dimension : xrange(totalEqualSumWeights.size())) {
+                AddElementwise(equalSumWeightsFromWorkers[worker][dimension], &totalEqualSumWeights[dimension]);
+            }
+        }
+        *outTotalEqualSumWeights = std::move(totalEqualSumWeights);
+    }
+
 } // NCatboostDistributed
 
 using namespace NCatboostDistributed;
@@ -797,6 +1012,7 @@ REGISTER_SAVELOAD_NM_CLASS(0xd66d481, NCatboostDistributed, TTrainData);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d482, NCatboostDistributed, TPlainFoldBuilder);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d483, NCatboostDistributed, TTensorSearchStarter);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d484, NCatboostDistributed, TBootstrapMaker);
+REGISTER_SAVELOAD_NM_CLASS(0xd66d584, NCatboostDistributed, TDerivativesStDevFromZeroCalcer);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d485, NCatboostDistributed, TScoreCalcer);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d585, NCatboostDistributed, TRemoteBinCalcer);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d685, NCatboostDistributed, TRemoteScoreCalcer);
@@ -805,12 +1021,6 @@ REGISTER_SAVELOAD_NM_CLASS(0xd66d487, NCatboostDistributed, TEmptyLeafFinder);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d488, NCatboostDistributed, TCalcApproxStarter);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d489, NCatboostDistributed, TDeltaSimpleUpdater);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d48a, NCatboostDistributed, TApproxUpdater);
-REGISTER_SAVELOAD_TEMPL1_NM_CLASS(0xd66d48b, NCatboostDistributed, TEnvelope, TCandidateList);
-REGISTER_SAVELOAD_TEMPL1_NM_CLASS(0xd66d48c, NCatboostDistributed, TEnvelope, TStats5D);
-REGISTER_SAVELOAD_TEMPL1_NM_CLASS(0xd66d48d, NCatboostDistributed, TEnvelope, TIsLeafEmpty);
-REGISTER_SAVELOAD_TEMPL1_NM_CLASS(0xd66d48e, NCatboostDistributed, TEnvelope, TCandidateInfo);
-REGISTER_SAVELOAD_TEMPL1_NM_CLASS(0xd66d48f, NCatboostDistributed, TEnvelope, TSplitTree);
-REGISTER_SAVELOAD_TEMPL1_NM_CLASS(0xd66d490, NCatboostDistributed, TEnvelope, TSums);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d50f, NCatboostDistributed, TBucketSimpleUpdater);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d4af, NCatboostDistributed, TDerivativeSetter);
 REGISTER_SAVELOAD_NM_CLASS(0xd66d4b2, NCatboostDistributed, TDeltaMultiUpdater);
@@ -825,3 +1035,6 @@ REGISTER_SAVELOAD_NM_CLASS(0xd66d4d6, NCatboostDistributed, TApproxReconstructor
 REGISTER_SAVELOAD_NM_CLASS(0xd66d4e0, NCatboostDistributed, TLeafWeightsGetter);
 
 REGISTER_SAVELOAD_NM_CLASS(0xd66d4e1, NCatboostDistributed, TDatasetLoader);
+REGISTER_SAVELOAD_NM_CLASS(0xd66d4e3, NCatboostDistributed, TQuantileExactApproxStarter);
+REGISTER_SAVELOAD_NM_CLASS(0xd66d4e4, NCatboostDistributed, TQuantileArraySplitter);
+REGISTER_SAVELOAD_NM_CLASS(0xd66d4e5, NCatboostDistributed, TQuantileEqualWeightsCalcer);

@@ -25,7 +25,9 @@ inline void ReadAndProceedPoolInBlocks(const NCB::TAnalyticalModeCommonParams& p
                 params.PairsFilePath,
                 /*GroupWeightsFilePath=*/NCB::TPathWithScheme(),
                 /*BaselineFilePath=*/NCB::TPathWithScheme(),
-                params.ClassNames,
+                /*TimestampsFilePath*/NCB::TPathWithScheme(),
+                params.FeatureNamesPath,
+                params.ClassLabels,
                 params.ColumnarPoolFormatParams.DsvFormat,
                 MakeCdProviderFromFile(params.ColumnarPoolFormatParams.CdFilePath),
                 /*ignoredFeatures*/ {},
@@ -59,7 +61,10 @@ inline void ReadAndProceedPoolInBlocks(const NCB::TAnalyticalModeCommonParams& p
         CB_ENSURE_INTERNAL(visitor, "failed cast of IDataProviderBuilder to IRawObjectsOrderDataVisitor");
 
         while (rawObjectsOrderDatasetLoader->DoBlock(visitor)) {
-            poolConsumer(dataProviderBuilder->GetResult());
+            auto result = dataProviderBuilder->GetResult();
+            if (result) {
+                poolConsumer(std::move(result));
+            }
         }
         auto lastResult = dataProviderBuilder->GetLastResult();
         if (lastResult) {

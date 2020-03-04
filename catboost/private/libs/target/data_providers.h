@@ -8,22 +8,32 @@
 #include <catboost/libs/model/model.h>
 #include <catboost/private/libs/options/loss_description.h>
 
+#include <library/json/json_value.h>
 #include <library/threading/local_executor/local_executor.h>
 
 #include <util/generic/fwd.h>
 
 
 namespace NCB {
+    struct TTargetCreationOptions {
+        bool IsClass;
+        bool IsMultiClass;
+        bool CreateBinClassTarget;
+        bool CreateMultiClassTarget;
+        bool CreateGroups;
+        bool CreatePairs;
+        TMaybe<ui32> MaxPairsCount;
+    };
 
     struct TInputClassificationInfo {
         TMaybe<ui32> KnownClassCount;
         TConstArrayRef<float> ClassWeights; // [classIdx], empty if not specified
-        TVector<TString> ClassNames;
+        TVector<NJson::TJsonValue> ClassLabels; // can be Integers, Floats or Strings
         TMaybe<float> TargetBorder;
     };
 
     struct TOutputClassificationInfo {
-        TVector<TString> ClassNames;
+        TVector<NJson::TJsonValue> ClassLabels; // can be Integers, Floats or Strings
         TMaybe<TLabelConverter*> LabelConverter; // needed only for multiclass
         TMaybe<float> TargetBorder; // TODO(isaf27): delete it from output parameters
     };
@@ -39,23 +49,35 @@ namespace NCB {
         }
     };
 
+    TTargetCreationOptions MakeTargetCreationOptions(
+        const TRawTargetDataProvider &rawData,
+        TConstArrayRef<NCatboostOptions::TLossDescription> metricDescriptions,
+        TMaybe<ui32> knownModelApproxDimension,
+        const TInputClassificationInfo& inputClassificationInfo);
+
+    void CheckTargetConsistency(
+        TTargetDataProviderPtr targetDataProvider,
+        TConstArrayRef<NCatboostOptions::TLossDescription> metricDescriptions,
+        const NCatboostOptions::TLossDescription* mainLossFunction, // can be nullptr
+        bool needTargetDataForCtrs,
+        bool metricsThatRequireTargetCanBeSkipped,
+        TStringBuf datasetName,
+        bool isNonEmptyAndNonConst,
+        bool allowConstLabel);
+
     TTargetDataProviderPtr CreateTargetDataProvider(
         const TRawTargetDataProvider& rawData,
         TMaybeData<TConstArrayRef<TSubgroupId>> subgroupIds,
         bool isForGpu,
-        bool isNonEmptyAndNonConst,
-        TStringBuf datasetName,
-        TConstArrayRef<NCatboostOptions::TLossDescription> metricDescriptions, // must be non-empty
 
         /* used to select whether to convert target to binary or not
-         * pass nothing if target providers are created not for training
+         * pass nullptr if target providers are created not for training
          * TODO(akhropov): will be removed with proper multi-target support. MLTOOLS-2337.
          */
-        TMaybe<NCatboostOptions::TLossDescription*> mainLossFuncion,
-        bool allowConstLabel,
+        const NCatboostOptions::TLossDescription* mainLossFuncion,
         bool metricsThatRequireTargetCanBeSkipped,
-        bool needTargetDataForCtrs,
         TMaybe<ui32> knownModelApproxDimension,
+        const TTargetCreationOptions& targetCreationOptions,
         const TInputClassificationInfo& inputClassificationInfo,
         TOutputClassificationInfo* outputClassificationInfo,
         TRestorableFastRng64* rand, // for possible pairs generation

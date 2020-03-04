@@ -14,7 +14,7 @@ using namespace NCB;
 TString NCB::BuildModelFormatHelpMessage() {
     return TString::Join(
         "Alters format of output file for the model. ",
-        "Supported values {", GetEnumAllNames<EModelType>(), "}",
+        "Supported values {", GetEnumAllNames<EModelType>(), "} ",
         "Default is ", ToString(EModelType::CatboostBinary), ".");
 }
 
@@ -34,6 +34,10 @@ void NCB::TAnalyticalModeCommonParams::BindParserOpts(NLastGetopt::TOpts& parser
     parser.AddLongOption("input-pairs", "PATH")
         .Handler1T<TStringBuf>([&](const TStringBuf& pathWithScheme) {
             PairsFilePath = TPathWithScheme(pathWithScheme, "dsv");
+        });
+    parser.AddLongOption("feature-names-path", "PATH")
+        .Handler1T<TStringBuf>([&](const TStringBuf& pathWithScheme) {
+            FeatureNamesPath = TPathWithScheme(pathWithScheme, "dsv");
         });
 
     parser.AddLongOption('T', "thread-count", "worker thread count (default: core count)")
@@ -61,8 +65,10 @@ void NCB::BindColumnarPoolFormatParams(
 
     parser->AddLongOption("has-header", "[for dsv format] Read first line as header")
         .NoArgument()
-        .StoreValue(&columnarPoolFormatParams->DsvFormat.HasHeader,
-                    true);
+        .StoreValue(&columnarPoolFormatParams->DsvFormat.HasHeader, true);
+    parser->AddLongOption("ignore-csv-quoting")
+        .NoArgument()
+        .StoreValue(&columnarPoolFormatParams->DsvFormat.IgnoreCsvQuoting, true);
 }
 
 void NCB::BindModelFileParams(NLastGetopt::TOpts* parser, TString* modelFileName, EModelType* modelFormat) {

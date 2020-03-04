@@ -24,6 +24,7 @@ TString NCatboostOptions::GetModelExtensionFromType(const EModelType modelType) 
         case EModelType::CPUSnapshot:
             return "cbsnapshot";
     }
+    Y_UNREACHABLE();
 }
 
 bool NCatboostOptions::TryGetModelTypeFromExtension(const TStringBuf modelExtension, EModelType& modelType) {
@@ -37,6 +38,10 @@ bool NCatboostOptions::TryGetModelTypeFromExtension(const TStringBuf modelExtens
         modelType = EModelType::Cpp;
     } else if (modelExtension == "py") {
         modelType = EModelType::Python;
+    } else if (modelExtension == "onnx") {
+        modelType = EModelType::Onnx;
+    } else if (modelExtension == "pmml") {
+        modelType = EModelType::Pmml;
     } else if (modelExtension == "cbsnapshot") {
         modelType = EModelType::CPUSnapshot;
     } else {
@@ -319,6 +324,10 @@ void NCatboostOptions::TOutputFilesOptions::Validate() const {
     CB_ENSURE(GetVerbosePeriod() % GetMetricPeriod() == 0,
         "verbose should be a multiple of metric_period, got " <<
         GetVerbosePeriod() << " vs " << GetMetricPeriod());
+
+    EFstrCalculatedInFitType fstrType;
+    CB_ENSURE(TryFromString<EFstrCalculatedInFitType>(ToString(FstrType.Get()), fstrType),
+        "Unsupported fstr type " << FstrType.Get());
 }
 
 TString NCatboostOptions::TOutputFilesOptions::GetFullPath(const TString& fileName) const {

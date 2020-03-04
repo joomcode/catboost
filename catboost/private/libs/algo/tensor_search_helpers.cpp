@@ -79,6 +79,28 @@ TSplit TCandidateInfo::GetSplit(
                 // keep compiler happy
                 return TSplit();
             }
+        case ESplitEnsembleType::FeaturesGroup:
+            {
+                const auto groupIdx = SplitEnsemble.FeaturesGroupRef.GroupIdx;
+                const auto& groupMetaData = objectsData.GetFeaturesGroupMetaData(groupIdx);
+
+                ui32 splitIdxOffset = 0;
+                for (const auto& part : groupMetaData.Parts) {
+                    ui32 splitIdxInPart = binId - splitIdxOffset;
+                    if (splitIdxInPart < part.BucketCount - 1) {
+                        TSplitCandidate splitCandidate;
+                        splitCandidate.Type = ESplitType::FloatFeature;
+                        splitCandidate.FeatureIdx = part.FeatureIdx;
+
+                        return TSplit(std::move(splitCandidate), splitIdxInPart);
+                    }
+
+                    splitIdxOffset += part.BucketCount - 1;
+                }
+                Y_FAIL("This should be unreachable");
+                // keep compiler happy
+                return TSplit();
+            }
     }
 }
 
@@ -89,6 +111,8 @@ THolder<IDerCalcer> BuildError(
 ) {
     const bool isStoreExpApprox = IsStoreExpApprox(params.LossFunctionDescription->GetLossFunction());
     switch (params.LossFunctionDescription->GetLossFunction()) {
+        case ELossFunction::MultiRMSE:
+            return MakeHolder<TMultiRMSEError>();
         case ELossFunction::Logloss:
         case ELossFunction::CrossEntropy:
             return MakeHolder<TCrossEntropyError>(isStoreExpApprox);
@@ -368,6 +392,9 @@ void Bootstrap(
     const bool isPairwiseScoring = IsPairwiseScoring(params.LossFunctionDescription->GetLossFunction());
     const TMaybe<float> mvsReg = params.ObliviousTreeOptions->BootstrapConfig->GetMvsReg();
     bool performRandomChoice = true;
+    if (bootstrapType != EBootstrapType::No && samplingUnit == ESamplingUnit::Group) {
+        CB_ENSURE(!fold->LearnQueriesInfo.empty(), "No groups in dataset. Please disable sampling or use per object sampling");
+    }
     switch (bootstrapType) {
         case EBootstrapType::Bernoulli:
             if (isPairwiseScoring) {
@@ -390,6 +417,10 @@ void Bootstrap(
             }
             break;
         case EBootstrapType::MVS:
+            CB_ENSURE(
+                samplingUnit != ESamplingUnit::Group,
+                "MVS bootstrap is not implemented for groupwise sampling (sampling_unit=Group)"
+            );
             if (!isPairwiseScoring) {
                 performRandomChoice = false;
                 TMvsSampler sampler(learnSampleCount, takenFraction, mvsReg);
@@ -408,6 +439,8 @@ void Bootstrap(
         CalcWeightedData(learnSampleCount, params.BoostingOptions->BoostingType.Get(), localExecutor, fold);
     }
     sampledDocs->Sample(*fold, samplingUnit, indices, rand, localExecutor, performRandomChoice, shouldSortByLeaf, leavesCount);
+    CB_ENSURE(sampledDocs->GetDocCount() > 0, "Too few sampling units (subsample=" << takenFraction
+        << ", bootstrap_type=" << bootstrapType << "): please increase sampling rate or disable sampling");
 }
 
 void CalcWeightedDerivatives(
@@ -420,7 +453,7 @@ void CalcWeightedDerivatives(
 ) {
     TFold::TBodyTail& bt = takenFold->BodyTailArr[bodyTailIdx];
     const TVector<TVector<double>>& approx = bt.Approx;
-    const TVector<float>& target = takenFold->LearnTarget;
+    const TVector<float>& target = takenFold->LearnTarget[0];
     const TVector<float>& weight = takenFold->GetLearnWeights();
     TVector<TVector<double>>* weightedDerivatives = &bt.WeightedDerivatives;
 
@@ -471,7 +504,38 @@ void CalcWeightedDerivatives(
         blockParams.SetBlockSize(1000);
 
         Y_ASSERT(error.GetErrorType() == EErrorType::PerObjectError);
-        if (approxDimension == 1) {
+        if (const auto multiError = dynamic_cast<const TMultiDerCalcer*>(&error)) {
+            const auto& multiTarget = takenFold->LearnTarget;
+            localExecutor->ExecRangeWithThrow(
+                [&](int blockId) {
+                    TVector<double> curApprox(approxDimension);
+                    TVector<float> curTarget(multiTarget.size());
+                    TVector<double> curDelta(approxDimension);
+                    NPar::TLocalExecutor::BlockedLoopBody(
+                        blockParams,
+                        [&](int docId) {
+                            for (auto dim : xrange(approxDimension)) {
+                                curApprox[dim] = approx[dim][docId];
+                            }
+                            for (auto dim : xrange(multiTarget.size())) {
+                                curTarget[dim] = multiTarget[dim][docId];
+                            }
+                            multiError->CalcDers(
+                                curApprox,
+                                curTarget,
+                                weight.empty() ? 1 : weight[docId],
+                                &curDelta,
+                                nullptr
+                            );
+                            for (int dim = 0; dim < approxDimension; ++dim) {
+                                (*weightedDerivatives)[dim][docId] = curDelta[dim];
+                            }
+                        })(blockId);
+                },
+                0,
+                blockParams.GetBlockCount(),
+                NPar::TLocalExecutor::WAIT_COMPLETE);
+        } else if (approxDimension == 1) {
             localExecutor->ExecRangeWithThrow(
                 [&](int blockId) {
                     const int blockOffset = blockId * blockParams.GetBlockSize();
@@ -587,6 +651,31 @@ void SetBestScore(
                         }
 
                         binFeatureOffset += binFeatureSize;
+                    }
+                }
+                break;
+            case ESplitEnsembleType::FeaturesGroup:
+                {
+                    const auto groupIdx = subcandidateInfo.SplitEnsemble.FeaturesGroupRef.GroupIdx;
+
+                    const THashSet<ui32> selectedFeaturesInGroup(
+                        candidatesContext.SelectedFeaturesInGroups[groupIdx].begin(),
+                        candidatesContext.SelectedFeaturesInGroups[groupIdx].end());
+
+                    ui32 splitIdxOffset = 0;
+                    const auto& groupParts = candidatesContext.FeaturesGroupsMetaData[groupIdx].Parts;
+                    for (auto groupPartIdx : xrange(groupParts.size())) {
+                        const auto& groupPart = groupParts[groupPartIdx];
+
+                        const auto splitsCount = groupPart.BucketCount - 1;
+
+                        if (selectedFeaturesInGroup.contains(groupPartIdx)) {
+                            for (auto splitIdx : xrange(splitIdxOffset, splitIdxOffset + splitsCount)) {
+                                scoreUpdateFunction(splitIdx);
+                            }
+                        }
+
+                        splitIdxOffset += splitsCount;
                     }
                 }
                 break;

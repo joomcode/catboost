@@ -7,67 +7,328 @@
 #include <catboost/libs/logging/logging.h>
 #include <catboost/private/libs/options/json_helper.h>
 #include <library/getopt/small/last_getopt.h>
+#include <library/json/writer/json.h>
 
-#include <util/generic/set.h>
+#include <util/generic/algorithm.h>
+#include <util/generic/hash_set.h>
+#include <util/generic/xrange.h>
 #include <util/string/split.h>
 
 #include <cmath>
+#include <regex>
 
 
 using namespace NCB;
 
-
-
-struct TSubmodelComparison {
-    bool StructureIsDifferent = false;
-    double MaxElementwiseDiff = 0.0;
-
-    bool Update(const TSubmodelComparison& other) {
-        bool updated = false;
-        if (other.StructureIsDifferent && !StructureIsDifferent) {
-            updated = true;
-            StructureIsDifferent = true;
-        }
-        if (!(other.MaxElementwiseDiff <= MaxElementwiseDiff)) {
-            updated = true;
-            MaxElementwiseDiff = other.MaxElementwiseDiff;
-        }
-        return updated;
-    }
-
-    bool Update(double diff) {
-        bool updated = false;
-        if (!(diff <= MaxElementwiseDiff)) {
-            MaxElementwiseDiff = diff;
-            updated = true;
-        }
-        return updated;
-    }
-};
-
-double Diff(double x, double y) {
+static double MinAbsRelErr(double x, double y) {
     double maxAbs = std::max(std::abs(x), std::abs(y));
-    return maxAbs != 0.0 ? std::abs((x - y) / maxAbs) : 0.0;
+    double absErr = std::abs(x - y);
+    double relErr = absErr ? absErr / maxAbs : 0.0;
+    return Min(absErr, relErr);
 }
 
-template <typename TBorders>
-static TSubmodelComparison FeatureBordersDiff(const TStringBuf feature, size_t featureId, const TBorders& borders1, const TBorders& borders2) {
-    TSubmodelComparison result;
-    if (borders1.size() != borders2.size()) {
-        Clog << feature << " " << featureId << " borders sizes differ: "
-            << borders1.size() << " != " << borders2.size() << Endl;
-        result.StructureIsDifferent = true;
-        return result;
+static bool IsMatchedBy(const TString& regex, const TString& name) {
+    std::regex pattern(regex.c_str());
+    return !!std::regex_match(name.c_str(), pattern);
+}
+
+static TString ShortQuoted(const TString& s) {
+    constexpr int maxShortLen = 50;
+    if (s.length() < maxShortLen) {
+        return "\"" + s + "\"";
+    } else {
+        constexpr int partLen = maxShortLen / 2 - 5;
+        static_assert(partLen > 0);
+        return "\"" + s.substr(0, partLen) + "..." + s.substr(s.length() - partLen) + "\"";
+    }
+}
+
+class TComparator {
+public:
+    TComparator(double eps, const THashSet<TString>& ignoredKeys)
+    : Eps(eps)
+    , IgnoredKeys(ignoredKeys)
+    {}
+
+    bool IsIgnored(const TString& name) {
+        return AnyOf(IgnoredKeys, [&](const TString& pattern) {
+            return IsMatchedBy(pattern, name);
+        });
     }
 
-    for (size_t i = 0; i < borders1.size(); ++i) {
-        if (result.Update(Diff(borders1[i], borders2[i]))) {
-            Clog << feature << " " << featureId << " border " << i << " differ: "
-                << borders1[i] << " vs " << borders2[i]
-                << ", diff = " << result.MaxElementwiseDiff << Endl;
+    bool NotIgnored(const TString& name) {
+        return !IsIgnored(name);
+    }
+
+    bool AlmostEqual(const TString& name, double a, double b) {
+        if (IsIgnored(name))
+            return true;
+        double e = MinAbsRelErr(a, b);
+        if (!(e <= MaxObservedDiff)) {
+            Clog << name << ": " << a << " vs " << b
+                << ", diff " << e
+                << Endl;
+            MaxObservedDiff = e;
+        }
+        return e <= Eps;
+    }
+
+    template <typename T>
+    bool AlmostEqual(const TString& name, const T& a, const T& b) {
+        if (IsIgnored(name))
+            return true;
+        if (!(a == b)) {
+            Clog << name << ": " << a << " vs " << b << Endl;
+            return false;
+        }
+        return true;
+    }
+
+    bool AlmostEqual(const TString& name, const NJson::TJsonValue::TMapType& a, const NJson::TJsonValue::TMapType& b) {
+        if (IsIgnored(name))
+            return true;
+        TVector<TString> allKeys;
+        for (const auto& kv : a) {
+            allKeys.push_back(kv.first);
+        }
+        for (const auto& kv : b) {
+            allKeys.push_back(kv.first);
+        }
+        SortUnique(allKeys);
+        bool equal = true;
+        for (const auto key : allKeys) {
+            equal &= AlmostEqual(name + '.' + key,
+                                 a.Value(key, NJson::TJsonValue(NJson::EJsonValueType::JSON_NULL)),
+                                 b.Value(key, NJson::TJsonValue(NJson::EJsonValueType::JSON_NULL)));
+        }
+        return equal;
+    }
+
+    bool AlmostEqual(const TString& name, const NJson::TJsonValue::TArray& a, const NJson::TJsonValue::TArray& b) {
+        if (IsIgnored(name))
+            return true;
+        if (a.size() != b.size()) {
+            Clog << name << ": array size is "
+                << a.size()
+                << " vs "
+                << b.size()
+                << Endl;
+            return false;
+        }
+        return AllOf(xrange(a.size()), [&](size_t idx) {
+            return AlmostEqual(name + '[' + ToString(idx) + ']', a[idx], b[idx]);
+        });
+    }
+
+    bool AlmostEqual(const TString& name, const NJson::TJsonValue& a, const NJson::TJsonValue& b) {
+        if (IsIgnored(name))
+            return true;
+        if (a.GetType() != b.GetType()) {
+            Clog << name << ": element type is "
+                << a.GetType()
+                << " vs "
+                << b.GetType()
+                << Endl;
+            return false;
+        }
+        switch (a.GetType()) {
+
+            case NJson::EJsonValueType::JSON_ARRAY:
+                return AlmostEqual(name, a.GetArraySafe(), b.GetArraySafe());
+
+            case NJson::EJsonValueType::JSON_MAP:
+                return AlmostEqual(name, a.GetMapSafe(), b.GetMapSafe());
+
+            case NJson::EJsonValueType::JSON_DOUBLE:
+                return AlmostEqual(name, a.GetDoubleSafe(), b.GetDoubleSafe());
+
+            default:
+                return AlmostEqual(name, a.GetString(), b.GetString());
         }
     }
-    return result;
+
+    bool AlmostEqual(const TString& name, const TModelTrees& a, const TModelTrees& b) {
+        return IsIgnored(name)
+            || AlmostEqual(name + ".FloatFeatures", a.GetFloatFeatures(), b.GetFloatFeatures())
+            && AlmostEqual(name + ".CatFeatures", a.GetCatFeatures(), b.GetCatFeatures())
+            && AlmostEqual(name + ".OneHotFeatures", a.GetOneHotFeatures(), b.GetOneHotFeatures())
+            && AlmostEqual(name + ".CtrFeatures", a.GetCtrFeatures(), b.GetCtrFeatures())
+            && AlmostEqual(name + ".ApproxDimension", a.GetDimensionsCount(), b.GetDimensionsCount())
+            && AlmostEqual(name + ".TreeSplits", a.GetTreeSplits(), b.GetTreeSplits())
+            && AlmostEqual(name + ".TreeSizes", a.GetTreeSizes(), b.GetTreeSizes())
+            && AlmostEqual(name + ".TreeStartOffsets", a.GetTreeStartOffsets(), b.GetTreeStartOffsets())
+            && AlmostEqualLeafValues(name + ".LeafValues", a, b)
+            && AlmostEqual(name + ".LeafWeights", a.GetLeafWeights(), b.GetLeafWeights())
+            ;
+    }
+
+    template <typename T>
+    bool AlmostEqual(const TString& name, TConstArrayRef<T> a, TConstArrayRef<T> b) {
+        if (IsIgnored(name))
+            return true;
+        if (a.size() != b.size()) {
+            Clog << name << ": array size is "
+                << a.size()
+                << " vs "
+                << b.size()
+                << Endl;
+            return false;
+        }
+        return AllOf(xrange(a.size()), [&](size_t idx){
+            return AlmostEqual(name + '[' + ToString(idx) + ']', a[idx], b[idx]);
+        });
+    }
+
+    template <typename T>
+    bool AlmostEqual(const TString& name, const TVector<T>& a, const TVector<T>& b) {
+        return AlmostEqual(name, TConstArrayRef<T>(a.begin(), a.end()), TConstArrayRef<T>(b.begin(), b.end()));
+    }
+
+    bool AlmostEqualLeafValues(const TString& name, const TModelTrees& a, const TModelTrees& b) {
+        if (a.GetScaleAndBias() == b.GetScaleAndBias()) {
+            return AlmostEqual(name, a.GetLeafValues(), b.GetLeafValues());
+        }
+
+        Clog << name << ".ScaleAndBias: "
+            << a.GetScaleAndBias()
+            << " vs "
+            << b.GetScaleAndBias()
+            << ", will compare normalized LeafValues..."
+            << Endl;
+
+        auto normedLeafValues = [](const TModelTrees& trees) -> TVector<double> {
+            TVector<double> result(trees.GetLeafValues().begin(), trees.GetLeafValues().end());
+            int firstTreeLeafCount = trees.GetTreeCount() > 0 ? trees.GetTreeLeafCounts()[0] : 0;
+            const auto norm = trees.GetScaleAndBias();
+            for (int i = 0; i < result.ysize(); ++i) {
+                result[i] *= norm.Scale;
+                if (i < firstTreeLeafCount) {
+                    result[i] += norm.Bias;
+                }
+            }
+            return result;
+        };
+        bool equal = AlmostEqual(name + "(normalized)", normedLeafValues(a), normedLeafValues(b));
+        if (equal) {
+            Clog << name + "(normalized): equal" << Endl;
+        }
+        return equal;
+    }
+
+    bool AlmostEqual(const TString& name, const TFloatFeature& a, const TFloatFeature& b) {
+        return IsIgnored(name)
+            || AlmostEqual(name + ".HasNans", a.HasNans, b.HasNans)
+            && AlmostEqual(name + ".Position", a.Position, b.Position)
+            && AlmostEqual(name + ".Borders", a.Borders, b.Borders)
+            && AlmostEqual(name + ".FeatureId", a.FeatureId, b.FeatureId)
+            && AlmostEqual(name + ".NanValueTreatment", a.NanValueTreatment, b.NanValueTreatment)
+            ;
+    }
+
+    bool AlmostEqual(const TString& name, const TOneHotFeature& a, const TOneHotFeature& b) {
+        return IsIgnored(name)
+            || AlmostEqual(name + ".CatFeatureIndex", a.CatFeatureIndex, b.CatFeatureIndex)
+            && AlmostEqual(name + ".Values", a.Values, b.Values)
+            && AlmostEqual(name + ".StringValues", a.StringValues, b.StringValues)
+            ;
+    }
+
+    bool AlmostEqual(const TString& name, const TCtrFeature& a, const TCtrFeature& b) {
+        return IsIgnored(name)
+            || AlmostEqual(name + ".Ctr", a.Ctr, b.Ctr)
+            && AlmostEqual(name + ".Borders", a.Borders, b.Borders)
+            ;
+    }
+
+    bool AlmostEqual(const TString& name, const TModelCtr& a, const TModelCtr& b) {
+        return IsIgnored(name)
+            || AlmostEqual(name + ".Base", a.Base, b.Base)
+            && AlmostEqual(name + ".PriorNum", a.PriorNum, b.PriorNum)
+            && AlmostEqual(name + ".PriorDenom", a.PriorDenom, b.PriorDenom)
+            && AlmostEqual(name + ".Scale", a.Scale, b.Scale)
+            && AlmostEqual(name + ".Shift", a.Shift, b.Shift)
+            && AlmostEqual(name + ".TargetBorderIdx", a.TargetBorderIdx, b.TargetBorderIdx)
+            ;
+    }
+
+    bool AlmostEqual(const TString& name, const TModelCtrBase& a, const TModelCtrBase& b) {
+        return IsIgnored(name)
+            || AlmostEqual(name + ".CtrType", a.CtrType, b.CtrType)
+            && AlmostEqual(name + ".Projection", a.Projection, b.Projection)
+            && AlmostEqual(name + ".TargetBorderClassifierIdx", a.TargetBorderClassifierIdx, b.TargetBorderClassifierIdx)
+            ;
+    }
+
+    bool AlmostEqual(const TString& name, const TFeatureCombination& a, const TFeatureCombination& b) {
+        return IsIgnored(name)
+            || AlmostEqual(name + ".CatFeatures", a.CatFeatures, b.CatFeatures)
+            && AlmostEqual(name + ".BinFeatures", a.BinFeatures, b.BinFeatures)
+            && AlmostEqual(name + ".OneHotFeatures", a.OneHotFeatures, b.OneHotFeatures)
+            ;
+    }
+
+    bool AlmostEqualModelInfo(const TString& name, const THashMap<TString, TString>& a, const THashMap<TString, TString>& b) {
+        if (IsIgnored(name))
+            return true;
+        TVector<TString> allKeys;
+        for (const auto kv : a) {
+            allKeys.push_back(kv.first);
+        }
+        for (const auto kv : b) {
+            allKeys.push_back(kv.first);
+        }
+        SortUnique(allKeys);
+        bool equal = true;
+        for (const auto key : allKeys) {
+            TString nameKey = name + '.' + key;
+            if (IsIgnored(nameKey))
+                continue;
+            if (a.contains(key) != b.contains(key)) {
+                Clog << nameKey << ": key is "
+                    << (a.contains(key) ? ShortQuoted(a.at(key)) : "null")
+                    << " vs "
+                    << (b.contains(key) ? ShortQuoted(b.at(key)) : "null")
+                    << Endl;
+                equal &= false;
+            } else if (key.EndsWith("params")) {
+                equal &= AlmostEqual(nameKey, ReadTJsonValue(a.at(key)), ReadTJsonValue(b.at(key)));
+            } else {
+                equal &= AlmostEqual(nameKey, a.at(key), b.at(key));
+            }
+        }
+        return equal;
+    }
+
+private:
+    double Eps;
+    THashSet<TString> IgnoredKeys;
+public:
+    double MaxObservedDiff = 0;
+};
+
+template <>
+void Out<TScaleAndBias>(IOutputStream& out, TTypeTraits<TScaleAndBias>::TFuncParam norm) {
+    out << "{" << norm.Scale << "," << norm.Bias << "}";
+}
+
+template <>
+void Out<TFeaturePosition>(IOutputStream& out, TTypeTraits<TFeaturePosition>::TFuncParam position) {
+    out << "{" << position.Index << "," << position.FlatIndex << "}";
+}
+
+template <>
+void Out<TCatFeature>(IOutputStream& out, TTypeTraits<TCatFeature>::TFuncParam feature) {
+    out << "{" << feature.FeatureId << ";" << feature.Position << ";" << feature.UsedInModel() << "}";
+}
+
+template <>
+void Out<TFloatSplit>(IOutputStream& out, TTypeTraits<TFloatSplit>::TFuncParam split) {
+    out << "{" << split.FloatFeature << "," << split.Split << "}";
+}
+
+template <>
+void Out<TOneHotSplit>(IOutputStream& out, TTypeTraits<TOneHotSplit>::TFuncParam split) {
+    out << "{" << split.CatFeatureIdx << "," << split.Value << "}";
 }
 
 TFullModel ReadModelAny(const TString& fileName) {
@@ -86,53 +347,15 @@ TFullModel ReadModelAny(const TString& fileName) {
     return model;
 }
 
-static bool CompareModelInfo(const THashMap<TString, TString>& modelInfo1, const THashMap<TString, TString>& modelInfo2,  bool verbose, const TSet<TString>& ignoreKeys) {
-    if (modelInfo1.size() != modelInfo2.size()) {
-        if (verbose) {
-            Clog << " Different modelInfo size: " << modelInfo1.size() << " vs " << modelInfo2.size() << Endl;
-        }
-        return false;
-    }
-    for (const auto& key1: modelInfo1) {
-        const auto& key2 = modelInfo2.find(key1.first);
-        if (key2 == modelInfo2.end()) {
-            if (verbose) {
-                Clog << " Key1 not found in modelInfo2: " << key1.first << Endl;
-            }
-            return false;
-        }
-        if (key1.first != "params") {
-            if (key1 != *key2) {
-                if (verbose) {
-                    Clog << " Values differ for key " << key1.first << ": " << key1.second << " vs " << key2->second << Endl;
-                }
-                if (ignoreKeys.contains(key1.first)) {
-                    continue;
-                }
-                return false;
-            }
-        } else {
-            if (ReadTJsonValue(key1.second) != ReadTJsonValue(key2->second)) {
-                if (verbose) {
-                    Clog << " Value of `params` differ: " << ReadTJsonValue(key1.second) << " vs " << ReadTJsonValue(key2->second) << Endl;
-                }
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-
 // returns Nothing() if both lhs and rhs are not of TModel type
 template <class TModel>
-TMaybe<int> ProcessSubType(const TStringBuf modelTypeName, const TStringBuf modelPath1, const TStringBuf modelPath2) {
+TMaybe<int> ProcessSubType(const TStringBuf modelTypeName, const TStringBuf modelPath1, const TStringBuf modelPath2, double diffLimit) {
     TMaybe<TModel> model1 = TryLoadModel<TModel>(modelPath1);
     TMaybe<TModel> model2 = TryLoadModel<TModel>(modelPath2);
 
     if (model1 && model2) {
         TString diffString;
-        bool modelsAreEqual = CompareModels<TModel>(*model1, *model2, &diffString);
+        bool modelsAreEqual = CompareModels<TModel>(*model1, *model2, diffLimit, &diffString);
         if (modelsAreEqual) {
             Clog << "Models are equal" << Endl;
             return 0;
@@ -158,12 +381,11 @@ TMaybe<int> ProcessSubType(const TStringBuf modelTypeName, const TStringBuf mode
     return Nothing();
 }
 
-
 int main(int argc, char** argv) {
     using namespace NLastGetopt;
     double diffLimit = 0.0;
     bool verbose = false;
-    TSet<TString> ignoreKeys;
+    THashSet<TString> ignoreKeys;
     TOpts opts = NLastGetopt::TOpts::Default();
     opts.AddLongOption("diff-limit").RequiredArgument("THR")
         .Help("Tolerate elementwise relative difference less than THR")
@@ -171,10 +393,18 @@ int main(int argc, char** argv) {
         .StoreResult(&diffLimit);
     opts.AddLongOption("verbose")
         .StoreTrue(&verbose);
+    opts.AddLongOption("ignore-keys-default")
+        .RequiredArgument("KEY[,...]")
+        .Help("Ignore differences for these key regexps")
+        .DefaultValue(".*model_guid,.*catboost_version_info,.*train_finish_time")
+        .Handler1T<TStringBuf>([&ignoreKeys](const TStringBuf& arg) {
+            for (const auto& key : StringSplitter(arg).Split(',').SkipEmpty()) {
+                ignoreKeys.insert(TString(key));
+            }
+        });
     opts.AddLongOption("ignore-keys")
         .RequiredArgument("KEY[,...]")
-        .Help("Ignore differences for these keys")
-        .DefaultValue("model_guid")
+        .Help("Ignore differences for these key regexps, in addition to ignore-keys-default")
         .Handler1T<TStringBuf>([&ignoreKeys](const TStringBuf& arg) {
             for (const auto& key : StringSplitter(arg).Split(',').SkipEmpty()) {
                 ignoreKeys.insert(TString(key));
@@ -187,12 +417,12 @@ int main(int argc, char** argv) {
     TOptsParseResult args(&opts, argc, argv);
     TVector<TString> freeArgs = args.GetFreeArgs();
 
-    TMaybe<int> subTypeResult = ProcessSubType<onnx::ModelProto>("ONNX", freeArgs[0], freeArgs[1]);
+    TMaybe<int> subTypeResult = ProcessSubType<onnx::ModelProto>("ONNX", freeArgs[0], freeArgs[1], diffLimit);
     if (subTypeResult) {
         return *subTypeResult;
     }
 
-    subTypeResult = ProcessSubType<TPmmlModel>("PMML", freeArgs[0], freeArgs[1]);
+    subTypeResult = ProcessSubType<TPmmlModel>("PMML", freeArgs[0], freeArgs[1], diffLimit);
     if (subTypeResult) {
         return *subTypeResult;
     }
@@ -205,111 +435,16 @@ int main(int argc, char** argv) {
         Clog << "Models are equal" << Endl;
         return 0;
     }
-    TSubmodelComparison result;
-    const TObliviousTrees& trees1 = *model1.ObliviousTrees;
-    const TObliviousTrees& trees2 = *model2.ObliviousTrees;
-    if (true) {
-        if (trees1.FloatFeatures.size() != trees2.FloatFeatures.size()) {
-            Clog << "FloatFeatures size differ: "
-                << trees1.FloatFeatures.size() << " vs " << trees2.FloatFeatures.size() << Endl;
-            result.StructureIsDifferent = true;
-        } else {
-            for (size_t i = 0; !result.StructureIsDifferent && i < trees1.FloatFeatures.size(); ++i) {
-                auto& floatFeature1 = trees1.FloatFeatures[i];
-                auto& floatFeature2 = trees2.FloatFeatures[i];
-                result.Update(FeatureBordersDiff("FloatFeature", i, floatFeature1.Borders, floatFeature2.Borders));
-                if (floatFeature1.FeatureId != floatFeature2.FeatureId) {
-                    Clog << "FloatFeature " << i << " FeatureId differ: "
-                        << floatFeature1.FeatureId << " vs " << floatFeature2.FeatureId << Endl;
-                    result.StructureIsDifferent = true;
-                }
-            }
-        }
-    }
-    if (trees1.CatFeatures != trees2.CatFeatures) {
-        Clog << "CatFeatures differ" << Endl;
-        result.StructureIsDifferent = true;
-    }
-    if (true) {
-        if (trees1.OneHotFeatures.size() != trees2.OneHotFeatures.size()) {
-            Clog << "OneHotFeatures size differ: "
-                << trees1.OneHotFeatures.size() << " vs " << trees2.OneHotFeatures.size() << Endl;
-            result.StructureIsDifferent = true;
-        } else {
-            for (size_t i = 0; i < trees1.OneHotFeatures.size(); ++i) {
-                auto& feature1 = trees1.OneHotFeatures[i];
-                auto& feature2 = trees2.OneHotFeatures[i];
-                result.Update(FeatureBordersDiff("OneHotFeatures.Values", i, feature1.Values, feature2.Values));
-            }
-        }
-    }
-    if (true) {
-        if (trees1.CtrFeatures.size() != trees2.CtrFeatures.size()) {
-            Clog << "CTRFeatures size differ: "
-                << trees1.CtrFeatures.size() << " vs " << trees2.CtrFeatures.size() << Endl;
-            result.StructureIsDifferent = true;
-        } else {
-            for (size_t i = 0; i < trees1.CtrFeatures.size(); ++i) {
-                auto& feature1 = trees1.CtrFeatures[i];
-                auto& feature2 = trees2.CtrFeatures[i];
-                result.Update(FeatureBordersDiff("CTRFeatures", i, feature1.Borders, feature2.Borders));
-            }
-        }
-    }
-    if (true) {
-        if (trees1.ApproxDimension != trees2.ApproxDimension) {
-            Clog << "ObliviousTrees.ApproxDimension differs" << Endl;
-            result.StructureIsDifferent = true;
-        }
-        if (trees1.TreeSplits != trees2.TreeSplits) {
-            Clog << "ObliviousTrees.TreeSplits differ" << Endl;
-            result.StructureIsDifferent = true;
-        }
-        if (trees1.TreeSizes != trees2.TreeSizes) {
-            Clog << "ObliviousTrees.TreeSizes differ" << Endl;
-            result.StructureIsDifferent = true;
-        }
-        if (trees1.TreeStartOffsets != trees2.TreeStartOffsets) {
-            Clog << "ObliviousTrees.TreeStartOffsets differ" << Endl;
-            result.StructureIsDifferent = true;
-        }
-        if (!result.StructureIsDifferent) {
-            Y_ASSERT(trees1.LeafValues.size() == trees2.LeafValues.size());
-            for (int i = 0; i < trees1.LeafValues.ysize(); ++i) {
-                if (result.Update(Diff(trees1.LeafValues[i], trees2.LeafValues[i]))) {
-                    Clog << "ObliviousTrees.LeafValues[" << i << "] differ: "
-                        << trees1.LeafValues[i] << " vs " << trees2.LeafValues[i]
-                        << ", diff = " << result.MaxElementwiseDiff << Endl;
-                }
-            }
-        }
-        if (!result.StructureIsDifferent) {
-            Y_ASSERT(trees1.LeafWeights.size() == trees2.LeafWeights.size());
-            const TVector<double>& weights1 = trees1.LeafWeights;
-            const TVector<double>& weights2 = trees2.LeafWeights;
-            for (int i = 0; i < trees1.LeafWeights.ysize(); ++i) {
-                if (result.Update(Diff(weights1[i], weights2[i]))) {
-                    Clog << "ObliviousTrees.LeafWeights[" << i << "] differ: "
-                        << weights1[i] << " vs " << weights2[i]
-                        << ", diff = " << result.MaxElementwiseDiff << Endl;
-                }
-            }
-        }
-        if (trees1.CatFeatures != trees2.CatFeatures) {
-            result.StructureIsDifferent = true;
-        }
-    }
-    if (!CompareModelInfo(model1.ModelInfo, model2.ModelInfo, verbose, ignoreKeys)) {
-        Clog << "ModelInfo differ" << Endl;
-        model1.ModelInfo = THashMap<TString, TString>();
-        model2.ModelInfo = THashMap<TString, TString>();
-        if (model1 != model2) {
-            result.StructureIsDifferent = true;
-        }
-    }
+
+    TComparator withinEps(diffLimit, ignoreKeys);
+    bool equal = true
+        && withinEps.AlmostEqual("ModelTrees", *model1.ModelTrees, *model2.ModelTrees)
+        && withinEps.AlmostEqualModelInfo("ModelInfo", model1.ModelInfo, model2.ModelInfo)
+        ;
+
     Clog << "MODEL1 = " << freeArgs[0] << Endl;
     Clog << "MODEL2 = " << freeArgs[1] << Endl;
-    Clog << "Structure of models is " << (result.StructureIsDifferent ? "different" : "same") << Endl;
-    Clog << "Maximum observed elementwise diff is " << result.MaxElementwiseDiff << ", limit is " << diffLimit << Endl;
-    return result.StructureIsDifferent || !(result.MaxElementwiseDiff <= diffLimit) ? 1 : 0;
+
+    Clog << "Maximum observed elementwise diff is " << withinEps.MaxObservedDiff << ", limit is " << diffLimit << Endl;
+    return equal ? 0 : 1;
 }

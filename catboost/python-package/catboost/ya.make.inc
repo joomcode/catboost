@@ -17,31 +17,37 @@ ADDINCL(
 )
 
 PEERDIR(
-    catboost/libs/train_lib
-    catboost/private/libs/algo
-    catboost/private/libs/algo_helpers
     catboost/libs/cat_feature
     catboost/libs/data
-    catboost/private/libs/data_types
-    catboost/private/libs/data_util
-    catboost/private/libs/init
     catboost/libs/fstr
-    catboost/private/libs/documents_importance
     catboost/libs/eval_result
     catboost/libs/helpers
-    catboost/private/libs/hyperparameter_tuning
     catboost/libs/loggers
     catboost/libs/logging
     catboost/libs/metrics
     catboost/libs/model
+    catboost/libs/monoforest
+    catboost/libs/train_lib
+    catboost/private/libs/algo
+    catboost/private/libs/algo_helpers
+    catboost/private/libs/data_types
+    catboost/private/libs/data_util
+    catboost/private/libs/documents_importance
+    catboost/private/libs/init
+    catboost/private/libs/hyperparameter_tuning
     catboost/private/libs/options
     catboost/private/libs/quantized_pool_analysis
     catboost/private/libs/target
     library/containers/2d_array
     library/json/writer
+    library/text_processing/tokenizer
+    library/text_processing/app_helpers
 )
 
-SRCS(helpers.cpp)
+SRCS(
+	helpers.cpp
+	monoforest_helpers.cpp
+)
 
 # have to disable them because cython's numpy integration uses deprecated numpy API
 NO_COMPILER_WARNINGS()
@@ -51,10 +57,10 @@ BUILDWITH_CYTHON_CPP(
     --module-name _catboost
 )
 
-IF (NOT OS_WINDOWS)
-    ALLOCATOR(LF)
-ELSE()
+IF (ARCH_AARCH64 OR OS_WINDOWS)
     ALLOCATOR(J)
+ELSE()
+    ALLOCATOR(LF)
 ENDIF()
 
 IF (OS_DARWIN)

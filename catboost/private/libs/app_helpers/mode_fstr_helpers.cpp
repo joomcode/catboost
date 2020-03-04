@@ -1,6 +1,7 @@
 #include "mode_fstr_helpers.h"
 
 #include <catboost/libs/data/load_data.h>
+#include <catboost/libs/data/model_dataset_compatibility.h>
 #include <catboost/libs/fstr/compare_documents.h>
 #include <catboost/libs/fstr/output_fstr.h>
 #include <catboost/libs/fstr/shap_values.h>
@@ -8,6 +9,7 @@
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/model/model.h>
 
+#include <util/folder/path.h>
 #include <util/generic/ptr.h>
 #include <util/generic/serialized_enum.h>
 #include <util/string/cast.h>
@@ -37,16 +39,20 @@ namespace {
 
                 TSetLoggingVerboseOrSilent inThisScope(false);
 
-                Dataset = NCB::ReadDataset(Params.InputPath,
+                Dataset = NCB::ReadDataset(/*taskType*/Nothing(),
+                                           Params.InputPath,
                                            Params.PairsFilePath,
                                            /*groupWeightsFilePath=*/NCB::TPathWithScheme(),
                                            /*baselineFilePath=*/ NCB::TPathWithScheme(),
+                                           /*timestampsFilePath=*/ NCB::TPathWithScheme(),
+                                           /*featureNamesPath=*/ NCB::TPathWithScheme(),
                                            Params.ColumnarPoolFormatParams,
                                            /*ignoredFeatures*/ {},
                                            NCB::EObjectsOrder::Undefined,
                                            NCB::TDatasetSubset::MakeColumns(),
-                                           /*classNames*/ Nothing(),
+                                           /*classLabels*/ Nothing(),
                                            LocalExecutor.Get());
+                CheckModelAndDatasetCompatibility(Model, *Dataset->ObjectsData.Get());
             }
             return Dataset;
         }
@@ -101,37 +107,34 @@ void NCB::ModeFstrSingleHost(const NCB::TAnalyticalModeCommonParams& params) {
     localExecutor->RunAdditionalThreads(params.ThreadCount - 1);
 
     TLazyPoolLoader poolLoader(params, model, localExecutor);
-    auto fstrType = GetFeatureImportanceType(model, /*haveDataset*/true, params.FstrType);
+    TFsPath inputPath(params.InputPath.Path);
+    auto fstrType = AdjustFeatureImportanceType(params.FstrType, model.GetLossFunctionName());
+    if (fstrType != EFstrType::PredictionValuesChange) {
+        CB_ENSURE_SCALE_IDENTITY(model.GetScaleAndBias(), "model fstr");
+    }
+    bool isInternalFstr = IsInternalFeatureImportanceType(params.FstrType);
+    const TString* fstrPathPtr = isInternalFstr ? nullptr : &(params.OutputPath.Path);
+    const TString* internalFstrPathPtr = !isInternalFstr ? nullptr : &(params.OutputPath.Path);
+
     switch (fstrType) {
         case EFstrType::PredictionValuesChange:
             CalcAndOutputFstr(model,
-                              model.ObliviousTrees->LeafWeights.empty() ? poolLoader() : nullptr,
+                              inputPath.IsFile() ? poolLoader() : nullptr, // because InputPath has default value and is always inited
                               localExecutor.Get(),
-                              &params.OutputPath.Path,
-                              nullptr,
+                              fstrPathPtr,
+                              internalFstrPathPtr,
                               params.FstrType);
             break;
         case EFstrType::LossFunctionChange:
             CalcAndOutputFstr(model,
                               poolLoader(),
                               localExecutor.Get(),
-                              &params.OutputPath.Path,
-                              nullptr,
-                              params.FstrType);
-            break;
-        case EFstrType::InternalFeatureImportance:
-            CalcAndOutputFstr(model,
-                              model.ObliviousTrees->LeafWeights.empty() ? poolLoader() : nullptr,
-                              localExecutor.Get(),
-                              nullptr,
-                              &params.OutputPath.Path,
+                              fstrPathPtr,
+                              internalFstrPathPtr,
                               params.FstrType);
             break;
         case EFstrType::Interaction:
-            CalcAndOutputInteraction(model, &params.OutputPath.Path, nullptr);
-            break;
-        case EFstrType::InternalInteraction:
-            CalcAndOutputInteraction(model, nullptr, &params.OutputPath.Path);
+            CalcAndOutputInteraction(model, fstrPathPtr, internalFstrPathPtr);
             break;
         case EFstrType::ShapValues:
             CalcAndOutputShapValues(model,

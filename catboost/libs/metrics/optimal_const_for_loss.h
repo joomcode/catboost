@@ -1,12 +1,17 @@
 #pragma once
 
 #include <catboost/libs/helpers/math_utils.h>
-#include <catboost/private/libs/algo_helpers/approx_calcer_helpers.h>
+#include <catboost/libs/helpers/quantile.h>
 #include <catboost/private/libs/options/enums.h>
+#include <catboost/private/libs/options/loss_description.h>
 
 #include <util/generic/algorithm.h>
 #include <util/generic/array_ref.h>
 #include <util/generic/maybe.h>
+#include <util/generic/vector.h>
+#include <util/generic/xrange.h>
+#include <util/generic/ymath.h>
+#include <util/string/cast.h>
 
 
 namespace NCB {
@@ -27,17 +32,47 @@ namespace NCB {
     inline float CalculateWeightedTargetQuantile(
         TConstArrayRef<float> target,
         TConstArrayRef<float> weights,
-        const NCatboostOptions::TLossDescription& lossDescription
+        double alpha,
+        double delta
     ) {
-        const auto& params = lossDescription.GetLossParams();
-        auto it = params.find("alpha");
-        double alpha = it == params.end() ? 0.5 : FromString<double>(it->second);
-        it = params.find("alpha");
-        double delta = it == params.end() ? 1e-6 : FromString<double>(it->second);
-
         const TVector<float> defaultWeights(target.size(), 1);
+        const auto weightsRef = weights.empty() ? MakeConstArrayRef(defaultWeights) : weights;
+        double q = CalcSampleQuantile(target, weightsRef, alpha);
 
-        return CalcSampleQuantile(target, weights.empty() ? MakeConstArrayRef(defaultWeights) : weights, alpha, delta);
+        // specific adjust according to delta parameter
+        if (delta > 0) {
+            const double totalWeight = weights.empty() ? static_cast<double>(target.size()) : Accumulate(weights, 0.0);
+            const double needWeight = totalWeight * alpha;
+            double lessWeight = 0;
+            double equalWeight = 0;
+            for (auto i : xrange(target.size())) {
+                if (target[i] < q) {
+                    lessWeight += weightsRef[i];
+                } else if (target[i] == q) {
+                    equalWeight += weightsRef[i];
+                }
+            }
+            if (lessWeight + equalWeight * alpha >= needWeight - DBL_EPSILON) {
+                q -= delta;
+            } else {
+                q += delta;
+            }
+        }
+
+        return q;
+    }
+
+    inline float CalculateOptimalConstApproxForMAPE(
+        TConstArrayRef<float> target,
+        TConstArrayRef<float> weights
+    ) {
+        TVector<float> weightsWithTarget = weights.empty()
+            ? TVector<float>(target.size(), 1.0)
+            : TVector<float>(weights.begin(), weights.end());
+        for (auto idx : xrange(target.size())) {
+            weightsWithTarget[idx] /= Max(1.0f, Abs(target[idx]));
+        }
+        return CalcSampleQuantile(target, weightsWithTarget, 0.5);
     }
 
     //TODO(isaf27): add baseline to CalcOptimumConstApprox
@@ -59,8 +94,15 @@ namespace NCB {
             }
             case ELossFunction::Quantile:
             case ELossFunction::MAE: {
-                return CalculateWeightedTargetQuantile(target, weights, lossDescription);
+                const auto& params = lossDescription.GetLossParams();
+                auto it = params.find("alpha");
+                double alpha = it == params.end() ? 0.5 : FromString<double>(it->second);
+                it = params.find("delta");
+                double delta = it == params.end() ? 1e-6 : FromString<double>(it->second);
+                return CalculateWeightedTargetQuantile(target, weights, alpha, delta);
             }
+            case ELossFunction::MAPE:
+                return CalculateOptimalConstApproxForMAPE(target, weights);
             default:
                 return Nothing();
         }

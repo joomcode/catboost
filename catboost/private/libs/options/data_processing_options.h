@@ -9,16 +9,13 @@
 #include <catboost/libs/helpers/sparse_array.h>
 
 #include <library/grid_creator/binarization.h>
+#include <library/json/json_value.h>
 
 #include <util/generic/map.h>
 #include <util/generic/maybe.h>
 #include <util/generic/vector.h>
 #include <util/system/types.h>
 
-
-namespace NJson {
-    class TJsonValue;
-}
 
 namespace NCatboostOptions {
     struct TDataProcessingOptions {
@@ -41,13 +38,14 @@ namespace NCatboostOptions {
         TOption<TTextProcessingOptions> TextProcessingOptions;
         TOption<ui32> ClassesCount;
         TOption<TVector<float>> ClassWeights;
-        TOption<TVector<TString>> ClassNames;
+        TOption<TVector<NJson::TJsonValue>> ClassLabels; // can be Integers, Floats or Strings
 
         TOption<float> DevDefaultValueFractionToEnableSparseStorage; // 0 means sparse storage is disabled
         TOption<NCB::ESparseArrayIndexingType> DevSparseArrayIndexingType;
 
         TGpuOnlyOption<EGpuCatFeaturesStorage> GpuCatFeaturesStorage;
         TCpuOnlyOption<bool> DevLeafwiseScoring;
+        TCpuOnlyOption<bool> DevGroupFeatures;
     private:
         void SetPerFeatureMissingSettingToCommonValues();
     };

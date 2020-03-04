@@ -49,6 +49,11 @@ namespace NCB {
             &(readDatasetMainParams->BaselineFilePath),
             srcDataFiles
         );
+        SaveDataToTempFile(
+            srcData.FeatureNamesFileData,
+            &(readDatasetMainParams->FeatureNamesFilePath),
+            srcDataFiles
+        );
     }
 
     void TestReadDataset(const TReadDatasetTestCase& testCase) {
@@ -63,15 +68,18 @@ namespace NCB {
         localExecutor.RunAdditionalThreads(3);
 
         TDataProviderPtr dataProvider = ReadDataset(
+            /*taskType*/Nothing(),
             readDatasetMainParams.PoolPath,
             readDatasetMainParams.PairsFilePath, // can be uninited
             readDatasetMainParams.GroupWeightsFilePath, // can be uninited
+            /*timestampsFilePath*/TPathWithScheme(),
             readDatasetMainParams.BaselineFilePath, // can be uninited
+            readDatasetMainParams.FeatureNamesFilePath, // can be uninited
             readDatasetMainParams.ColumnarPoolFormatParams,
             testCase.SrcData.IgnoredFeatures,
             testCase.SrcData.ObjectsOrder,
             TDatasetSubset::MakeColumns(),
-            /*classNames*/Nothing(),
+            /*classLabels*/Nothing(),
             &localExecutor
         );
 

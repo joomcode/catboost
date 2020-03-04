@@ -31,16 +31,20 @@ def extract_macro_calls2(unit, macro_value_name):
 
 
 def onrun_java_program(unit, *args):
+    args = list(args)
     """
     Custom code generation
     @link: https://wiki.yandex-team.ru/yatool/java/#kodogeneracijarunjavaprogram
     """
 
-    flat, kv = common.sort_by_keywords({'IN': -1, 'IN_DIR': -1, 'OUT': -1, 'OUT_DIR': -1, 'CWD': 1, 'CLASSPATH': -1, 'ADD_SRCS_TO_CLASSPATH': 0}, args)
+    flat, kv = common.sort_by_keywords({'IN': -1, 'IN_DIR': -1, 'OUT': -1, 'OUT_DIR': -1, 'CWD': 1, 'CLASSPATH': -1, 'CP_USE_COMMAND_FILE': 1, 'ADD_SRCS_TO_CLASSPATH': 0}, args)
     depends = kv.get('CLASSPATH', []) + kv.get('JAR', [])
     if depends:
         # XXX: hack to force ymake to build dependencies
-        unit.on_run_java(['TOOL'] + depends + ["OUT", "fake.out.{}".format(hash(tuple(depends)))])
+        unit.on_run_java(['TOOL'] + depends + ["OUT", "fake.out.{}".format(hash(tuple(args)))])
+
+    if not kv.get('CP_USE_COMMAND_FILE'):
+       args += ['CP_USE_COMMAND_FILE', unit.get(['JAVA_PROGRAM_CP_USE_COMMAND_FILE']) or 'yes']
 
     prev = unit.get(['RUN_JAVA_PROGRAM_VALUE']) or ''
     new_val = (prev + ' ' + base64.b64encode(json.dumps(list(args), encoding='utf-8'))).strip()
@@ -54,11 +58,11 @@ def ongenerate_script(unit, *args):
     Feel free to remind
     """
     flat, kv = common.sort_by_keywords(
-        {'OUT': 1, 'TEMPLATE': -1, 'CUSTOM_PROPERTY': -1},
+        {'OUT': -1, 'TEMPLATE': -1, 'CUSTOM_PROPERTY': -1},
         args
     )
-    if len(kv.get('TEMPLATE', [])) > 1:
-        ymake.report_configure_error('To mane arguments for TEMPLATE parameter')
+    if len(kv.get('TEMPLATE', [])) > len(kv.get('OUT', [])):
+        ymake.report_configure_error('To many arguments for TEMPLATE parameter')
     prev = unit.get(['GENERATE_SCRIPT_VALUE']) or ''
     new_val = (prev + ' ' + base64.b64encode(json.dumps(list(args), encoding='utf-8'))).strip()
     unit.set(['GENERATE_SCRIPT_VALUE', new_val])
@@ -73,6 +77,7 @@ def onjava_module(unit, *args):
         'MODULE_TYPE': unit.get('MODULE_TYPE'),
         'MODULE_ARGS': unit.get('MODULE_ARGS'),
         'PEERDIR': unit.get_module_dirs('PEERDIRS'),
+        'MANAGED_PEERS': '${MANAGED_PEERS}',
         'EXCLUDE': extract_macro_calls(unit, 'EXCLUDE_VALUE', args_delim),
         'JAVA_SRCS': extract_macro_calls(unit, 'JAVA_SRCS_VALUE', args_delim),
         'JAVAC_FLAGS': extract_macro_calls(unit, 'JAVAC_FLAGS_VALUE', args_delim),
@@ -103,6 +108,7 @@ def onjava_module(unit, *args):
         'GENERATE_SCRIPT': extract_macro_calls2(unit, 'GENERATE_SCRIPT_VALUE'),
         'FAKEID': extract_macro_calls(unit, 'FAKEID', args_delim),
         'TEST_DATA': extract_macro_calls(unit, 'TEST_DATA_VALUE', args_delim),
+        'JAVA_FORBIDDEN_LIBRARIES': extract_macro_calls(unit, 'JAVA_FORBIDDEN_LIBRARIES_VALUE', args_delim),
     }
 
     if unit.get('JAVA_ADD_DLLS_VALUE') == 'yes':
@@ -130,7 +136,7 @@ def onjava_module(unit, *args):
 
     for dm_paths in data['DEPENDENCY_MANAGEMENT']:
         for p in dm_paths:
-            unit.onpeerdir(p)
+            unit.on_ghost_peerdir(p)
 
     if not data['EXTERNAL_JAR']:
         has_processor = extract_macro_calls(unit, 'GENERATE_VCS_JAVA_INFO_NODEP', args_delim)
@@ -163,6 +169,28 @@ def onjava_module(unit, *args):
 
         if external:
             unit.onpeerdir(external)
+
+    dep_veto = extract_macro_calls(unit, 'JAVA_DEPENDENCIES_CONFIGURATION_VALUE', args_delim)
+    if dep_veto:
+        dep_veto = set(dep_veto[0])
+        if (unit.get('IGNORE_JAVA_DEPENDENCIES_CONFIGURATION') or '').lower() != 'yes':
+            for veto in map(str.upper, dep_veto):
+                if veto.upper() == 'FORBID_DIRECT_PEERDIRS':
+                    data['JAVA_DEPENDENCY_DIRECT'] = [['yes']]
+                elif veto.upper() == 'FORBID_DEFAULT_VERSIONS':
+                    data['JAVA_DEPENDENCY_DEFAULT_VERSION'] = [['yes']]
+                elif veto.upper() == 'FORBID_CONFLICT':
+                    data['JAVA_DEPENDENCY_CHECK_RESOLVED_CONFLICTS'] = [['yes']]
+                elif veto.upper() == 'FORBID_CONFLICT_DM':
+                    data['JAVA_DEPENDENCY_DM_CHECK_DIFFERENT'] = [['yes']]
+                elif veto.upper() == 'FORBID_CONFLICT_DM_RECENT':
+                    data['JAVA_DEPENDENCY_DM_CHECK_RECENT'] = [['yes']]
+                elif veto.upper() == 'REQUIRE_DM':
+                    data['JAVA_DEPENDENCY_DM_REQUIRED'] = [['yes']]
+                else:
+                    ymake.report_configure_error('Unknown JAVA_DEPENDENCIES_CONFIGURATION value {} Allowed only [{}]'.format(veto, ', '.join(
+                        ['FORBID_DIRECT_PEERDIRS', 'FORBID_DEFAULT_VERSIONS', 'FORBID_CONFLICT', 'FORBID_CONFLICT_DM', 'FORBID_CONFLICT_DM_RECENT', 'REQUIRE_DM']
+                    )))
 
     for k, v in data.items():
         if not v:

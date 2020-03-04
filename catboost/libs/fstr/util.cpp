@@ -21,20 +21,22 @@ TVector<double> CollectLeavesStatistics(
 
     TConstArrayRef<float> weights;
 
+    TTargetDataProviderPtr targetData; // needed to own weights data
+
     if (const auto* modelInfoParams = MapFindPtr(model.ModelInfo, "params")) {
         NJson::TJsonValue paramsJson = ReadTJsonValue(*modelInfoParams);
         if (paramsJson.Has("loss_function")) {
             TRestorableFastRng64 rand(0);
 
-            TProcessedDataProvider processedData = CreateModelCompatibleProcessedDataProvider(
+            targetData = CreateModelCompatibleProcessedDataProvider(
                 dataset,
                 {},
                 model,
                 GetMonopolisticFreeCpuRam(),
                 &rand,
-                localExecutor);
+                localExecutor).TargetData;
 
-            weights = GetWeights(*processedData.TargetData);
+            weights = GetWeights(*targetData);
         }
     }
 
@@ -47,9 +49,9 @@ TVector<double> CollectLeavesStatistics(
     }
 
     size_t treeCount = model.GetTreeCount();
-    const int approxDimension = model.ObliviousTrees->ApproxDimension;
+    const int approxDimension = model.ModelTrees->GetDimensionsCount();
     TVector<double> leavesStatistics(
-        model.ObliviousTrees->LeafValues.size() / approxDimension
+        model.ModelTrees->GetLeafValues().size() / approxDimension
     );
 
     auto binFeatures = MakeQuantizedFeaturesForEvaluator(model, *dataset.ObjectsData.Get());
@@ -57,7 +59,7 @@ TVector<double> CollectLeavesStatistics(
     const auto documentsCount = dataset.GetObjectCount();
     for (size_t treeIdx = 0; treeIdx < treeCount; ++treeIdx) {
         TVector<TIndexType> indices = BuildIndicesForBinTree(model, binFeatures.Get(), treeIdx);
-        const int offset = model.ObliviousTrees->GetFirstLeafOffsets()[treeIdx] / approxDimension;
+        const int offset = model.ModelTrees->GetFirstLeafOffsets()[treeIdx] / approxDimension;
         if (indices.empty()) {
             continue;
         }

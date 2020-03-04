@@ -1,11 +1,15 @@
 #include "baseline.h"
 #include "loader.h"
 
+#include <catboost/libs/column_description/column.h>
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/mem_usage.h>
 #include <catboost/libs/helpers/vector_helpers.h>
 
+#include <util/charset/unidata.h>
+#include <util/generic/algorithm.h>
 #include <util/generic/ptr.h>
+#include <util/generic/xrange.h>
 #include <util/string/cast.h>
 #include <util/string/split.h>
 #include <util/system/types.h>
@@ -19,6 +23,7 @@ namespace NCB {
 
     void ProcessIgnoredFeaturesList(
         TConstArrayRef<ui32> ignoredFeatures, // [flatFeatureIdx]
+        TMaybe<TString> allFeaturesIgnoredMessage,
         TDataMetaInfo* dataMetaInfo, // inout, must be inited, only ignored flags are updated
         TVector<bool>* ignoredFeaturesMask // [flatFeatureIdx], out
     ) {
@@ -43,10 +48,11 @@ namespace NCB {
             ignoredFeaturesInDataCount += (*ignoredFeaturesMask)[ignoredFeatureFlatIdx] == false;
             (*ignoredFeaturesMask)[ignoredFeatureFlatIdx] = true;
         }
-        CB_ENSURE(featureCount > ignoredFeaturesInDataCount, "All features are requested to be ignored");
-        CB_ENSURE_INTERNAL(featureCount >= ignoredFeaturesInDataCount,
-            "Too many ignored features: feature count is " << featureCount
-            << " ignored features count is " << ignoredFeaturesInDataCount);
+        CB_ENSURE(
+            featureCount > ignoredFeaturesInDataCount,
+            (allFeaturesIgnoredMessage.Defined() ?
+                *allFeaturesIgnoredMessage
+                : "All features are requested to be ignored"));
     }
 
 
@@ -210,6 +216,59 @@ namespace NCB {
         return groupWeights;
     }
 
+    static TVector<ui64> ReadGroupTimestamps(
+        const TPathWithScheme& filePath,
+        TConstArrayRef<TGroupId> groupIds,
+        ui64 docCount,
+        TDatasetSubset loadSubset
+    ) {
+        Y_UNUSED(loadSubset);
+        THashSet<TGroupId> knownGroups(groupIds.begin(), groupIds.end());
+
+        THashMap<TGroupId, ui64> groupTimestamps;
+        ui32 skippedGroupsCount = 0;
+
+        auto reader = GetLineDataReader(filePath);
+        TString line;
+        for (size_t lineNumber = 0; reader->ReadLine(&line); ++lineNumber) {
+            TVector<TString> tokens = StringSplitter(line).Split('\t');
+            if (tokens.empty()) {
+                continue;
+            }
+            CB_ENSURE(
+                tokens.size() == 2,
+                "Timestamps file " << filePath << ", line number " << lineNumber << ": expect two items, got " << tokens.size());
+            auto group = CalcGroupIdFor(tokens[0]);
+            if (knownGroups.count(group) == 0) {
+                ++skippedGroupsCount;
+                continue;
+            }
+            CB_ENSURE(
+                groupTimestamps.insert(
+                    std::make_pair(
+                        group,
+                        FromString<ui64>(tokens[1])
+                    )
+                ).second,
+                "Timestamps file " << filePath << ", line number " << lineNumber << ": multiple timestamps for GroupId " << tokens[0]
+            );
+        }
+        CATBOOST_INFO_LOG << "Number of groups from file not in dataset: " << skippedGroupsCount << Endl;
+
+        TVector<ui64> timestamps;
+        timestamps.reserve(docCount);
+        CB_ENSURE_INTERNAL(groupIds.size() == docCount, "Each object should have GroupId");
+        for (auto group : groupIds) {
+            CB_ENSURE(
+                groupTimestamps.count(group) != 0,
+                "Timestamps file " << filePath << ": no timestamp for GroupId with hash " << group);
+            timestamps.push_back(groupTimestamps.at(group));
+        }
+        return timestamps;
+    }
+
+
+
     void SetPairs(const TPathWithScheme& pairsPath, ui32 objectCount, TDatasetSubset loadSubset, IDatasetVisitor* visitor) {
         DumpMemUsage("After data read");
         if (pairsPath.Inited()) {
@@ -250,32 +309,151 @@ namespace NCB {
         }
     }
 
+    void SetTimestamps(
+        const TPathWithScheme& timestampsPath,
+        ui32 objectCount,
+        TDatasetSubset loadSubset,
+        IDatasetVisitor* visitor
+    ) {
+        DumpMemUsage("After data read");
+        if (timestampsPath.Inited()) {
+            auto maybeGroupIds = visitor->GetGroupIds();
+            CB_ENSURE(maybeGroupIds, "Cannot load group timestamps for a dataset without groups");
+            TVector<ui64> groupTimestamps = ReadGroupTimestamps(
+                timestampsPath,
+                *maybeGroupIds,
+                objectCount,
+                loadSubset
+            );
+            visitor->SetTimestamps(std::move(groupTimestamps));
+        }
+    }
+
+    TVector<TString> LoadFeatureNames(const TPathWithScheme& featureNamesPath) {
+        TVector<TString> featureNames;
+
+        if (featureNamesPath.Inited()) {
+            auto reader = GetLineDataReader(featureNamesPath);
+            TString line;
+            for (size_t lineNumber = 0; reader->ReadLine(&line); ++lineNumber) {
+                TVector<TString> tokens = StringSplitter(line).Split('\t');
+                if (tokens.empty()) {
+                    continue;
+                }
+                try {
+                    CB_ENSURE(tokens.size() == 2, "expect two items, got " << tokens.size());
+
+                    size_t featureIdx;
+                    CB_ENSURE(
+                        TryFromString(tokens[0], featureIdx),
+                        "Wrong format: first field is not unsigned integer");
+
+                    CB_ENSURE(
+                        !tokens[1].empty(),
+                        "feature name is empty");
+
+                    if (featureIdx >= featureNames.size()) {
+                        featureNames.resize(featureIdx + 1);
+                    } else {
+                        CB_ENSURE(
+                            featureNames[featureIdx].empty(),
+                            "feature index " << featureIdx << " specified multiple times");
+                    }
+
+                    featureNames[featureIdx] = tokens[1];
+
+                } catch (std::exception& e) {
+                    throw TCatBoostException() << "Feature names data from " << featureNamesPath
+                        << ", line number " << lineNumber << ": " << e.what();
+                }
+            }
+        }
+
+        return featureNames;
+    }
+
+    TVector<TString> GetFeatureNames(
+        const TDataColumnsMetaInfo& columnsDescription,
+        const TMaybe<TVector<TString>>& headerColumns,
+        const TPathWithScheme& featureNamesPath
+    ) {
+        // featureNamesFromColumns can be empty
+        const TVector<TString> featureNamesFromColumns = columnsDescription.GenerateFeatureIds(headerColumns);
+        const size_t featureCount
+            = featureNamesFromColumns.empty() ?
+                CountIf(
+                    columnsDescription.Columns,
+                    [](const TColumn& column) { return IsFactorColumn(column.Type); }
+                )
+                : featureNamesFromColumns.size();
+
+        TVector<TString> externalFeatureNames = LoadFeatureNames(featureNamesPath);
+
+        if (externalFeatureNames.empty()) {
+            return featureNamesFromColumns;
+        } else {
+            CB_ENSURE(
+                externalFeatureNames.size() <= featureCount,
+                "feature names file contains index (" << (externalFeatureNames.size() - 1)
+                << ") that is not less than the number of features in the dataset (" << featureCount << ')'
+            );
+            externalFeatureNames.resize(featureCount);
+            if (!featureNamesFromColumns.empty()) {
+                for (auto featureIdx : xrange(featureCount)) {
+                    CB_ENSURE(
+                        featureNamesFromColumns[featureIdx].empty()
+                        || (featureNamesFromColumns[featureIdx] == externalFeatureNames[featureIdx]),
+                        "Feature #" << featureIdx << ": name from columns specification (\""
+                        << featureNamesFromColumns[featureIdx]
+                        << "\") is not equal to name from feature names file (\""
+                        << externalFeatureNames[featureIdx] << "\")");
+                }
+            }
+            return externalFeatureNames;
+        }
+    }
+
     bool IsMissingValue(const TStringBuf& s) {
-        return
-            s == AsStringBuf("") ||
-            s == AsStringBuf("nan") ||
-            s == AsStringBuf("NaN") ||
-            s == AsStringBuf("NAN") ||
-            s == AsStringBuf("NA") ||
-            s == AsStringBuf("Na") ||
-            s == AsStringBuf("na") ||
-            s == AsStringBuf("#N/A") ||
-            s == AsStringBuf("#N/A N/A") ||
-            s == AsStringBuf("#NA") ||
-            s == AsStringBuf("-1.#IND") ||
-            s == AsStringBuf("-1.#QNAN") ||
-            s == AsStringBuf("-NaN") ||
-            s == AsStringBuf("-nan") ||
-            s == AsStringBuf("1.#IND") ||
-            s == AsStringBuf("1.#QNAN") ||
-            s == AsStringBuf("N/A") ||
-            s == AsStringBuf("NULL") ||
-            s == AsStringBuf("n/a") ||
-            s == AsStringBuf("null") ||
-            s == AsStringBuf("Null") ||
-            s == AsStringBuf("none") ||
-            s == AsStringBuf("None") ||
-            s == AsStringBuf("-");
+        switch (s.length()) {
+            case 0:
+                return true;
+            case 1:
+                return s[0] == '-';
+            case 2:
+                return (ToLower(s[0]) == 'n') && (
+                    s == AsStringBuf("NA") ||
+                    s == AsStringBuf("Na") ||
+                    s == AsStringBuf("na") ||
+                    false);
+            case 3:
+                return (ToLower(s[0]) == 'n' || ToLower(s[1]) == 'n') && (
+                    s == AsStringBuf("nan") ||
+                    s == AsStringBuf("NaN") ||
+                    s == AsStringBuf("NAN") ||
+                    s == AsStringBuf("#NA") ||
+                    s == AsStringBuf("N/A") ||
+                    s == AsStringBuf("n/a") ||
+                    false);
+            case 4:
+                return (ToLower(s[0]) == 'n' || ToLower(s[1]) == 'n') && (
+                    s == AsStringBuf("#N/A") ||
+                    s == AsStringBuf("-NaN") ||
+                    s == AsStringBuf("-nan") ||
+                    s == AsStringBuf("NULL") ||
+                    s == AsStringBuf("null") ||
+                    s == AsStringBuf("Null") ||
+                    s == AsStringBuf("none") ||
+                    s == AsStringBuf("None") ||
+                    false);
+            default:
+                return
+                    s == AsStringBuf("#N/A N/A") ||
+                    s == AsStringBuf("-1.#IND") ||
+                    s == AsStringBuf("-1.#QNAN") ||
+                    s == AsStringBuf("1.#IND") ||
+                    s == AsStringBuf("1.#QNAN") ||
+                    false;
+        }
     }
 
     bool TryParseFloatFeatureValue(TStringBuf stringValue, float* value) {

@@ -8,38 +8,51 @@
 #include <util/generic/map.h>
 #include <util/generic/set.h>
 #include <util/generic/vector.h>
+#include <util/str_stl.h>
 
 namespace NCB {
 
+    struct TDigitizerId {
+        TGuid TokenizerId;
+        TGuid DictionaryId;
+
+        bool operator==(const TDigitizerId& other) const {
+            return std::tie(TokenizerId, DictionaryId) == std::tie(other.TokenizerId, other.DictionaryId);
+        }
+    };
+
+    struct TDigitizer {
+        TTokenizerPtr Tokenizer;
+        TDictionaryPtr Dictionary;
+
+        TDigitizerId Id() const {
+            return {Tokenizer->Id(), Dictionary->Id()};
+        }
+
+        bool operator==(const TDigitizer& other) const {
+            return Id() == other.Id();
+        }
+    };
+
     class TTextDigitizers {
     public:
-        TTextDigitizers() {
-            Tokenizer = CreateTokenizer();
-        }
+        TTextDigitizers() = default;
 
-        void AddDictionary(ui32 srcTextIdx, ui32 dstTextIdx, TDictionaryPtr dictionary) {
+        void AddDigitizer(ui32 srcTextIdx, ui32 dstTextIdx, TDigitizer digitizer) {
             CB_ENSURE(
-                !Dictionaries.contains(dstTextIdx),
-                "Attempt to add rewrite dictionary for dstTextIdx=" << dstTextIdx
+                !Digitizers.contains(dstTextIdx),
+                "Attempt to add rewrite digitizer for dstTextIdx=" << dstTextIdx
             );
             SourceToDestinationIndexes[srcTextIdx].insert(dstTextIdx);
-            IdToDictionary[dictionary->Id()] = dictionary;
-            Dictionaries[dstTextIdx] = std::move(dictionary);
+            Digitizers[dstTextIdx] = std::move(digitizer);
         }
 
-        bool HasDictionary(ui32 dstTextIdx) {
-            return Dictionaries.contains(dstTextIdx);
+        bool HasDigitizer(ui32 dstTextIdx) {
+            return Digitizers.contains(dstTextIdx);
         }
 
-        TDictionaryPtr GetDictionary(const TGuid& guid) const {
-            return IdToDictionary.at(guid);
-        }
-        TDictionaryPtr GetDictionary(ui32 dstTextIdx) const {
-            return Dictionaries.at(dstTextIdx);
-        }
-
-        TTokenizerPtr GetTokenizer() const {
-            return Tokenizer;
+        TDigitizer GetDigitizer(ui32 dstTextIdx) const {
+            return Digitizers.at(dstTextIdx);
         }
 
         ui32 GetSourceTextsCount() const {
@@ -47,7 +60,7 @@ namespace NCB {
         }
 
         ui32 GetDigitizedTextsCount() const {
-            return Dictionaries.size();
+            return Digitizers.size();
         }
 
         ui32 GetDigitizedTextsCount(ui32 sourceTextIdx) const {
@@ -55,18 +68,25 @@ namespace NCB {
         }
 
         template <class TSourceTextAccessor, class TDigitizedTextWriter>
-        void Apply(TSourceTextAccessor&& sourceTextAccessor, TDigitizedTextWriter&& digitizedTextWriter) const {
+        void Apply(
+            TSourceTextAccessor&& sourceTextAccessor,
+            TDigitizedTextWriter&& digitizedTextWriter,
+            NPar::TLocalExecutor* localExecutor
+        ) const {
+            TVector<std::pair<ui32, ui32>> sourceToDestinationPairs;
             for (const auto& [sourceTextIdx, digitizedSetIndices]: SourceToDestinationIndexes) {
                 const auto sourceText = sourceTextAccessor(sourceTextIdx);
 
                 for (ui32 digitizedTextIdx: digitizedSetIndices) {
-                    const auto& dictionary = Dictionaries.at(digitizedTextIdx);
+                    const auto& dictionary = Digitizers.at(digitizedTextIdx).Dictionary;
+                    const auto& tokenizer = Digitizers.at(digitizedTextIdx).Tokenizer;
 
-                    TTextColumnBuilder textColumnBuilder(Tokenizer, dictionary, sourceText.Size());
+                    TTextColumnBuilder textColumnBuilder(tokenizer, dictionary, sourceText.Size());
                     sourceText.ForEach(
                         [&](ui32 index, TStringBuf phrase) {
                             textColumnBuilder.AddText(index, phrase);
-                        }
+                        },
+                        localExecutor
                     );
 
                     digitizedTextWriter(digitizedTextIdx, textColumnBuilder.Build());
@@ -74,22 +94,33 @@ namespace NCB {
             }
         }
 
-        TVector<TDictionaryPtr> GetDictionaries() {
-            TVector<TDictionaryPtr> dictionaries;
-            dictionaries.resize(Dictionaries.size());
+        TVector<TDigitizer> GetDigitizers() const {
+            TVector<TDigitizer> digitizers;
+            digitizers.resize(Digitizers.size());
 
-            for (const auto& [dstTextIdx, dictionary]: Dictionaries) {
-                dictionaries[dstTextIdx] = dictionary;
+            for (const auto& [dstTextIdx, digitizer]: Digitizers) {
+                digitizers[dstTextIdx]= digitizer;
             }
 
-            return dictionaries;
+            return digitizers;
         }
 
     private:
-        THashMap<TGuid, TDictionaryPtr> IdToDictionary;
+        // Original text feature index -> Tokenized & Dictionarized feature index
         TMap<ui32, TSet<ui32>> SourceToDestinationIndexes;
-        TMap<ui32, TDictionaryPtr> Dictionaries;
-        TTokenizerPtr Tokenizer;
+
+        // Tokenized & Dictionarized feature index -> Digitizer
+        TMap<ui32, TDigitizer> Digitizers;
     };
 
 }
+
+template <>
+struct THash<NCB::TDigitizer> {
+    size_t operator()(const NCB::TDigitizer& digitizer) const noexcept {
+        return THash<std::pair<NCB::TGuid, NCB::TGuid>>()(std::make_pair(
+            digitizer.Tokenizer->Id(),
+            digitizer.Dictionary->Id()
+        ));
+    }
+};

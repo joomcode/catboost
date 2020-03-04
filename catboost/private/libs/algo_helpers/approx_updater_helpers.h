@@ -87,6 +87,14 @@ inline void CalcPairwiseWeights(
     }
 }
 
+inline ui32 AdjustBlockSize(ui32 objectCount, ui32 regularBlockSize) {
+    return (objectCount < 10000) ? 10000 : regularBlockSize;
+}
+
+inline ui32 AdjustBlockCountLimit(ui32 objectCount, ui32 regularBlockCount) {
+    return (objectCount < 10000) ? 1 : regularBlockCount;
+}
+
 template <typename TUpdateFunc>
 inline void UpdateApprox(
     const TUpdateFunc& updateFunc,
@@ -100,13 +108,19 @@ inline void UpdateApprox(
 
         // deltaDim.size() < approxDim.size(), if delta is leaf values
         TArrayRef<double> approxDim((*approx)[dimensionIdx]);
-        NPar::ParallelFor(
-            *localExecutor,
-            0,
-            approxDim.size(),
+        if (approxDim.empty()) {
+            continue;
+        }
+
+        NPar::TLocalExecutor::TExecRangeParams blockParams(0, approxDim.size());
+        blockParams.SetBlockCount(AdjustBlockCountLimit(approxDim.size(), localExecutor->GetThreadCount() + 1));
+        localExecutor->ExecRange(
             [=, &updateFunc](int idx) {
                 updateFunc(deltaDim, approxDim, idx);
-            });
+            },
+            blockParams,
+            NPar::TLocalExecutor::WAIT_COMPLETE
+        );
     }
 }
 
@@ -163,6 +177,22 @@ inline void AddElementwise<double>(const TVector<double>& value, TVector<double>
 }
 
 template <typename TElementType>
+inline void AddElementwise(TConstArrayRef<TElementType> value, TVector<TElementType>* accumulator) {
+    Y_ASSERT(value.size() == accumulator->size());
+    for (int idx : xrange(value.size())) {
+        AddElementwise(value[idx], &(*accumulator)[idx]);
+    }
+}
+
+template <>
+inline void AddElementwise<double>(TConstArrayRef<double> value, TVector<double>* accumulator) {
+    Y_ASSERT(value.size() == accumulator->size());
+    for (int idx : xrange(value.size())) {
+        (*accumulator)[idx] += value[idx];
+    }
+}
+
+template <typename TElementType>
 inline TVector<TElementType> ScaleElementwise(double scale, const TVector<TElementType>& value) {
     TVector<TElementType> scaledValue(value);
     for (int idx : xrange(value.size())) {
@@ -183,7 +213,6 @@ inline TVector<double> ScaleElementwise<double>(double scale, const TVector<doub
 
 template <class T>
 void InitApproxFromBaseline(
-    const ui32 beginIdx,
     const ui32 endIdx,
     TConstArrayRef<TConstArrayRef<T>> baseline,
     TConstArrayRef<ui32> learnPermutation,
@@ -193,7 +222,7 @@ void InitApproxFromBaseline(
     const ui32 learnSampleCount = learnPermutation.size();
     const int approxDimension = approx->ysize();
     for (int dim = 0; dim < approxDimension; ++dim) {
-        for (ui32 docId : xrange(beginIdx, endIdx)) {
+        for (ui32 docId : xrange(endIdx)) {
             ui32 initialIdx = docId;
             if (docId < learnSampleCount) {
                 initialIdx = learnPermutation[docId];
@@ -202,7 +231,7 @@ void InitApproxFromBaseline(
         }
         ExpApproxIf(
             storeExpApproxes,
-            TArrayRef<double>((*approx)[dim].data() + beginIdx, (*approx)[dim].data() + endIdx)
+            TArrayRef<double>((*approx)[dim].data(), (*approx)[dim].data() + endIdx)
         );
     }
 }

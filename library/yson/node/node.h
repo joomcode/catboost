@@ -121,6 +121,8 @@ public:
     bool IsEntity() const;
     bool IsNull() const;
     bool IsUndefined() const;
+    // Returns true if TNode is neither Null, nor Undefined
+    bool HasValue() const;
 
     template<typename T>
     bool IsOfType() const noexcept;
@@ -355,6 +357,7 @@ inline TString TNode::ConvertTo<TString>() const {
         case NYT::TNode::Undefined:
             ythrow TTypeError() << "ConvertTo<TString>() called for type " << GetType();
     }
+    Y_UNREACHABLE();
 }
 
 template<>

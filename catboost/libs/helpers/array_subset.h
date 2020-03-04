@@ -218,6 +218,10 @@ namespace NCB {
             return static_cast<const TBase&>(a) == static_cast<const TBase&>(b);
         }
 
+        bool IsFullSubset() const {
+            return HoldsAlternative<TFullSubset<TSize>>(*this);
+        }
+
         TSize Size() const {
             switch (TBase::index()) {
                 case TVariantIndexV<TFullSubset<TSize>, TBase>:
@@ -1020,7 +1024,6 @@ namespace NCB {
 
         return dst;
     }
-
 
     template <class T, class TMaybePolicy, class TSize=size_t>
     inline TMaybe<TVector<T>, TMaybePolicy> GetSubsetOfMaybeEmpty(

@@ -12,24 +12,24 @@ Y_UNIT_TEST_SUITE(TJsonModelExport) {
         TFullModel model = TrainFloatCatboostModel();
         ExportModel(model, "model.json", EModelType::Json);
         auto model2 = ReadModel("model.json", EModelType::Json);
-        UNIT_ASSERT(model.ObliviousTrees->ApproxDimension == model2.ObliviousTrees->ApproxDimension);
-        UNIT_ASSERT(model.ObliviousTrees->TreeSplits == model2.ObliviousTrees->TreeSplits);
-        UNIT_ASSERT(model.ObliviousTrees->TreeSizes == model2.ObliviousTrees->TreeSizes);
-        UNIT_ASSERT(model.ObliviousTrees->TreeStartOffsets == model2.ObliviousTrees->TreeStartOffsets);
-        UNIT_ASSERT(model.ObliviousTrees->CatFeatures == model2.ObliviousTrees->CatFeatures);
-        UNIT_ASSERT(model.ObliviousTrees->FloatFeatures == model2.ObliviousTrees->FloatFeatures);
-        UNIT_ASSERT(model.ObliviousTrees->OneHotFeatures == model2.ObliviousTrees->OneHotFeatures);
-        UNIT_ASSERT(model.ObliviousTrees->CtrFeatures == model2.ObliviousTrees->CtrFeatures);
-        UNIT_ASSERT(model.ObliviousTrees->LeafValues.ysize() == model2.ObliviousTrees->LeafValues.ysize());
-        for (int idx = 0; idx < model.ObliviousTrees->LeafValues.ysize(); ++idx) {
-            UNIT_ASSERT_DOUBLES_EQUAL(model.ObliviousTrees->LeafValues[idx], model2.ObliviousTrees->LeafValues[idx], 1e-9);
+        UNIT_ASSERT(model.ModelTrees->GetDimensionsCount() == model2.ModelTrees->GetDimensionsCount());
+        UNIT_ASSERT(model.ModelTrees->GetTreeSplits() == model2.ModelTrees->GetTreeSplits());
+        UNIT_ASSERT(model.ModelTrees->GetTreeSizes() == model2.ModelTrees->GetTreeSizes());
+        UNIT_ASSERT(model.ModelTrees->GetTreeStartOffsets() == model2.ModelTrees->GetTreeStartOffsets());
+        UNIT_ASSERT(model.ModelTrees->GetCatFeatures() == model2.ModelTrees->GetCatFeatures());
+        UNIT_ASSERT(model.ModelTrees->GetFloatFeatures() == model2.ModelTrees->GetFloatFeatures());
+        UNIT_ASSERT(model.ModelTrees->GetOneHotFeatures() == model2.ModelTrees->GetOneHotFeatures());
+        UNIT_ASSERT(model.ModelTrees->GetCtrFeatures() == model2.ModelTrees->GetCtrFeatures());
+        UNIT_ASSERT(model.ModelTrees->GetLeafValues().ysize() == model2.ModelTrees->GetLeafValues().ysize());
+        for (int idx = 0; idx < model.ModelTrees->GetLeafValues().ysize(); ++idx) {
+            UNIT_ASSERT_DOUBLES_EQUAL(model.ModelTrees->GetLeafValues()[idx], model2.ModelTrees->GetLeafValues()[idx], 1e-9);
         }
     }
     Y_UNIT_TEST(TestEmptyLeafWeights) {
         TFullModel model = TrainFloatCatboostModel();
-        model.ObliviousTrees.GetMutable()->LeafWeights.clear();
+        model.ModelTrees.GetMutable()->ClearLeafWeights();
         ExportModel(model, "model.json", EModelType::Json);
         model = ReadModel("model.json", EModelType::Json);
-        UNIT_ASSERT(model.ObliviousTrees->LeafWeights.empty());
+        UNIT_ASSERT(model.ModelTrees->GetLeafWeights().empty());
     }
 }

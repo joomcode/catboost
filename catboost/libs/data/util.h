@@ -70,4 +70,16 @@ namespace NCB {
         }
     }
 
+    template <class T>
+    void PrepareForInitialization(
+        size_t dataCount,
+        size_t size,
+        size_t prevTailSize,
+        TVector<TVector<T>>* data
+    ) {
+        data->resize(dataCount);
+        for (auto& subData : *data) {
+            PrepareForInitialization(size, prevTailSize, &subData);
+        }
+    }
 }

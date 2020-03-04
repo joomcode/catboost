@@ -10,6 +10,7 @@
 #include <catboost/libs/loggers/logger.h>
 #include <catboost/libs/logging/logging.h>
 #include <catboost/libs/logging/profile_info.h>
+#include <catboost/libs/train_lib/dir_helper.h>
 #include <catboost/private/libs/options/plain_options_helper.h>
 
 #include <util/generic/algorithm.h>
@@ -226,9 +227,9 @@ namespace {
         }
     }
 
-    template <class TDataProvidersTemplate>
-    TDataProvidersTemplate PrepareTrainTestSplit(
-        typename TDataProvidersTemplate::TDataPtr srcData,
+
+    NCB::TTrainingDataProviders PrepareTrainTestSplit(
+        NCB::TTrainingDataProviderPtr srcData,
         const TTrainTestSplitParams& trainTestSplitParams,
         ui64 cpuUsedRamLimit,
         NPar::TLocalExecutor* localExecutor) {
@@ -241,9 +242,13 @@ namespace {
         NCB::TArraySubsetIndexing<ui32> testIndices;
 
         if (trainTestSplitParams.Stratified) {
-            StratifiedTrainTestSplit(
+            NCB::TMaybeData<TConstArrayRef<float>> maybeTarget
+                = srcData->TargetData->GetOneDimensionalTarget();
+            CB_ENSURE(maybeTarget, "Cannot do stratified split: Target data is unavailable");
+
+            NCB::StratifiedTrainTestSplit(
                 *srcData->ObjectsGrouping,
-                NCB::GetTargetForStratifiedSplit(*srcData),
+                *maybeTarget,
                 trainTestSplitParams.TrainPart,
                 &trainIndices,
                 &testIndices
@@ -256,7 +261,7 @@ namespace {
                 &testIndices
             );
         }
-        return NCB::CreateTrainTestSubsets<TDataProvidersTemplate>(
+        return NCB::CreateTrainTestSubsets<NCB::TTrainingDataProviders>(
             srcData,
             std::move(trainIndices),
             std::move(testIndices),
@@ -383,6 +388,7 @@ namespace {
 
     bool QuantizeDataIfNeeded(
         bool allowWriteFiles,
+        const TString& tmpDir,
         NCB::TFeaturesLayoutPtr featuresLayout,
         NCB::TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
         NCB::TDataProviderPtr data,
@@ -410,7 +416,9 @@ namespace {
             quantizedFeaturesInfo = MakeIntrusive<NCB::TQuantizedFeaturesInfo>(
                 *(featuresLayout.Get()),
                 MakeConstArrayRef(ignoredFeatureNums),
-                commonFloatFeaturesBinarization
+                commonFloatFeaturesBinarization,
+                /*perFloatFeatureQuantization*/TMap<ui32, NCatboostOptions::TBinarizationOptions>(),
+                /*floatFeaturesAllowNansInTestOnly*/true
             );
             // Quantizing training data
             *result = GetTrainingData(
@@ -418,9 +426,9 @@ namespace {
                 /*isLearnData*/ true,
                 /*datasetName*/ TStringBuf(),
                 /*bordersFile*/ Nothing(),  // Already at quantizedFeaturesInfo
-                /*unloadCatFeaturePerfectHashFromRamIfPossible*/ true,
+                /*unloadCatFeaturePerfectHashFromRam*/ allowWriteFiles,
                 /*ensureConsecutiveLearnFeaturesDataForCpu*/ true,
-                allowWriteFiles,
+                tmpDir,
                 quantizedFeaturesInfo,
                 catBoostOptions,
                 labelConverter,
@@ -435,6 +443,7 @@ namespace {
 
     bool QuantizeAndSplitDataIfNeeded(
         bool allowWriteFiles,
+        const TString& tmpDir,
         const TTrainTestSplitParams& trainTestSplitParams,
         ui64 cpuUsedRamLimit,
         NCB::TFeaturesLayoutPtr featuresLayout,
@@ -451,6 +460,7 @@ namespace {
         NCB::TTrainingDataProviderPtr quantizedData;
         bool isNeedSplit = QuantizeDataIfNeeded(
             allowWriteFiles,
+            tmpDir,
             featuresLayout,
             quantizedFeaturesInfo,
             data,
@@ -465,7 +475,7 @@ namespace {
 
         if (isNeedSplit) {
             // Train-test split
-            *result = PrepareTrainTestSplit<NCB::TTrainingDataProviders>(
+            *result = PrepareTrainTestSplit(
                 quantizedData,
                 trainTestSplitParams,
                 cpuUsedRamLimit,
@@ -744,6 +754,11 @@ namespace {
             NCatboostOptions::TOutputFilesOptions outputFileOptions;
             outputFileOptions.Load(outputJsonParams);
 
+            TString tmpDir;
+            if (outputFileOptions.AllowWriteFiles()) {
+                NCB::NPrivate::CreateTrainDirWithTmpDirIfNotExist(outputFileOptions.GetTrainDir(), &tmpDir);
+            }
+
             InitializeEvalMetricIfNotSet(catBoostOptions.MetricOptions->ObjectiveMetric, &catBoostOptions.MetricOptions->EvalMetric);
             NCB::TFeaturesLayoutPtr featuresLayout = data->MetaInfo.FeaturesLayout;
             NCB::TQuantizedFeaturesInfoPtr quantizedFeaturesInfo;
@@ -754,6 +769,7 @@ namespace {
                 TSetLogging inThisScope(catBoostOptions.LoggingLevel);
                 QuantizeDataIfNeeded(
                     outputFileOptions.AllowWriteFiles(),
+                    tmpDir,
                     featuresLayout,
                     quantizedFeaturesInfo,
                     data,
@@ -777,7 +793,7 @@ namespace {
                     localExecutor,
                     &cvResult);
             }
-            ui32 approxDimension = NCB::GetApproxDimension(catBoostOptions, labelConverter);
+            ui32 approxDimension = NCB::GetApproxDimension(catBoostOptions, labelConverter, data->RawTargetData.GetTargetDimension());
             const TVector<THolder<IMetric>> metrics = CreateMetrics(
                 catBoostOptions.MetricOptions,
                 evalMetricDescriptor,
@@ -928,6 +944,11 @@ namespace {
             outputFileOptions.Load(outputJsonParams);
             static const bool allowWriteFiles = outputFileOptions.AllowWriteFiles();
 
+            TString tmpDir;
+            if (outputFileOptions.AllowWriteFiles()) {
+                NCB::NPrivate::CreateTrainDirWithTmpDirIfNotExist(outputFileOptions.GetTrainDir(), &tmpDir);
+            }
+
             InitializeEvalMetricIfNotSet(catBoostOptions.MetricOptions->ObjectiveMetric, &catBoostOptions.MetricOptions->EvalMetric);
             NCB::TFeaturesLayoutPtr featuresLayout = data->MetaInfo.FeaturesLayout;
             NCB::TQuantizedFeaturesInfoPtr quantizedFeaturesInfo;
@@ -937,6 +958,7 @@ namespace {
                 TSetLogging inThisScope(catBoostOptions.LoggingLevel);
                 QuantizeAndSplitDataIfNeeded(
                     allowWriteFiles,
+                    tmpDir,
                     trainTestSplitParams,
                     cpuUsedRamLimit,
                     featuresLayout,
@@ -960,6 +982,7 @@ namespace {
                 internalOptions.ForceCalcEvalMetricOnEveryIteration = false;
                 internalOptions.OffsetMetricPeriodByInitModelSize = true;
                 outputFileOptions.SetAllowWriteFiles(false);
+                const auto defaultTrainingCallbacks = MakeHolder<ITrainingCallbacks>();
                 // Training model
                 modelTrainerHolder->TrainModel(
                     internalOptions,
@@ -969,7 +992,7 @@ namespace {
                     evalMetricDescriptor,
                     trainTestData,
                     labelConverter,
-                    MakeHolder<ITrainingCallbacks>(), // TODO(ilikepugs): MLTOOLS-3540
+                    defaultTrainingCallbacks.Get(), // TODO(ilikepugs): MLTOOLS-3540
                     /*initModel*/ Nothing(),
                     /*initLearnProgress*/ nullptr,
                     /*initModelApplyCompatiblePools*/ NCB::TDataProviders(),
@@ -982,7 +1005,7 @@ namespace {
                 );
             }
 
-            ui32 approxDimension = NCB::GetApproxDimension(catBoostOptions, labelConverter);
+            ui32 approxDimension = NCB::GetApproxDimension(catBoostOptions, labelConverter, data->RawTargetData.GetTargetDimension());
             const TVector<THolder<IMetric>> metrics = CreateMetrics(
                 catBoostOptions.MetricOptions,
                 evalMetricDescriptor,

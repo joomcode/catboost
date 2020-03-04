@@ -1,6 +1,27 @@
 #pragma once
 
 #include <util/generic/fwd.h>
+#include <util/generic/strbuf.h>
+
+namespace NUrl {
+
+    /**
+     * Splits URL to host and path
+     * Example:
+     * auto [host, path] = SplitUrlToHostAndPath(url);
+     *
+     * @param[in] url                   any URL
+     * @param[out] <host, path>     parsed host and path
+     */
+    struct TSplitUrlToHostAndPathResult {
+        TStringBuf host;
+        TStringBuf path;
+    };
+
+    Y_PURE_FUNCTION
+    TSplitUrlToHostAndPathResult SplitUrlToHostAndPath(const TStringBuf url);
+
+} // namespace NUrl
 
 Y_PURE_FUNCTION
 size_t GetHttpPrefixSize(const char* url, bool ignorehttps = false) noexcept;
@@ -60,6 +81,16 @@ TStringBuf GetSchemeHostAndPort(const TStringBuf url, bool trimHttp = true, bool
  */
 void SplitUrlToHostAndPath(const TStringBuf url, TStringBuf& host, TStringBuf& path);
 void SplitUrlToHostAndPath(const TStringBuf url, TString& host, TString& path);
+
+/**
+ * Separates URL into url prefix, query (aka cgi params list), and fragment (aka part after #)
+ *
+ * @param[in] url               any URL
+ * @param[out] sanitizedUrl     parsed URL without query and fragment parts
+ * @param[out] query            parsed query
+ * @param[out] fragment         parsed fragment
+ */
+void SeparateUrlFromQueryAndFragment(const TStringBuf url, TStringBuf& sanitizedUrl, TStringBuf& query, TStringBuf& fragment);
 
 /**
  * Extracts scheme, host and port from URL.

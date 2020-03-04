@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Python.h>
+
 #include <catboost/private/libs/algo/plot.h>
 #include <catboost/private/libs/data_types/groupid.h>
 #include <catboost/libs/helpers/exception.h>
@@ -14,7 +16,6 @@
 
 #include <util/generic/noncopyable.h>
 
-#include <Python.h>
 
 class TGilGuard : public TNonCopyable {
 public:
@@ -49,7 +50,7 @@ TVector<TVector<double>> EvalMetrics(
 TVector<TString> GetMetricNames(const TFullModel& model, const TVector<TString>& metricsDescription);
 
 TVector<double> EvalMetricsForUtils(
-    const TVector<float>& label,
+    TConstArrayRef<TVector<float>> label,
     const TVector<TVector<double>>& approx,
     const TString& metricName,
     const TVector<float>& weight,
@@ -151,4 +152,8 @@ NJson::TJsonValue GetTrainingOptions(
     const TMaybe<NCB::TDataMetaInfo>& testDataMetaInfo
 );
 
-NJson::TJsonValue GetPlainJsonWithAllOptions(const TFullModel& model, bool hasCatFeatures);
+NJson::TJsonValue GetPlainJsonWithAllOptions(
+    const TFullModel& model,
+    bool hasCatFeatures,
+    bool hasTextFeatures
+);

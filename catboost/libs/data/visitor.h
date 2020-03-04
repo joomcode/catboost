@@ -46,6 +46,8 @@ namespace NCB {
 
         virtual void SetPairs(TVector<TPair>&& pairs) = 0;
 
+        virtual void SetTimestamps(TVector<ui64>&& timestamps) = 0;
+
         // less effective version for Cython
         void SetPairs(TConstArrayRef<TPair> pairs) {
             TVector<TPair> pairsCopy;
@@ -111,6 +113,7 @@ namespace NCB {
         // for sparse data
         virtual void AddCatFeatureDefaultValue(ui32 flatFeatureIdx, TStringBuf feature) = 0;
 
+        virtual void AddTextFeature(ui32 localObjectIdx, ui32 flatFeatureIdx, TStringBuf feature) = 0;
         virtual void AddTextFeature(ui32 localObjectIdx, ui32 flatFeatureIdx, const TString& feature) = 0;
         virtual void AddAllTextFeatures(ui32 localObjectIdx, TConstArrayRef<TString> features) = 0;
         virtual void AddAllTextFeatures(
@@ -120,12 +123,10 @@ namespace NCB {
 
         // TRawTargetData
 
-        /* if raw data contains target data as strings (label is a synonym for target)
-            prefer passing it as TString to avoid unnecessary memory copies
-            even if these strings represent float or ints
-        */
         virtual void AddTarget(ui32 localObjectIdx, const TString& value) = 0;
         virtual void AddTarget(ui32 localObjectIdx, float value) = 0;
+        virtual void AddTarget(ui32 flatTargetIdx, ui32 localObjectIdx, const TString& value) = 0;
+        virtual void AddTarget(ui32 flatTargetIdx, ui32 localObjectIdx, float value) = 0;
         virtual void AddBaseline(ui32 localObjectIdx, ui32 baselineIdx, float value) = 0;
         virtual void AddWeight(ui32 localObjectIdx, float value) = 0;
         virtual void AddGroupWeight(ui32 localObjectIdx, float value) = 0;
@@ -179,6 +180,7 @@ namespace NCB {
         // shared ownership is passed to IRawFeaturesOrderDataVisitor
         virtual void AddCatFeature(ui32 flatFeatureIdx, TMaybeOwningConstArrayHolder<ui32> features) = 0;
 
+        virtual void AddTextFeature(ui32 flatFeatureIdx, TConstArrayRef<TString> features) = 0;
         virtual void AddTextFeature(ui32 flatFeatureIdx, TMaybeOwningConstArrayHolder<TString> feature) = 0;
         virtual void AddTextFeature(
             ui32 flatFeatureIdx,
@@ -188,7 +190,9 @@ namespace NCB {
         // TRawTargetData
 
         virtual void AddTarget(TConstArrayRef<TString> value) = 0;
-        virtual void AddTarget(TConstArrayRef<float> value) = 0;
+        virtual void AddTarget(ITypedSequencePtr<float> value) = 0;
+        virtual void AddTarget(ui32 flatTargetIdx, TConstArrayRef<TString> value) = 0;
+        virtual void AddTarget(ui32 flatTargetIdx, ITypedSequencePtr<float> value) = 0;
         virtual void AddBaseline(ui32 baselineIdx, TConstArrayRef<float> value) = 0;
         virtual void AddWeights(TConstArrayRef<float> value) = 0;
         virtual void AddGroupWeights(TConstArrayRef<float> value) = 0;
@@ -248,13 +252,10 @@ namespace NCB {
 
         // TRawTargetData
 
-        /* if raw data contains target data as strings (label is a synonym for target)
-            prefer passing it as TString to avoid unnecessary memory copies
-            even if these strings represent float or ints
-        */
         virtual void AddTargetPart(ui32 objectOffset, TUnalignedArrayBuf<float> targetPart) = 0;
-
         virtual void AddTargetPart(ui32 objectOffset, TMaybeOwningConstArrayHolder<TString> targetPart) = 0;
+        virtual void AddTargetPart(ui32 flatTargetIdx, ui32 objectOffset, TUnalignedArrayBuf<float> targetPart) = 0;
+        virtual void AddTargetPart(ui32 flatTargetIdx, ui32 objectOffset, TMaybeOwningConstArrayHolder<TString> targetPart) = 0;
 
         virtual void AddBaselinePart(
             ui32 objectOffset,

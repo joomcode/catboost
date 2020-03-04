@@ -1,27 +1,39 @@
 #pragma once
 
-#include <catboost/private/libs/options/enums.h>
-#include <util/generic/array_ref.h>
-#include <util/generic/fwd.h>
-#include <util/generic/maybe.h>
-#include <util/generic/ptr.h>
-#include <util/generic/strbuf.h>
-#include <util/generic/vector.h>
-#include <util/generic/xrange.h>
+#include <catboost/libs/helpers/guid.h>
+
+#include <library/text_processing/tokenizer/tokenizer.h>
 
 namespace NCB {
 
-    //TODO(noxoomo, nikitxskv): move to library after text-processing tokenizer will be available
-    class ITokenizer : public TThrRefBase {
-    public:
-        virtual void Tokenize(TStringBuf inputString, TVector<TStringBuf>* tokens) const = 0;
+    struct TTokensWithBuffer {
+        TVector<TStringBuf> View;
+        TVector<TString> Data;
     };
 
-    using TTokenizerPtr = TIntrusivePtr<ITokenizer>;
+    class TTokenizer : public TThrRefBase {
+    public:
+        TTokenizer() = default;
+        explicit TTokenizer(const NTextProcessing::NTokenizer::TTokenizerOptions& options);
 
-    TVector<TVector<TStringBuf>> Tokenize(TConstArrayRef<TStringBuf> textFeature, const TTokenizerPtr& tokenizer);
+        TGuid Id() const;
+        NTextProcessing::NTokenizer::TTokenizerOptions Options() const;
+        void Tokenize(TStringBuf inputString, TTokensWithBuffer* tokens);
 
-    TTokenizerPtr CreateTokenizer(ETokenizerType tokenizerType = ETokenizerType::Naive);
+        void Save(IOutputStream* stream) const;
+        void Load(IInputStream* stream);
+    private:
+        TGuid Guid;
+        NTextProcessing::NTokenizer::TTokenizer TokenizerImpl;
+
+        static constexpr std::array<char, 12> TokenizerMagic = {"TokenizerV1"};
+        static constexpr ui32 MagicSize = TokenizerMagic.size();
+        static constexpr ui32 Alignment = 16;
+    };
+
+    using TTokenizerPtr = TIntrusivePtr<TTokenizer>;
+
+    TTokenizerPtr CreateTokenizer(const NTextProcessing::NTokenizer::TTokenizerOptions& options = {});
 }
 
 

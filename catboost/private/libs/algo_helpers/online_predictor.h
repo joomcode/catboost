@@ -98,6 +98,18 @@ public:
 
 };
 
+inline static TSumMulti MakeZeroDers(
+    int approxDimension,
+    ELeavesEstimation estimationMethod,
+    EHessianType hessianType
+) {
+    if (estimationMethod == ELeavesEstimation::Gradient) {
+        return TSumMulti(approxDimension);
+    } else {
+        return TSumMulti(approxDimension, hessianType);
+    }
+}
+
 inline double CalcAverage(
     double sumDelta,
     double count,
@@ -107,6 +119,14 @@ inline double CalcAverage(
     return sumDelta * inv;
 }
 
+inline double ScaleL2Reg(
+    float l2Regularizer,
+    double sumAllWeights,
+    int allDocCount) {
+
+    return l2Regularizer * (sumAllWeights / allDocCount);
+}
+
 inline double CalcAverage(
     double sumDelta,
     double count,
@@ -114,7 +134,7 @@ inline double CalcAverage(
     double sumAllWeights,
     int allDocCount) {
 
-    return CalcAverage(sumDelta, count, l2Regularizer * (sumAllWeights / allDocCount));
+    return CalcAverage(sumDelta, count, ScaleL2Reg(l2Regularizer, sumAllWeights, allDocCount));
 }
 
 inline double CalcDeltaGradient(

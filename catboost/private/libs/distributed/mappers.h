@@ -2,6 +2,7 @@
 
 #include "data_types.h"
 
+#include <catboost/libs/helpers/vector_helpers.h>
 #include <catboost/private/libs/algo/tensor_search_helpers.h>
 
 #include <library/par/par.h>
@@ -12,17 +13,17 @@
 
 namespace NCatboostDistributed {
 
-    class TDatasetLoader: public NPar::TMapReduceCmd<TEnvelope<TDatasetLoaderParams>, TUnusedInitializedParam> {
+    class TDatasetLoader: public NPar::TMapReduceCmd<TDatasetLoaderParams, TUnusedInitializedParam> {
         OBJECT_NOCOPY_METHODS(TDatasetLoader);
         void DoMap(NPar::IUserContext* ctx, int hostId, TInput* params, TOutput* /*unused*/) const final;
     };
-    class TPlainFoldBuilder: public NPar::TMapReduceCmd<TEnvelope<TPlainFoldBuilderParams>, TUnusedInitializedParam> {
+    class TPlainFoldBuilder: public NPar::TMapReduceCmd<TPlainFoldBuilderParams, TUnusedInitializedParam> {
         OBJECT_NOCOPY_METHODS(TPlainFoldBuilder);
         void DoMap(NPar::IUserContext* ctx, int hostId, TInput* params, TOutput* /*unused*/) const final;
     };
     class TApproxReconstructor
         : public NPar::TMapReduceCmd<
-          TEnvelope<std::pair<TVector<TSplitTree>, TVector<TVector<TVector<double>>>>>,
+          std::pair<TVector<TVariant<TSplitTree, TNonSymmetricTreeStructure>>, TVector<TVector<TVector<double>>>>,
           TUnusedInitializedParam> {
 
         OBJECT_NOCOPY_METHODS(TApproxReconstructor);
@@ -40,9 +41,13 @@ namespace NCatboostDistributed {
         OBJECT_NOCOPY_METHODS(TBootstrapMaker);
         void DoMap(NPar::IUserContext* ctx, int hostId, TInput* /*unused*/, TOutput* /*unused*/) const final;
     };
+    class TDerivativesStDevFromZeroCalcer: public NPar::TMapReduceCmd<TUnusedInitializedParam, double> {
+        OBJECT_NOCOPY_METHODS(TDerivativesStDevFromZeroCalcer);
+        void DoMap(NPar::IUserContext* ctx, int hostId, TInput* /*unused*/, TOutput* /*unused*/) const final;
+    };
 
     // [cand][subcand]
-    class TScoreCalcer: public NPar::TMapReduceCmd<TEnvelope<TCandidateList>, TEnvelope<TStats5D>> {
+    class TScoreCalcer: public NPar::TMapReduceCmd<TCandidateList, TStats5D> {
         OBJECT_NOCOPY_METHODS(TScoreCalcer);
         void DoMap(
             NPar::IUserContext* ctx,
@@ -53,7 +58,7 @@ namespace NCatboostDistributed {
 
     // [cand][subcand]
     class TPairwiseScoreCalcer:
-        public NPar::TMapReduceCmd<TEnvelope<TCandidateList>, TEnvelope<TWorkerPairwiseStats>> {
+        public NPar::TMapReduceCmd<TCandidateList, TWorkerPairwiseStats> {
 
         OBJECT_NOCOPY_METHODS(TPairwiseScoreCalcer);
         void DoMap(
@@ -88,7 +93,7 @@ namespace NCatboostDistributed {
         OBJECT_NOCOPY_METHODS(TRemoteScoreCalcer);
         void DoMap(NPar::IUserContext* ctx, int hostId, TInput* bucketStats, TOutput* scores) const final;
     };
-    class TLeafIndexSetter: public NPar::TMapReduceCmd<TEnvelope<TSplit>, TUnusedInitializedParam> {
+    class TLeafIndexSetter: public NPar::TMapReduceCmd<TSplit, TUnusedInitializedParam> {
         OBJECT_NOCOPY_METHODS(TLeafIndexSetter);
         void DoMap(
             NPar::IUserContext* ctx,
@@ -96,7 +101,7 @@ namespace NCatboostDistributed {
             TInput* bestSplit,
             TOutput* /*unused*/) const final;
     };
-    class TEmptyLeafFinder: public NPar::TMapReduceCmd<TUnusedInitializedParam, TEnvelope<TIsLeafEmpty>> {
+    class TEmptyLeafFinder: public NPar::TMapReduceCmd<TUnusedInitializedParam, TIsLeafEmpty> {
         OBJECT_NOCOPY_METHODS(TEmptyLeafFinder);
         void DoMap(
             NPar::IUserContext* /*ctx*/,
@@ -105,12 +110,12 @@ namespace NCatboostDistributed {
             TOutput* isLeafEmpty) const final;
     };
     class TBucketSimpleUpdater:
-        public NPar::TMapReduceCmd<TUnusedInitializedParam, TEnvelope<std::pair<TSums, TArray2D<double>>>> {
+        public NPar::TMapReduceCmd<TUnusedInitializedParam, std::pair<TSums, TArray2D<double>>> {
 
         OBJECT_NOCOPY_METHODS(TBucketSimpleUpdater);
         void DoMap(NPar::IUserContext* /*ctx*/, int /*hostId*/, TInput* /*unused*/, TOutput* sums) const final;
     };
-    class TCalcApproxStarter: public NPar::TMapReduceCmd<TEnvelope<TSplitTree>, TUnusedInitializedParam> {
+    class TCalcApproxStarter: public NPar::TMapReduceCmd<TVariant<TSplitTree, TNonSymmetricTreeStructure>, TUnusedInitializedParam> {
         OBJECT_NOCOPY_METHODS(TCalcApproxStarter);
         void DoMap(NPar::IUserContext* ctx, int hostId, TInput* splitTree, TOutput* /*unused*/) const final;
     };
@@ -137,7 +142,7 @@ namespace NCatboostDistributed {
     class TBucketMultiUpdater:
         public NPar::TMapReduceCmd<
             TUnusedInitializedParam,
-            TEnvelope<std::pair<TMultiSums, TUnusedInitializedParam>>> {
+            std::pair<TMultiSums, TUnusedInitializedParam>> {
 
         OBJECT_NOCOPY_METHODS(TBucketMultiUpdater);
         void DoMap(NPar::IUserContext* /*ctx*/, int /*hostId*/, TInput* /*unused*/, TOutput* sums) const final;
@@ -153,6 +158,22 @@ namespace NCatboostDistributed {
     class TLeafWeightsGetter: public NPar::TMapReduceCmd<TUnusedInitializedParam, TVector<double>> {
         OBJECT_NOCOPY_METHODS(TLeafWeightsGetter);
         void DoMap(NPar::IUserContext* ctx, int hostId, TInput* /*unused*/, TOutput* leafWeights) const final;
+        void DoReduce(TVector<TOutput>* leafWeightsFromWorkers, TOutput* totalLeafWeights) const final;
+    };
+    class TQuantileExactApproxStarter: public NPar::TMapReduceCmd<TUnusedInitializedParam, TVector<TVector<TMinMax<double>>>> {
+        OBJECT_NOCOPY_METHODS(TQuantileExactApproxStarter);
+        void DoMap(NPar::IUserContext* ctx, int hostId, TInput* leafCount, TOutput* minMaxDiffs) const final;
+        void DoReduce(TVector<TOutput>* minMaxDiffsFromWorkers, TOutput* reducedMinMaxDiffs) const final;
+    };
+    class TQuantileArraySplitter: public NPar::TMapReduceCmd<TVector<TVector<double>>, TVector<TVector<double>>> {
+        OBJECT_NOCOPY_METHODS(TQuantileArraySplitter);
+        void DoMap(NPar::IUserContext* ctx, int hostId, TInput* pivots, TOutput* leftSumWeights) const final;
+        void DoReduce(TVector<TOutput>* leftRightWeightsFromWorkers, TOutput* totalLeftSumWeights) const final;
+    };
+    class TQuantileEqualWeightsCalcer: public NPar::TMapReduceCmd<TVector<TVector<double>>, TVector<TVector<double>>> {
+        OBJECT_NOCOPY_METHODS(TQuantileEqualWeightsCalcer);
+        void DoMap(NPar::IUserContext* ctx, int hostId, TInput* pivots, TOutput* equalSumWeights) const final;
+        void DoReduce(TVector<TOutput>* equalSumWeightsFromWorkers, TOutput* totalEqualSumWeights) const final;
     };
 
 } // NCatboostDistributed

@@ -71,7 +71,7 @@ public:
     /// любые типы кодирования, выбирается gzip. В противном случае
     /// из списка типов кодирования выбирается лучший из поддерживаемых сервером.
     TString BestCompressionScheme() const;
-    TString BestCompressionScheme(const char** codings, size_t len) const;
+    TString BestCompressionScheme(TArrayRef<const TStringBuf> codings) const;
 
     /// Если заголовки содержат Content-Length, возвращает true и
     /// записывает значение из заголовка в value
@@ -110,7 +110,7 @@ public:
 
     /// Устанавливает режим, при котором сервер выдает ответ в упакованном виде.
     void EnableCompression(bool enable);
-    void EnableCompression(const char** schemas, size_t count);
+    void EnableCompression(TArrayRef<const TStringBuf> schemas);
 
     /// Устанавливает режим, при котором соединение с сервером не завершается
     /// после окончания транзакции.
@@ -119,6 +119,10 @@ public:
     /// Устанавливает режим, при котором тело HTTP-запроса/ответа преобразуется в соответствии
     /// с заголовками Content-Encoding и Transfer-Encoding (включен по умолчанию)
     void EnableBodyEncoding(bool enable);
+
+    /// Устанавливает режим, при котором тело HTTP-ответа сжимается кодеком
+    /// указанным в Content-Encoding (включен по умолчанию)
+    void EnableCompressionHeader(bool enable);
 
     /// Проверяет, производится ли выдача ответов в упакованном виде.
     bool IsCompressionEnabled() const noexcept;
@@ -129,6 +133,10 @@ public:
     /// Проверяет, преобразуется ли тело HTTP-запроса/ответа в соответствии
     /// с заголовками Content-Encoding и Transfer-Encoding
     bool IsBodyEncodingEnabled() const noexcept;
+
+    /// Проверяет, сжимается ли тело HTTP-ответа кодеком
+    /// указанным в Content-Encoding
+    bool IsCompressionHeaderEnabled() const noexcept;
 
     /*
      * is this connection can be really keep-alive
@@ -165,6 +173,6 @@ unsigned ParseHttpRetCode(const TStringBuf& ret);
 /// Отправляет HTTP-серверу запрос с минимумом необходимых заголовков.
 void SendMinimalHttpRequest(TSocket& s, const TStringBuf& host, const TStringBuf& request, const TStringBuf& agent = "YandexSomething/1.0", const TStringBuf& from = "webadmin@yandex.ru");
 
-TArrayRef<const char*> SupportedCodings();
+TArrayRef<const TStringBuf> SupportedCodings();
 
 /// @}

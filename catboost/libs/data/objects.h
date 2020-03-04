@@ -44,13 +44,6 @@ class IOutputStream;
 
 namespace NCB {
 
-    // if objectsGrouping is defined - check that groupIds correspond to it
-    void CheckGroupIds(
-        ui32 objectCount,
-        TMaybeData<TConstArrayRef<TGroupId>> groupIds,
-        TMaybe<TObjectsGroupingPtr> objectsGrouping = Nothing()
-    );
-
     /* if groupIds is empty return trivial grouping
      *  checks that groupIds are consecutive
      */
@@ -148,16 +141,30 @@ namespace NCB {
          */
         virtual bool HasSparseData() const = 0;
 
-        virtual TIntrusivePtr<TObjectsDataProvider> GetSubset(
+        virtual TIntrusivePtr<TObjectsDataProvider> GetSubsetImpl(
             const TObjectsGroupingSubset& objectsGroupingSubset,
+            TMaybe<TConstArrayRef<ui32>> ignoredFeatures,
             ui64 cpuRamLimit,
             NPar::TLocalExecutor* localExecutor
         ) const = 0;
 
-        virtual TIntrusivePtr<TObjectsDataProvider> GetFeaturesSubset(
+        TIntrusivePtr<TObjectsDataProvider> GetSubset(
+            const TObjectsGroupingSubset& objectsGroupingSubset,
+            ui64 cpuRamLimit,
+            NPar::TLocalExecutor* localExecutor
+        ) const {
+            return GetSubsetImpl(
+                objectsGroupingSubset,
+                /*ignoredFeatures*/ Nothing(),
+                cpuRamLimit,
+                localExecutor
+            );
+        }
+
+        TIntrusivePtr<TObjectsDataProvider> GetFeaturesSubset(
             const TVector<ui32>& ignoredFeatures,
             NPar::TLocalExecutor* localExecutor
-        ) const = 0;
+        ) const;
 
         // The following Get* functions are common for all implementations, so they're in this base class
 
@@ -279,8 +286,9 @@ namespace NCB {
             return TObjectsDataProvider::EqualTo(rhs, ignoreSparsity) && (Data == rhsRawObjectsData->Data);
         }
 
-        TObjectsDataProviderPtr GetSubset(
+        TObjectsDataProviderPtr GetSubsetImpl(
             const TObjectsGroupingSubset& objectsGroupingSubset,
+            TMaybe<TConstArrayRef<ui32>> ignoredFeatures,
             ui64 cpuRamLimit,
             NPar::TLocalExecutor* localExecutor
         ) const override;
@@ -288,20 +296,6 @@ namespace NCB {
         bool HasDenseData() const override;
         bool HasSparseData() const override;
 
-        TObjectsDataProviderPtr GetFeaturesSubset(
-            const TVector<ui32>& ignoredFeatures,
-            NPar::TLocalExecutor* localExecutor
-        ) const override;
-
-        // needed for effective application of models
-        // TODO(akhropov): make effective sparse features support
-        TIntrusiveConstPtr<TRawObjectsDataProvider> GetWithPermutedConsecutiveArrayFeaturesData(
-            ui64 cpuRamLimit,
-            NPar::TLocalExecutor* localExecutor,
-
-            // if result is already in the same order as this return Nothing()
-            TMaybe<TVector<ui32>>* srcArrayPermutation
-        ) const;
 
         // needed for low-level optimizations in CPU applying code
         const TFeaturesArraySubsetIndexing& GetFeaturesArraySubsetIndexing() const {
@@ -418,25 +412,15 @@ namespace NCB {
                 (Data == rhsQuantizedObjectsData->Data);
         }
 
-        TObjectsDataProviderPtr GetSubset(
+        TObjectsDataProviderPtr GetSubsetImpl(
             const TObjectsGroupingSubset& objectsGroupingSubset,
+            TMaybe<TConstArrayRef<ui32>> ignoredFeatures,
             ui64 cpuRamLimit,
             NPar::TLocalExecutor* localExecutor
         ) const override;
 
         bool HasDenseData() const override;
         bool HasSparseData() const override;
-
-        TObjectsDataProviderPtr GetFeaturesSubset(
-            const TVector<ui32>& ignoredFeatures,
-            NPar::TLocalExecutor* localExecutor
-        ) const override;
-
-        TIntrusiveConstPtr<TQuantizedObjectsDataProvider> GetWithPermutedConsecutiveArrayFeaturesData(
-            ui64 cpuRamLimit,
-            NPar::TLocalExecutor* localExecutor,
-            TMaybe<TVector<ui32>>* srcArrayPermutation
-        ) const;
 
         /* can return nullptr if this feature is unavailable
          * (ignored or this data provider contains only subset of features)
@@ -472,8 +456,6 @@ namespace NCB {
         void SaveDataNonSharedPart(IBinSaver* binSaver) const {
             Data.SaveNonSharedPart(*GetFeaturesLayout(), binSaver);
         }
-
-        bool HasAggregatedFeaturesData() const;
 
     protected:
         TQuantizedObjectsData Data;
@@ -638,17 +620,12 @@ namespace NCB {
             TQuantizedObjectsDataProvider&& arg
         );
 
-        TObjectsDataProviderPtr GetSubset(
+        TObjectsDataProviderPtr GetSubsetImpl(
             const TObjectsGroupingSubset& objectsGroupingSubset,
+            TMaybe<TConstArrayRef<ui32>> ignoredFeatures,
             ui64 cpuRamLimit,
             NPar::TLocalExecutor* localExecutor
         ) const override;
-
-        NCB::TObjectsDataProviderPtr GetFeaturesSubset(
-            const TVector<ui32>& ignoredFeatures,
-            NPar::TLocalExecutor* localExecutor
-        ) const override;
-
 
         /* needed for effective calculation with Permutation blocks on CPU
          * sparse data is unaffected
@@ -748,6 +725,36 @@ namespace NCB {
         template <EFeatureType FeatureType>
         bool IsFeatureInExclusiveBundle(TFeatureIdx<FeatureType> featureIdx) const {
             return GetFeatureToExclusiveBundleIndex(featureIdx).Defined();
+        }
+
+        size_t GetFeaturesGroupsSize() const {
+            return FeaturesGroupsData.MetaData.size();
+        }
+
+        TConstArrayRef<TFeaturesGroup> GetFeaturesGroupsMetaData() const {
+            return FeaturesGroupsData.MetaData;
+        }
+
+        const TFeaturesGroup& GetFeaturesGroupMetaData(ui32 groupIdx) const {
+            return FeaturesGroupsData.MetaData[groupIdx];
+        }
+
+        const TFeaturesGroupHolder& GetFeaturesGroup(ui32 groupIdx) const {
+            return *FeaturesGroupsData.SrcData[groupIdx];
+        }
+
+        TMaybe<TFeaturesGroupIndex> GetFloatFeatureToFeaturesGroupIndex(TFloatFeatureIdx floatFeatureIdx) const {
+            return GetFeatureToFeaturesGroupIndex(floatFeatureIdx);
+        }
+
+        TMaybe<TFeaturesGroupIndex> GetCatFeatureToFeaturesGroupIndex(TCatFeatureIdx catFeatureIdx) const {
+            return GetFeatureToFeaturesGroupIndex(catFeatureIdx);
+        }
+
+        template <EFeatureType FeatureType>
+        TMaybe<TFeaturesGroupIndex> GetFeatureToFeaturesGroupIndex(TFeatureIdx<FeatureType> featureIdx) const {
+            const ui32 flatFeatureIdx = GetFeaturesLayout()->GetExternalFeatureIdx(*featureIdx, FeatureType);
+            return FeaturesGroupsData.FlatFeatureIndexToGroupPart[flatFeatureIdx];
         }
 
         /* binary packs and bundles in *this are compatible with rhs

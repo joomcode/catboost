@@ -19,6 +19,7 @@
 #include <util/generic/algorithm.h>
 #include <util/generic/array_ref.h>
 #include <util/generic/array_size.h>
+#include <util/generic/cast.h>
 #include <util/generic/deque.h>
 #include <util/generic/strbuf.h>
 #include <util/generic/string.h>
@@ -472,6 +473,7 @@ namespace {
             : PathWithScheme(pathWithScheme)
         {}
         NCB::TQuantizedPool LoadQuantizedPool(NCB::TLoadQuantizedPoolParameters params) override;
+        TVector<ui8> LoadQuantizedColumn(ui32 columnIdx) override;
     private:
         NCB::TPathWithScheme PathWithScheme;
     };
@@ -615,6 +617,11 @@ NCB::TQuantizedPool TFileQuantizedPoolLoader::LoadQuantizedPool(NCB::TLoadQuanti
     return pool;
 }
 
+TVector<ui8> TFileQuantizedPoolLoader::LoadQuantizedColumn(ui32 /*columnIdx*/) {
+    CB_ENSURE_INTERNAL(false, "Schema quantized does not support columnwise loading");
+}
+
+
 NCB::TQuantizedPoolLoaderFactory::TRegistrator<TFileQuantizedPoolLoader> FileQuantizedPoolLoaderReg("quantized");
 
 NCB::TQuantizedPool NCB::LoadQuantizedPool(
@@ -625,9 +632,9 @@ NCB::TQuantizedPool NCB::LoadQuantizedPool(
     return poolLoader->LoadQuantizedPool(params);
 }
 
-static NCB::TQuantizedPoolDigest GetQuantizedPoolDigest(
-    const TPoolMetainfo& poolMetainfo,
-    const TPoolQuantizationSchema& quantizationSchema) {
+NCB::TQuantizedPoolDigest NCB::GetQuantizedPoolDigest(
+    const NCB::NIdl::TPoolMetainfo& poolMetainfo,
+    const NCB::NIdl::TPoolQuantizationSchema& quantizationSchema) {
 
     NCB::TQuantizedPoolDigest digest;
     const auto columnIndices = CollectAndSortKeys(poolMetainfo.GetColumnIndexToType());
@@ -732,7 +739,7 @@ NCB::TQuantizedPoolDigest NCB::CalculateQuantizedPoolDigest(const TStringBuf pat
         blob.data() + epilogOffsets.QuantizationSchemaSizeOffset + sizeof(ui32),
         quantizationSchemaSize);
 
-    return ::GetQuantizedPoolDigest(poolMetainfo, quantizationSchema);
+    return GetQuantizedPoolDigest(poolMetainfo, quantizationSchema);
 }
 
 NCB::NIdl::TPoolQuantizationSchema NCB::LoadQuantizationSchemaFromPool(const TStringBuf path) {
@@ -961,20 +968,70 @@ namespace NCB {
             }
         }
         //target
-        const auto& label = dataProvider->RawTargetData.GetTarget();
-        if (label) {
-            const auto& targetString = label.GetRef();
-            TVector<float> targetFloat(targetString.size());
+        const ERawTargetType rawTargetType = dataProvider->RawTargetData.GetTargetType();
+        switch (rawTargetType) {
+            case ERawTargetType::Integer:
+            case ERawTargetType::Float:
+                {
+                    CB_ENSURE(
+                        dataProvider->RawTargetData.GetTargetDimension() == 1,
+                        "Multidimensional targets are not currently supported"
+                    );
+                    TVector<float> targetNumeric;
+                    targetNumeric.yresize(dataProvider->GetObjectCount());
+                    TArrayRef<float> targetNumericRef = targetNumeric;
+                    dataProvider->RawTargetData.GetNumericTarget(
+                        TArrayRef<TArrayRef<float>>(&targetNumericRef, 1)
+                    );
 
-            for (auto targetIdx : xrange(targetString.size())) {
-                CB_ENSURE(TryFromString<float>(targetString[targetIdx], targetFloat[targetIdx]),
-                    "Cannot parse label element at index " << targetIdx << " as float: " << targetString[targetIdx]);
-            }
+                    srcData->Target = GenerateSrcColumn<float>(
+                        TConstArrayRef<float>(targetNumeric),
+                        EColumn::Label
+                    );
+                    columnNames.push_back("Target");
+                }
+                break;
+            case ERawTargetType::String:
+                /* TODO(akhropov): Properly support string targets: MLTOOLS-2393.
+                 * This is temporary solution for compatibility for saving pools loaded from files.
+                 */
+                {
+                    CB_ENSURE(
+                        dataProvider->RawTargetData.GetTargetDimension() == 1,
+                        "Multidimensional targets are not currently supported"
+                    );
 
-            srcData->Target = GenerateSrcColumn<float>(TConstArrayRef<float>(targetFloat), EColumn::Label);
-            columnNames.push_back("Target");
+                    TVector<TConstArrayRef<TString>> targetAsStrings;
+                    dataProvider->RawTargetData.GetStringTargetRef(&targetAsStrings);
+
+                    TVector<float> targetFloat;
+                    targetFloat.yresize(dataProvider->GetObjectCount());
+                    TArrayRef<float> targetFloatRef = targetFloat;
+                    TConstArrayRef<TString> targetAsStringsRef = targetAsStrings[0];
+
+                    localExecutor->ExecRangeBlockedWithThrow(
+                        [targetFloatRef, targetAsStringsRef] (int i) {
+                            CB_ENSURE(
+                                TryFromString(targetAsStringsRef[i], targetFloatRef[i]),
+                                "String target type is not currently supported"
+                            );
+                        },
+                        0,
+                        SafeIntegerCast<int>(dataProvider->GetObjectCount()),
+                        /*batchSizeOrZeroForAutoBatchSize*/ 0,
+                        NPar::TLocalExecutor::WAIT_COMPLETE
+                    );
+
+                    srcData->Target = GenerateSrcColumn<float>(
+                        TConstArrayRef<float>(targetFloat),
+                        EColumn::Label
+                    );
+                    columnNames.push_back("Target");
+                }
+                break;
+            case ERawTargetType::None:
+                break;
         }
-
         //baseline
         const auto& baseline = dataProvider->RawTargetData.GetBaseline();
         if (baseline) {
@@ -1004,7 +1061,7 @@ namespace NCB {
             std::move(featureIndices),
             std::move(borders),
             std::move(nanModes),
-            dataProvider->MetaInfo.ClassNames,
+            dataProvider->MetaInfo.ClassLabels,
             TVector<size_t>(),//TODO
             TVector<TMap<ui32, TValueWithCount>>()//TODO
         };

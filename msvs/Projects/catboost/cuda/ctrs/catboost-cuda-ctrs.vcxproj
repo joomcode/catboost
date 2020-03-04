@@ -63,12 +63,12 @@
       <RemoveUnreferencedCodeData Condition="'$(Configuration)|$(Platform)'=='Debug|x64'"/>
       <WarningLevel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Level4</WarningLevel>
       <RemoveUnreferencedCodeData Condition="'$(Configuration)|$(Platform)'=='Release|x64'"/>
-      <AdditionalIncludeDirectories>;$(SolutionDir)$(Configuration);$(SolutionDir)..;$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include;$(SolutionDir)../contrib/libs/double-conversion/include;$(SolutionDir)../contrib/libs/brotli/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>;$(SolutionDir)$(Configuration);$(SolutionDir)..;$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include;$(SolutionDir)../contrib/libs/zlib/include;$(SolutionDir)../contrib/libs/double-conversion/include;$(SolutionDir)../contrib/libs/brotli/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">/NOLOGO /ERRORREPORT:PROMPT /SUBSYSTEM:CONSOLE /TLBID:1 /NXCOMPAT /IGNORE:4221 /MACHINE:X64 /INCREMENTAL  "/LIBPATH:$(CUDA_PATH)/lib/x64" cublas.lib curand.lib cudart_static.lib cusparse.lib</AdditionalOptions>
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">/NOLOGO /ERRORREPORT:PROMPT /SUBSYSTEM:CONSOLE /TLBID:1 /NXCOMPAT /IGNORE:4221 /MACHINE:X64 /INCREMENTAL  "/LIBPATH:$(CUDA_PATH)/lib/x64" cublas.lib curand.lib cudart_static.lib cusparse.lib</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">/NOLOGO /ERRORREPORT:PROMPT /SUBSYSTEM:CONSOLE /TLBID:1 /NXCOMPAT /IGNORE:4221 /MACHINE:X64 /INCREMENTAL  "/LIBPATH:$(CUDA_PATH)/lib/x64" cudart_static.lib</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">/NOLOGO /ERRORREPORT:PROMPT /SUBSYSTEM:CONSOLE /TLBID:1 /NXCOMPAT /IGNORE:4221 /MACHINE:X64 /INCREMENTAL  "/LIBPATH:$(CUDA_PATH)/lib/x64" cudart_static.lib</AdditionalOptions>
       <SubSystem Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Console</SubSystem>
       <GenerateDebugInformation Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DebugFastLink</GenerateDebugInformation>
       <RandomizedBaseAddress Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</RandomizedBaseAddress>
@@ -88,7 +88,7 @@
       <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
 cd /d $(SolutionDir)$(Configuration)\catboost\cuda\ctrs
 if %errorlevel% neq 0 goto :cmEnd
-"python" "$(SolutionDir)../build/scripts/compile_cuda.py" "$(SolutionDir)$(Configuration)/tools/mtime0/mtime0.dll" "$(CUDA_PATH)\bin\nvcc.exe" "-std=c++14" "--expt-relaxed-constexpr" "-gencode" "arch=compute_30,code=compute_30" "-gencode" "arch=compute_35,code=sm_35" "-gencode" "arch=compute_50,code=compute_50" "-gencode" "arch=compute_52,code=sm_52" "-gencode" "arch=compute_60,code=compute_60" "-gencode" "arch=compute_61,code=compute_61" "-gencode" "arch=compute_61,code=sm_61" "-gencode" "arch=compute_70,code=sm_70" "-gencode" "arch=compute_70,code=compute_70" "--ptxas-options=-v" "-c" "$(SolutionDir)../catboost/cuda/ctrs/kernel/ctr_calcers.cu" "-o" "$(SolutionDir)$(Configuration)/catboost/cuda/ctrs/kernel/ctr_calcers.cu.obj" "-I$(SolutionDir)$(Configuration)" "-I$(SolutionDir).." "-I$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include" "-I$(SolutionDir)../contrib/libs/double-conversion/include" "-I$(SolutionDir)../contrib/libs/brotli/include" "--cflags" "/nologo" "/Zm500" "/GR" "/bigobj" "/FC" "/EHs" "/errorReport:prompt" "/Zc:inline" "/utf-8" "/FD" "/MP" "/Ob0" "/Od" /D_DEBUG "/MTd" "/Zi" "/FS" "/we4013" "/w14018" "/w14265" "/w14296" "/w14431" "/wd4127" "/wd4200" "/wd4201" "/wd4351" "/wd4355" "/wd4503" "/wd4510" "/wd4511" "/wd4512" "/wd4554" "/wd4610" "/wd4706" "/wd4800" "/wd4996" "/wd4714" "/wd4197" "/wd4245" "/wd4324" "/wd5033" /DFAKEID=5020880 /DWIN32 /D_WIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /D_USE_MATH_DEFINES /D__STDC_CONSTANT_MACROS /D__STDC_FORMAT_MACROS /D_USING_V110_SDK71_ /D_LIBCPP_ENABLE_CXX17_REMOVED_FEATURES /D_WIN64 /DWIN64 /D_WIN32_WINNT=0x0601 /D_MBCS /DSSE_ENABLED=1 /DSSE3_ENABLED=1 /DSSSE3_ENABLED=1 /DSSE41_ENABLED=1 /DSSE42_ENABLED=1 /DPOPCNT_ENABLED=1 /DCX16_ENABLED=1 -DCATBOOST_OPENSOURCE=yes -D_LIBCPP_VASPRINTF_DEFINED -D_WCHAR_H_CPLUSPLUS_98_CONFORMANCE_ "-I$(CUDA_PATH)/include" /DY_UCRT_INCLUDE="$(UniversalCRT_IncludePath.Split(';')[0].Replace('\','/'))" /DY_MSVC_INCLUDE="$(VC_VC_IncludePath.Split(';')[0].Replace('\','/'))" /DSTRICT /DNOGDI /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D__SSE2__=1 /D__SSE3__=1 /D__SSSE3__=1 /D__SSE4_1__=1 /D__SSE4_2__=1 /D__POPCNT__=1
+"python" "$(SolutionDir)../build/scripts/compile_cuda.py" "$(SolutionDir)$(Configuration)/tools/mtime0/mtime0.dll" "$(CUDA_PATH)\bin\nvcc.exe" "-std=c++14" "--expt-relaxed-constexpr" "-gencode" "arch=compute_30,code=compute_30" "-gencode" "arch=compute_35,code=sm_35" "-gencode" "arch=compute_50,code=compute_50" "-gencode" "arch=compute_52,code=sm_52" "-gencode" "arch=compute_60,code=compute_60" "-gencode" "arch=compute_61,code=compute_61" "-gencode" "arch=compute_61,code=sm_61" "-gencode" "arch=compute_70,code=sm_70" "-gencode" "arch=compute_70,code=compute_70" "--ptxas-options=-v" "-c" "$(SolutionDir)../catboost/cuda/ctrs/kernel/ctr_calcers.cu" "-o" "$(SolutionDir)$(Configuration)/catboost/cuda/ctrs/kernel/ctr_calcers.cu.obj" "-I$(SolutionDir)$(Configuration)" "-I$(SolutionDir).." "-I$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include" "-I$(SolutionDir)../contrib/libs/zlib/include" "-I$(SolutionDir)../contrib/libs/double-conversion/include" "-I$(SolutionDir)../contrib/libs/brotli/include" "--cflags" "/nologo" "/Zm500" "/GR" "/bigobj" "/FC" "/EHs" "/errorReport:prompt" "/Zc:inline" "/utf-8" "/FD" "/MP" "/Ob0" "/Od" /D_DEBUG "/MTd" "/Zi" "/FS" "/we4013" "/w14018" "/w14265" "/w14296" "/w14431" "/wd4127" "/wd4200" "/wd4201" "/wd4351" "/wd4355" "/wd4503" "/wd4510" "/wd4511" "/wd4512" "/wd4554" "/wd4610" "/wd4706" "/wd4800" "/wd4996" "/wd4714" "/wd4197" "/wd4245" "/wd4324" "/wd5033" /DFAKEID=5020880 /DWIN32 /D_WIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /D_USE_MATH_DEFINES /D__STDC_CONSTANT_MACROS /D__STDC_FORMAT_MACROS /D_USING_V110_SDK71_ /D_LIBCPP_ENABLE_CXX17_REMOVED_FEATURES /D_WIN64 /DWIN64 /D_WIN32_WINNT=0x0601 /D_MBCS /DSSE_ENABLED=1 /DSSE3_ENABLED=1 /DSSSE3_ENABLED=1 /DSSE41_ENABLED=1 /DSSE42_ENABLED=1 /DPOPCNT_ENABLED=1 /DCX16_ENABLED=1 -DCATBOOST_OPENSOURCE=yes -D_LIBCPP_VASPRINTF_DEFINED -D_WCHAR_H_CPLUSPLUS_98_CONFORMANCE_ "-I$(CUDA_PATH)/include" /DY_UCRT_INCLUDE="$(UniversalCRT_IncludePath.Split(';')[0].Replace('\','/'))" /DY_MSVC_INCLUDE="$(VC_VC_IncludePath.Split(';')[0].Replace('\','/'))" /DSTRICT /DNOGDI /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D__SSE2__=1 /D__SSE3__=1 /D__SSSE3__=1 /D__SSE4_1__=1 /D__SSE4_2__=1 /D__POPCNT__=1
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -99,7 +99,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
 cd /d $(SolutionDir)$(Configuration)\catboost\cuda\ctrs
 if %errorlevel% neq 0 goto :cmEnd
-"python" "$(SolutionDir)../build/scripts/compile_cuda.py" "$(SolutionDir)$(Configuration)/tools/mtime0/mtime0.dll" "$(CUDA_PATH)\bin\nvcc.exe" "-std=c++14" "--expt-relaxed-constexpr" "-gencode" "arch=compute_30,code=compute_30" "-gencode" "arch=compute_35,code=sm_35" "-gencode" "arch=compute_50,code=compute_50" "-gencode" "arch=compute_52,code=sm_52" "-gencode" "arch=compute_60,code=compute_60" "-gencode" "arch=compute_61,code=compute_61" "-gencode" "arch=compute_61,code=sm_61" "-gencode" "arch=compute_70,code=sm_70" "-gencode" "arch=compute_70,code=compute_70" "--ptxas-options=-v" "-c" "$(SolutionDir)../catboost/cuda/ctrs/kernel/ctr_calcers.cu" "-o" "$(SolutionDir)$(Configuration)/catboost/cuda/ctrs/kernel/ctr_calcers.cu.obj" "-I$(SolutionDir)$(Configuration)" "-I$(SolutionDir).." "-I$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include" "-I$(SolutionDir)../contrib/libs/double-conversion/include" "-I$(SolutionDir)../contrib/libs/brotli/include" "--cflags" "/nologo" "/Zm500" "/GR" "/bigobj" "/FC" "/EHs" "/errorReport:prompt" "/Zc:inline" "/utf-8" "/FD" "/MP" "/Ox" "/Ob2" "/Oi" /DNDEBUG "/MT" "/Zi" "/FS" "/we4013" "/w14018" "/w14265" "/w14296" "/w14431" "/wd4127" "/wd4200" "/wd4201" "/wd4351" "/wd4355" "/wd4503" "/wd4510" "/wd4511" "/wd4512" "/wd4554" "/wd4610" "/wd4706" "/wd4800" "/wd4996" "/wd4714" "/wd4197" "/wd4245" "/wd4324" "/wd5033" /DFAKEID=5020880 /DWIN32 /D_WIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /D_USE_MATH_DEFINES /D__STDC_CONSTANT_MACROS /D__STDC_FORMAT_MACROS /D_USING_V110_SDK71_ /D_LIBCPP_ENABLE_CXX17_REMOVED_FEATURES /D_WIN64 /DWIN64 /D_WIN32_WINNT=0x0601 /D_MBCS /DSSE_ENABLED=1 /DSSE3_ENABLED=1 /DSSSE3_ENABLED=1 /DSSE41_ENABLED=1 /DSSE42_ENABLED=1 /DPOPCNT_ENABLED=1 /DCX16_ENABLED=1 -DCATBOOST_OPENSOURCE=yes -D_LIBCPP_VASPRINTF_DEFINED -D_WCHAR_H_CPLUSPLUS_98_CONFORMANCE_ "-I$(CUDA_PATH)/include" /DY_UCRT_INCLUDE="$(UniversalCRT_IncludePath.Split(';')[0].Replace('\','/'))" /DY_MSVC_INCLUDE="$(VC_VC_IncludePath.Split(';')[0].Replace('\','/'))" /DSTRICT /DNOGDI /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D__SSE2__=1 /D__SSE3__=1 /D__SSSE3__=1 /D__SSE4_1__=1 /D__SSE4_2__=1 /D__POPCNT__=1
+"python" "$(SolutionDir)../build/scripts/compile_cuda.py" "$(SolutionDir)$(Configuration)/tools/mtime0/mtime0.dll" "$(CUDA_PATH)\bin\nvcc.exe" "-std=c++14" "--expt-relaxed-constexpr" "-gencode" "arch=compute_30,code=compute_30" "-gencode" "arch=compute_35,code=sm_35" "-gencode" "arch=compute_50,code=compute_50" "-gencode" "arch=compute_52,code=sm_52" "-gencode" "arch=compute_60,code=compute_60" "-gencode" "arch=compute_61,code=compute_61" "-gencode" "arch=compute_61,code=sm_61" "-gencode" "arch=compute_70,code=sm_70" "-gencode" "arch=compute_70,code=compute_70" "--ptxas-options=-v" "-c" "$(SolutionDir)../catboost/cuda/ctrs/kernel/ctr_calcers.cu" "-o" "$(SolutionDir)$(Configuration)/catboost/cuda/ctrs/kernel/ctr_calcers.cu.obj" "-I$(SolutionDir)$(Configuration)" "-I$(SolutionDir).." "-I$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include" "-I$(SolutionDir)../contrib/libs/zlib/include" "-I$(SolutionDir)../contrib/libs/double-conversion/include" "-I$(SolutionDir)../contrib/libs/brotli/include" "--cflags" "/nologo" "/Zm500" "/GR" "/bigobj" "/FC" "/EHs" "/errorReport:prompt" "/Zc:inline" "/utf-8" "/FD" "/MP" "/Ox" "/Ob2" "/Oi" /DNDEBUG "/MT" "/Zi" "/FS" "/we4013" "/w14018" "/w14265" "/w14296" "/w14431" "/wd4127" "/wd4200" "/wd4201" "/wd4351" "/wd4355" "/wd4503" "/wd4510" "/wd4511" "/wd4512" "/wd4554" "/wd4610" "/wd4706" "/wd4800" "/wd4996" "/wd4714" "/wd4197" "/wd4245" "/wd4324" "/wd5033" /DFAKEID=5020880 /DWIN32 /D_WIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /D_USE_MATH_DEFINES /D__STDC_CONSTANT_MACROS /D__STDC_FORMAT_MACROS /D_USING_V110_SDK71_ /D_LIBCPP_ENABLE_CXX17_REMOVED_FEATURES /D_WIN64 /DWIN64 /D_WIN32_WINNT=0x0601 /D_MBCS /DSSE_ENABLED=1 /DSSE3_ENABLED=1 /DSSSE3_ENABLED=1 /DSSE41_ENABLED=1 /DSSE42_ENABLED=1 /DPOPCNT_ENABLED=1 /DCX16_ENABLED=1 -DCATBOOST_OPENSOURCE=yes -D_LIBCPP_VASPRINTF_DEFINED -D_WCHAR_H_CPLUSPLUS_98_CONFORMANCE_ "-I$(CUDA_PATH)/include" /DY_UCRT_INCLUDE="$(UniversalCRT_IncludePath.Split(';')[0].Replace('\','/'))" /DY_MSVC_INCLUDE="$(VC_VC_IncludePath.Split(';')[0].Replace('\','/'))" /DSTRICT /DNOGDI /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D__SSE2__=1 /D__SSE3__=1 /D__SSSE3__=1 /D__SSE4_1__=1 /D__SSE4_2__=1 /D__POPCNT__=1
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -108,7 +108,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
       <Message>$B/catboost/cuda/ctrs/kernel/ctr_calcers.cu.obj	</Message>
-      <AdditionalInputs>$(SolutionDir)..\build\scripts\compile_cuda.py;$(SolutionDir)..\catboost\cuda\ctrs\kernel\ctr_calcers.cu;$(SolutionDir)$(Configuration)\tools\mtime0\mtime0.dll;</AdditionalInputs>
+      <AdditionalInputs>$(SolutionDir)..\build\scripts\compile_cuda.py;$(SolutionDir)..\catboost\cuda\ctrs\kernel\ctr_calcers.cu;$(SolutionDir)..\build\platform\cuda\cuda_runtime_include.h;$(SolutionDir)$(Configuration)\tools\mtime0\mtime0.dll;</AdditionalInputs>
       <Outputs>$(SolutionDir)$(Configuration)\catboost\cuda\ctrs\kernel\ctr_calcers.cu.obj;</Outputs>
     </CustomBuild>
     <CustomBuild Include="$(SolutionDir)..\catboost\cuda\ctrs\ctr.h">
@@ -138,6 +138,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalInputs>$(SolutionDir)..\catboost\cuda\ctrs\ctr.h;$(SolutionDir)$(Configuration)\tools\enum_parser\enum_parser\enum_parser.exe;</AdditionalInputs>
       <Outputs>$(SolutionDir)$(Configuration)\catboost\cuda\ctrs\ctr.h_serialized.cpp;</Outputs>
     </CustomBuild>
+    <ClInclude Include="$(SolutionDir)..\build\platform\cuda\cuda_runtime_include.h"/>
     <ClInclude Include="$(SolutionDir)..\catboost\cuda\ctrs\ctr_bins_builder.h"/>
     <ClInclude Include="$(SolutionDir)..\catboost\cuda\ctrs\ctr_calcers.h"/>
     <ClInclude Include="$(SolutionDir)..\catboost\cuda\ctrs\ctr_kernels.h"/>
@@ -154,9 +155,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\catboost\cuda\cuda_util\catboost-cuda-cuda_util.vcxproj">
       <Project>{46C6451F-4D82-1C63-28D4-7F5FD766784A}</Project>
-    </ProjectReference>
-    <ProjectReference Include="$(SolutionDir)Projects\catboost\libs\cuda_wrappers\catboost-libs-cuda_wrappers.vcxproj">
-      <Project>{1913A6ED-B427-7353-0A27-3C443B10E85E}</Project>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\catboost\libs\helpers\catboost-libs-helpers.vcxproj">
       <Project>{1ED2E5C8-4D20-BC86-8EEB-C69117E1D3FA}</Project>
@@ -242,6 +240,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\nayuki_md5\contrib-libs-nayuki_md5.vcxproj">
       <Project>{C0251DC8-E401-B1AF-785F-72D686693CB9}</Project>
     </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\rapidjson\contrib-libs-rapidjson.vcxproj">
+      <Project>{9CDB08FB-219D-3356-E006-1AC8AECC636E}</Project>
+    </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\snappy\contrib-libs-snappy.vcxproj">
       <Project>{31072066-3C10-BD50-C299-F4AF4767798E}</Project>
     </ProjectReference>
@@ -302,6 +303,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ProjectReference Include="$(SolutionDir)Projects\library\containers\dense_hash\library-containers-dense_hash.vcxproj">
       <Project>{45F2062A-3F31-B7B8-9501-F0C86DB74515}</Project>
     </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\cuda\wrappers\library-cuda-wrappers.vcxproj">
+      <Project>{B83E09E6-36E4-BF0E-BBC4-CCC2D4B42CCC}</Project>
+    </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\dbg_output\library-dbg_output.vcxproj">
       <Project>{806C141C-ADC5-203A-DF01-02F7E1563621}</Project>
     </ProjectReference>
@@ -310,6 +314,18 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\digest\md5\library-digest-md5.vcxproj">
       <Project>{ECB75138-E9C8-5662-6E1E-06BCA3ED01E6}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\json\common\library-json-common.vcxproj">
+      <Project>{3B322F11-1D2A-AEFE-BC14-4F74683E14DB}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\json\fast_sax\library-json-fast_sax.vcxproj">
+      <Project>{8AAB2F9B-ECAA-2170-D871-1CEE27B498C2}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\json\library-json.vcxproj">
+      <Project>{E633ADF4-A720-EDCB-A12B-52A8216FF956}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\json\writer\library-json-writer.vcxproj">
+      <Project>{C27A0E65-4FDF-D0F0-5127-62A23E33B196}</Project>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\logger\global\library-logger-global.vcxproj">
       <Project>{D1EB170E-C5D0-989C-A93C-B5A2CD895E62}</Project>
@@ -328,6 +344,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\string_utils\base64\library-string_utils-base64.vcxproj">
       <Project>{137212F6-D2FE-719F-EBE2-99060434BC72}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\string_utils\relaxed_escaper\library-string_utils-relaxed_escaper.vcxproj">
+      <Project>{91423FEC-8B3D-547B-2674-3740D83114B5}</Project>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\threading\future\library-threading-future.vcxproj">
       <Project>{CF2582C4-C4A1-875F-6897-27B28FB8018A}</Project>

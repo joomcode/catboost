@@ -40,11 +40,16 @@ DATA(
 )
 
 DEPENDS(
+    catboost/tools/limited_precision_dsv_diff
     catboost/tools/model_comparator
     catboost/python-package/catboost
     catboost/python-package/ut/medium/python_binary
 )
 
-ALLOCATOR(LF)
+IF (ARCH_AARCH64 OR OS_WINDOWS)
+    ALLOCATOR(J)
+ELSE()
+    ALLOCATOR(LF)
+ENDIF()
 
 END()

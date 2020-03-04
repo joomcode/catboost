@@ -1,4 +1,6 @@
 #include "catboost_options.h"
+
+#include "json_helper.h"
 #include "restrictions.h"
 
 #include <library/json/json_reader.h>
@@ -15,7 +17,7 @@ template <>
 void Out<NCatboostOptions::TCatBoostOptions>(IOutputStream& out, const NCatboostOptions::TCatBoostOptions& options) {
     NJson::TJsonValue json;
     options.Save(&json);
-    out << ToString(json);
+    out << WriteTJsonValue(json);
 }
 
 template <>
@@ -36,6 +38,12 @@ void NCatboostOptions::TCatBoostOptions::SetLeavesEstimationDefault() {
     double defaultL2Reg = 3.0;
 
     switch (lossFunctionConfig.GetLossFunction()) {
+        case ELossFunction::MultiRMSE: {
+            defaultEstimationMethod = ELeavesEstimation::Newton;
+            defaultNewtonIterations = 1;
+            defaultGradientIterations = 1;
+            break;
+        }
         case ELossFunction::RMSE: {
             defaultEstimationMethod = ELeavesEstimation::Newton;
             defaultNewtonIterations = 1;
@@ -73,8 +81,10 @@ void NCatboostOptions::TCatBoostOptions::SetLeavesEstimationDefault() {
             break;
         }
         case ELossFunction::MAE:
+        case ELossFunction::MAPE:
         case ELossFunction::Quantile: {
-            if (TaskType == ETaskType::CPU) {
+            if (TaskType == ETaskType::CPU && SystemOptions->IsSingleHost()
+                && !BoostingOptions->ApproxOnFullHistory && treeConfig.MonotoneConstraints.Get().empty()) {
                 defaultEstimationMethod = ELeavesEstimation::Exact;
                 defaultNewtonIterations = 1;
                 defaultGradientIterations = 1;
@@ -85,8 +95,7 @@ void NCatboostOptions::TCatBoostOptions::SetLeavesEstimationDefault() {
             }
             break;
         }
-        case ELossFunction::LogLinQuantile:
-        case ELossFunction::MAPE: {
+        case ELossFunction::LogLinQuantile: {
             defaultNewtonIterations = 1;
             defaultGradientIterations = 1;
             defaultEstimationMethod = ELeavesEstimation::Gradient;
@@ -217,6 +226,14 @@ void NCatboostOptions::TCatBoostOptions::SetLeavesEstimationDefault() {
     if (treeConfig.LeavesEstimationMethod == ELeavesEstimation::Simple) {
         CB_ENSURE(treeConfig.LeavesEstimationIterations == 1u,
                   "Leaves estimation iterations can't be greater, than 1 for Simple leaf-estimation mode");
+    }
+
+    if (treeConfig.LeavesEstimationMethod == ELeavesEstimation::Exact) {
+        auto loss = lossFunctionConfig.GetLossFunction();
+        CB_ENSURE(EqualToOneOf(loss, ELossFunction::Quantile, ELossFunction::MAE, ELossFunction::MAPE),
+            "Exact method is only available for Quantile, MAE and MAPE loss functions.");
+        CB_ENSURE(!BoostingOptions->ApproxOnFullHistory, "ApproxOnFullHistory option is not available within Exact method.");
+        CB_ENSURE(TaskType == ETaskType::CPU, "Exact method is only available on CPU.");
     }
 
     if (treeConfig.L2Reg == 0.0f) {
@@ -417,19 +434,14 @@ inline TString GetMessageDecreaseNumberIter(const ui32 treeCount, const ui32 bor
 }
 
 static void ValidateModelSize(const NCatboostOptions::TObliviousTreeLearnerOptions& treeConfig,
-                              const NCatboostOptions::TOverfittingDetectorOptions& overfittingDetectorConfig,
-                              const ETaskType taskType) {
+                              const NCatboostOptions::TOverfittingDetectorOptions& overfittingDetectorConfig) {
     ui32 leafCount;
-    if (taskType == ETaskType::GPU) {
-        const bool isSymmetricTreeOrDepthwise = (treeConfig.GrowPolicy.Get() == EGrowPolicy::SymmetricTree ||
-                                            treeConfig.GrowPolicy.Get() == EGrowPolicy::Depthwise);
-        if (isSymmetricTreeOrDepthwise) {
-            leafCount = 1 << treeConfig.MaxDepth.Get();
-        } else {
-            leafCount = treeConfig.MaxLeaves.Get();
-        }
-    } else {
+    const bool isSymmetricTreeOrDepthwise = (treeConfig.GrowPolicy.Get() == EGrowPolicy::SymmetricTree ||
+                                        treeConfig.GrowPolicy.Get() == EGrowPolicy::Depthwise);
+    if (isSymmetricTreeOrDepthwise) {
         leafCount = 1 << treeConfig.MaxDepth.Get();
+    } else {
+        leafCount = treeConfig.MaxLeaves.Get();
     }
 
     constexpr ui32 OneGb = (1 << 30);
@@ -473,14 +485,15 @@ void NCatboostOptions::TCatBoostOptions::Validate() const {
     {
         const ui32 classesCount = DataProcessingOptions->ClassesCount;
         if (classesCount != 0) {
-            CB_ENSURE(IsMultiClassOnlyMetric(lossFunction), "classes_count parameter takes effect only with MultiClass/MultiClassOneVsAll loss functions");
+            CB_ENSURE(IsMultiClassOnlyMetric(lossFunction) || IsUserDefined(lossFunction),
+                "classes_count parameter takes effect only with MultiClass/MultiClassOneVsAll and user-defined loss functions");
             CB_ENSURE(classesCount > 1, "classes-count should be at least 2");
         }
         const auto& classWeights = DataProcessingOptions->ClassWeights.Get();
         if (!classWeights.empty()) {
-            CB_ENSURE(lossFunction == ELossFunction::Logloss || IsMultiClassOnlyMetric(lossFunction),
-                      "class weights takes effect only with Logloss, MultiClass and MultiClassOneVsAll loss functions");
-            CB_ENSURE(IsMultiClassOnlyMetric(lossFunction) || (classWeights.size() == 2),
+            CB_ENSURE(lossFunction == ELossFunction::Logloss || IsMultiClassOnlyMetric(lossFunction) || IsUserDefined(lossFunction),
+                      "class weights takes effect only with Logloss, MultiClass, MultiClassOneVsAll and user-defined loss functions");
+            CB_ENSURE(lossFunction != ELossFunction::Logloss || (classWeights.size() == 2),
                       "if loss-function is Logloss, then class weights should be given for 0 and 1 classes");
             CB_ENSURE(classesCount == 0 || classesCount == classWeights.size(), "class weights should be specified for each class in range 0, ... , classes_count - 1");
         }
@@ -560,8 +573,10 @@ void NCatboostOptions::TCatBoostOptions::Validate() const {
 
     if (BoostingOptions->BoostFromAverage.Get()) {
         // we may adjust non-set BoostFromAverage in data dependant tuning
-        CB_ENSURE(EqualToOneOf(lossFunction, ELossFunction::RMSE, ELossFunction::Logloss, ELossFunction::CrossEntropy),
-            "You can use boost_from_average only for these loss functions now: RMSE, Logloss or CrossEntropy.");
+        CB_ENSURE(EqualToOneOf(lossFunction, ELossFunction::RMSE, ELossFunction::Logloss,
+            ELossFunction::CrossEntropy, ELossFunction::Quantile, ELossFunction::MAE, ELossFunction::MAPE),
+            "You can use boost_from_average only for these loss functions now: " <<
+            "RMSE, Logloss, CrossEntropy, Quantile, MAE or MAPE.");
         CB_ENSURE(SystemOptions->IsSingleHost(), "You can use boost_from_average only on single host now.");
     }
 
@@ -580,40 +595,67 @@ void NCatboostOptions::TCatBoostOptions::Validate() const {
         CB_ENSURE(
             SystemOptions->IsSingleHost(), "Monotone constraints is unsupported for distributed learning."
         );
-        const THashSet<int> validMonotoneConstraintValues = {-1, 0, 1};
-        CB_ENSURE(
-            AllOf(monotoneConstraints, [&] (int val) { return validMonotoneConstraintValues.contains(val); }),
-            TStringBuilder() << "Monotone constraints should be values in {-1, 0, 1}. Got:\n" <<
-            "(" << JoinVectorIntoString(monotoneConstraints, ",") << ")"
+        CB_ENSURE(ObliviousTreeOptions->LeavesEstimationMethod != ELeavesEstimation::Exact,
+            "Monotone constraints are unsupported for Exact leaves estimation method."
         );
+        const THashSet<int> validMonotoneConstraintValues = {-1, 0, 1};
+        for (auto [featureIdx, constraint] : monotoneConstraints) {
+            CB_ENSURE(validMonotoneConstraintValues.contains(constraint),
+                "Monotone constraints should be values in {-1, 0, 1}. Got: " << featureIdx << ":" << constraint);
+        }
     }
-    ValidateModelSize(ObliviousTreeOptions.Get(), BoostingOptions->OverfittingDetector.Get(), GetTaskType());
+    ValidateModelSize(ObliviousTreeOptions.Get(), BoostingOptions->OverfittingDetector.Get());
 
     const ELeavesEstimation leavesEstimation = ObliviousTreeOptions->LeavesEstimationMethod;
     if (leavesEstimation == ELeavesEstimation::Newton) {
         EnsureNewtonIsAvailable(GetTaskType(), LossFunctionDescription);
     }
 
-    const auto bootstrapType = ObliviousTreeOptions->BootstrapConfig->GetBootstrapType();
-    const bool isMvsMultiClass = IsMultiClassOnlyMetric(lossFunction) && bootstrapType == EBootstrapType::MVS;
-    CB_ENSURE(!isMvsMultiClass, "MVS sampling isn't supported for multiclass.");
+    if (BoostingOptions->Langevin.GetUnchecked()) {
+        CB_ENSURE(SystemOptions->IsSingleHost(), "Langevin boosting is supported in single-host mode only.");
+    }
+
+    if (ObliviousTreeOptions->GrowPolicy != EGrowPolicy::SymmetricTree) {
+        CB_ENSURE(BoostingOptions->BoostingType == EBoostingType::Plain,
+            "Ordered boosting is not supported for nonsymmetric trees.");
+        CB_ENSURE(SystemOptions->IsSingleHost(),
+            "MultiHost training is not supported for nonsymmetric trees.");
+        if (TaskType == ETaskType::CPU) {
+            CB_ENSURE(!IsPairwiseScoring(lossFunction),
+                "Pairwise mode is not supported for nonsymmetric trees on CPU.");
+        }
+    }
+
+    if (ObliviousTreeOptions->GrowPolicy == EGrowPolicy::Lossguide) {
+        CB_ENSURE(ObliviousTreeOptions->SamplingFrequency == ESamplingFrequency::PerTree,
+            "PerTreeLevel sampling is not supported for Lossguide grow policy.");
+    }
 }
 
 void NCatboostOptions::TCatBoostOptions::SetNotSpecifiedOptionsToDefaults() {
     const auto lossFunction = LossFunctionDescription->GetLossFunction();
 
-    // TODO(nikitxskv): Support MVS for MultiClass and for MVS.
+    // TODO(nikitxskv): Support MVS for GPU.
     auto& boostingType = BoostingOptions->BoostingType;
     TOption<EBootstrapType>& bootstrapType = ObliviousTreeOptions->BootstrapConfig->GetBootstrapType();
     TOption<float>& subsample = ObliviousTreeOptions->BootstrapConfig->GetTakenFraction();
-    if (!IsMultiClassOnlyMetric(lossFunction) && TaskType == ETaskType::CPU) {
-        if (!bootstrapType.IsSet()) {
+    if (bootstrapType.NotSet()) {
+        if (!IsMultiClassOnlyMetric(lossFunction)
+            && !IsMultiRegressionObjective(lossFunction)
+            && TaskType == ETaskType::CPU
+            && ObliviousTreeOptions->BootstrapConfig->GetSamplingUnit() == ESamplingUnit::Object)
+        {
             bootstrapType.SetDefault(EBootstrapType::MVS);
         }
-        if (!subsample.IsSet()) {
-            subsample.SetDefault(0.8f);
+    }
+    if (subsample.IsSet()) {
+        CB_ENSURE(bootstrapType != EBootstrapType::Bayesian, "Error: default bootstrap type (bayesian) doesn't support taken fraction option");
+    } else {
+        if (bootstrapType == EBootstrapType::MVS) {
+            subsample.SetDefault(0.8);
         }
     }
+
     if (!IsMultiClassOnlyMetric(lossFunction) && TaskType == ETaskType::GPU && !boostingType.IsSet()) {
         boostingType.SetDefault(EBoostingType::Ordered);
     }
@@ -724,22 +766,43 @@ void NCatboostOptions::TCatBoostOptions::SetNotSpecifiedOptionsToDefaults() {
                 ObliviousTreeOptions->ScoreFunction.SetDefault(EScoreFunction::NewtonL2);
             }
         }
-        if (ObliviousTreeOptions->GrowPolicy != EGrowPolicy::Lossguide) {
-            const ui32 maxLeaves = 1u << ObliviousTreeOptions->MaxDepth.Get();
-            if (ObliviousTreeOptions->MaxLeaves.IsDefault()) {
-                ObliviousTreeOptions->MaxLeaves.SetDefault(maxLeaves);
-            } else {
-                CB_ENSURE(ObliviousTreeOptions->MaxLeaves == maxLeaves,
-                          "max_leaves option works only with lossguide tree growing");
-            }
+    }
+    if (ObliviousTreeOptions->GrowPolicy != EGrowPolicy::Lossguide) {
+        const ui32 maxLeaves = 1u << ObliviousTreeOptions->MaxDepth.Get();
+        if (ObliviousTreeOptions->MaxLeaves.IsDefault()) {
+            ObliviousTreeOptions->MaxLeaves.SetDefault(maxLeaves);
+        } else {
+            CB_ENSURE(ObliviousTreeOptions->MaxLeaves == maxLeaves,
+                        "max_leaves option works only with lossguide tree growing");
         }
     }
     if (TaskType == ETaskType::CPU) {
+        if (BoostingOptions->DiffusionTemperature.GetUnchecked() > 0.0f && BoostingOptions->Langevin.NotSet()) {
+            BoostingOptions->Langevin.SetDefault(true);
+        }
+
         auto& shrinkRate = BoostingOptions->ModelShrinkRate;
+        if (BoostingOptions->Langevin) {
+            if (BoostingOptions->DiffusionTemperature.NotSet()) {
+                BoostingOptions->DiffusionTemperature.SetDefault(1e4);
+            }
+            if (shrinkRate.NotSet()) {
+                if (BoostingOptions->ModelShrinkMode == EModelShrinkMode::Constant) {
+                    shrinkRate = 0.001;
+                } else {
+                    shrinkRate = 0.01;
+                }
+            }
+        }
+
         if (!ObliviousTreeOptions->MonotoneConstraints->empty() &&
-            !shrinkRate.IsSet())
+            shrinkRate.NotSet())
         {
-            shrinkRate = 0.2;
+            if (BoostingOptions->ModelShrinkMode == EModelShrinkMode::Constant) {
+                shrinkRate = 0.01;
+            } else {
+                shrinkRate = 0.2;
+            }
         }
 
         if (shrinkRate.IsSet() && !BoostingOptions->BoostFromAverage.IsSet()) {
@@ -748,8 +811,9 @@ void NCatboostOptions::TCatBoostOptions::SetNotSpecifiedOptionsToDefaults() {
 
         // TODO(nikitxskv): Remove it after MLTOOLS-4158.
         CB_ENSURE(
-            !shrinkRate.IsSet() || shrinkRate == 0.0f || !BoostingOptions->BoostFromAverage.Get(),
-            "You cannot use boost from average with specified model_shrink_rate option (automatic specified for monotonic constraints)."
+            shrinkRate == 0.0f || !BoostingOptions->BoostFromAverage.Get(),
+            "You cannot use boost from average with specified model_shrink_rate option "
+            "(automatic specified for monotonic constraints and Langevin boosting)."
         );
     }
 

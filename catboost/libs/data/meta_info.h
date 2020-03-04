@@ -2,19 +2,15 @@
 
 #include "features_layout.h"
 
+#include <catboost/private/libs/options/enums.h>
 #include <catboost/libs/column_description/column.h>
-#include <catboost/private/libs/data_types/groupid.h>
-#include <catboost/private/libs/data_types/pair.h>
-#include <catboost/libs/helpers/serialization.h>
-#include <catboost/libs/model/features.h>
 
 #include <library/binsaver/bin_saver.h>
+#include <library/json/json_value.h>
 
-#include <util/generic/array_ref.h>
-#include <util/generic/fwd.h>
-#include <util/generic/ptr.h>
+#include <util/generic/maybe.h>
+#include <util/generic/string.h>
 #include <util/generic/vector.h>
-#include <util/string/vector.h>
 #include <util/system/types.h>
 
 
@@ -47,7 +43,8 @@ namespace NCB {
         TFeaturesLayoutPtr FeaturesLayout;
         ui64 MaxCatFeaturesUniqValuesOnLearn = 0;
 
-        bool HasTarget = false;
+        ERawTargetType TargetType = ERawTargetType::None;
+        ui32 TargetCount = 0;
         TMaybe<TTargetStats> TargetStats;
 
         ui32 BaselineCount = 0;
@@ -60,7 +57,7 @@ namespace NCB {
         bool HasPairs = false;
 
         // can be set from baseline file header or from quantized pool
-        TVector<TString> ClassNames = {};
+        TVector<NJson::TJsonValue> ClassLabels = {};
 
         // set only for dsv format pools
         // TODO(akhropov): temporary, serialization details shouldn't be here
@@ -71,13 +68,15 @@ namespace NCB {
 
         TDataMetaInfo(
             TMaybe<TDataColumnsMetaInfo>&& columnsInfo,
+            ERawTargetType targetType,
             bool hasAdditionalGroupWeight,
+            bool hasTimestamp,
             bool hasPairs,
             TMaybe<ui32> additionalBaselineCount = Nothing(),
 
             // if specified - prefer these to Id in columnsInfo.Columns, otherwise take names
             TMaybe<const TVector<TString>*> featureNames = Nothing(),
-            const TVector<TString>& classNames = {}
+            const TVector<NJson::TJsonValue>& classLabels = {}
         );
 
         bool EqualTo(const TDataMetaInfo& rhs, bool ignoreSparsity = false) const;

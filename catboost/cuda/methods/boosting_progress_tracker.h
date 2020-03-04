@@ -32,6 +32,7 @@ namespace NCatboostCuda {
                                  bool testHasTarget,
                                  ui32 cpuApproxDim,
                                  bool hasWeights,
+                                 TMaybe<ui32> learnAndTestCheckSum,
                                  ITrainingCallbacks* trainingCallbacks);
 
         const TErrorTracker& GetErrorTracker() const {
@@ -102,6 +103,7 @@ namespace NCatboostCuda {
                 HasTestTarget,
                 CpuApproxDim,
                 HasWeights,
+                LearnAndTestQuantizedFeaturesCheckSum,
                 TrainingCallbacks
             );
         }
@@ -110,14 +112,14 @@ namespace NCatboostCuda {
         void ShrinkToBestIteration(TModelType* model) const {
             const auto& errorTracker = GetErrorTracker();
             const auto& bestModelTracker = GetBestModelMinTreesTracker();
-            const ui32 bestIter = static_cast<const ui32>(bestModelTracker.GetBestIteration());
-            if (0 < bestIter + 1 && bestIter < GetCurrentIteration()) {
-                CATBOOST_NOTICE_LOG << "Shrink model to first " << bestIter + 1 << " iterations.";
-                if (bestIter > static_cast<const ui32>(errorTracker.GetBestIteration())) {
+            const ui32 bestIter = static_cast<const ui32>(bestModelTracker.GetBestIteration()) + 1;
+            if (0 < bestIter && bestIter < GetCurrentIteration()) {
+                CATBOOST_NOTICE_LOG << "Shrink model to first " << bestIter << " iterations.";
+                if (static_cast<const ui32>(errorTracker.GetBestIteration()) + 1 < bestIter) {
                     CATBOOST_NOTICE_LOG << " (min iterations for best model = " << OutputOptions.BestModelMinTrees << ")";
                 }
                 CATBOOST_NOTICE_LOG << Endl;
-                model->Shrink(bestIter + 1);
+                model->Shrink(bestIter);
             }
         }
 
@@ -188,6 +190,8 @@ namespace NCatboostCuda {
         bool FirstCall = true;
         bool ContinueTraining = true;
         bool HasWeights;
+
+        TMaybe<ui32> LearnAndTestQuantizedFeaturesCheckSum;
     };
 
     class TOneIterationProgressTracker {

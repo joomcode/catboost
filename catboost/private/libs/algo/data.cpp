@@ -7,8 +7,8 @@
 #include <catboost/libs/data/quantization.h>
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/restorable_rng.h>
-#include <catboost/private/libs/labels/label_converter.h>
 #include <catboost/libs/metrics/metric.h>
+#include <catboost/private/libs/labels/label_converter.h>
 #include <catboost/private/libs/options/catboost_options.h>
 #include <catboost/private/libs/options/system_options.h>
 #include <catboost/private/libs/target/data_providers.h>
@@ -49,8 +49,8 @@ namespace NCB {
             return Nothing();
         }
         TVector<TConstArrayRef<float>> bordersInInitModel;
-        bordersInInitModel.reserve((*initModel)->ObliviousTrees.GetMutable()->FloatFeatures.size());
-        for (const auto& floatFeature : (*initModel)->ObliviousTrees.GetMutable()->FloatFeatures) {
+        bordersInInitModel.reserve((*initModel)->ModelTrees.GetMutable()->GetFloatFeatures().size());
+        for (const auto& floatFeature : (*initModel)->ModelTrees.GetMutable()->GetFloatFeatures()) {
             bordersInInitModel.emplace_back(floatFeature.Borders.begin(), floatFeature.Borders.end());
         }
         return bordersInInitModel;
@@ -61,9 +61,9 @@ namespace NCB {
         bool isLearnData,
         TStringBuf datasetName,
         const TMaybe<TString>& bordersFile,
-        bool unloadCatFeaturePerfectHashFromRamIfPossible,
+        bool unloadCatFeaturePerfectHashFromRam,
         bool ensureConsecutiveIfDenseFeaturesDataForCpu,
-        bool allowWriteFiles,
+        const TString& tmpDir,
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
         NCatboostOptions::TCatBoostOptions* params,
         TLabelConverter* labelConverter,
@@ -116,26 +116,35 @@ namespace NCB {
                 );
             }
 
-            trainingData->ObjectsData = quantizedObjectsDataProviderPtr;
-            trainingData->ObjectsData->GetQuantizedFeaturesInfo()->SetAllowWriteFiles(allowWriteFiles);
+            if (params->DataProcessingOptions.Get().IgnoredFeatures.IsSet()) {
+                trainingData->ObjectsData = dynamic_cast<TQuantizedObjectsDataProvider*>(
+                    quantizedObjectsDataProviderPtr->GetFeaturesSubset(
+                        params->DataProcessingOptions.Get().IgnoredFeatures,
+                        localExecutor).Get());
+            } else {
+                trainingData->ObjectsData = quantizedObjectsDataProviderPtr;
+            }
         } else {
             trainingData->ObjectsData = GetQuantizedObjectsData(
-                params,
+                *params,
                 srcData,
                 bordersFile,
                 quantizedFeaturesInfo,
-                allowWriteFiles,
                 localExecutor,
                 rand,
                 GetInitialBorders(initModel));
         }
+
+        CB_ENSURE(
+            trainingData->ObjectsData->GetFeaturesLayout()->HasAvailableAndNotIgnoredFeatures(),
+            "All features are either constant or ignored.");
+
         //(TODO)
         // because some features can become unavailable/ignored due to quantization
         trainingData->MetaInfo.FeaturesLayout = trainingData->ObjectsData->GetFeaturesLayout();
 
-        if (unloadCatFeaturePerfectHashFromRamIfPossible) {
-            trainingData->ObjectsData->GetQuantizedFeaturesInfo()
-                ->UnloadCatFeaturePerfectHashFromRamIfPossible();
+        if (unloadCatFeaturePerfectHashFromRam) {
+            trainingData->ObjectsData->GetQuantizedFeaturesInfo()->UnloadCatFeaturePerfectHashFromRam(tmpDir);
         }
 
         auto& dataProcessingOptions = params->DataProcessingOptions.Get();
@@ -150,37 +159,54 @@ namespace NCB {
         TInputClassificationInfo inputClassificationInfo {
             dataProcessingOptions.ClassesCount.Get() ? TMaybe<ui32>(dataProcessingOptions.ClassesCount.Get()) : Nothing(),
             dataProcessingOptions.ClassWeights.Get(),
-            dataProcessingOptions.ClassNames.Get(),
+            dataProcessingOptions.ClassLabels.Get(),
             *targetBorder
         };
         TOutputClassificationInfo outputClassificationInfo {
-            dataProcessingOptions.ClassNames.Get(),
+            dataProcessingOptions.ClassLabels.Get(),
             labelConverter,
             *targetBorder
         };
         TOutputPairsInfo outputPairsInfo;
 
+        const auto targetCreationOptions = MakeTargetCreationOptions(
+            srcData->RawTargetData,
+            GetMetricDescriptions(*params),
+            /*knownModelApproxDimension*/ Nothing(),
+            inputClassificationInfo
+        );
+
+        CB_ENSURE(!isLearnData || srcData->RawTargetData.GetObjectCount() > 0, "Train dataset is empty");
+
         trainingData->TargetData = CreateTargetDataProvider(
             srcData->RawTargetData,
             trainingData->ObjectsData->GetSubgroupIds(),
             /*isForGpu*/ params->GetTaskType() == ETaskType::GPU,
-            isLearnData,
-            datasetName,
-            GetMetricDescriptions(*params),
             &params->LossFunctionDescription.Get(),
-            dataProcessingOptions.AllowConstLabel.Get(),
             /*metricsThatRequireTargetCanBeSkipped*/ !isLearnData,
-            /*needTargetDataForCtrs*/ needTargetDataForCtrs,
             /*knownModelApproxDimension*/ Nothing(),
+            targetCreationOptions,
             inputClassificationInfo,
             &outputClassificationInfo,
             rand,
             localExecutor,
             &outputPairsInfo
         );
+
+        CheckTargetConsistency(
+            trainingData->TargetData,
+            GetMetricDescriptions(*params),
+            &params->LossFunctionDescription.Get(),
+            needTargetDataForCtrs,
+            !isLearnData,
+            datasetName,
+            isLearnData,
+            dataProcessingOptions.AllowConstLabel.Get()
+        );
+
         trainingData->MetaInfo.HasPairs = outputPairsInfo.HasPairs;
         trainingData->MetaInfo.HasWeights |= !inputClassificationInfo.ClassWeights.empty();
-        dataProcessingOptions.ClassNames.Get() = outputClassificationInfo.ClassNames;
+        dataProcessingOptions.ClassLabels.Get() = outputClassificationInfo.ClassLabels;
         *targetBorder = outputClassificationInfo.TargetBorder;
 
         trainingData->UpdateMetaInfo();
@@ -214,7 +240,7 @@ namespace NCB {
         const TTrainingDataProvider& trainingData,
         ui32 approxDimension) {
 
-        if (trainingData.MetaInfo.HasTarget) {
+        if (trainingData.MetaInfo.TargetCount > 0) {
             return;
         }
 
@@ -234,7 +260,7 @@ namespace NCB {
         NPar::TLocalExecutor* localExecutor
     ) {
         const TTextDigitizers& digitizers = dataProvider.GetQuantizedFeaturesInfo()->GetTextDigitizers();
-        auto dictionary = digitizers.GetDictionary(tokenizedTextFeatureIdx);
+        auto dictionary = digitizers.GetDigitizer(tokenizedTextFeatureIdx).Dictionary;
         const TTokenizedTextValuesHolder* textColumn = *dataProvider.GetTextFeature(tokenizedTextFeatureIdx);
 
         if (const auto* denseData = dynamic_cast<const TTokenizedTextArrayValuesHolder*>(textColumn)) {
@@ -250,7 +276,7 @@ namespace NCB {
 
     static TTextClassificationTargetPtr CreateTextClassificationTarget(const TTargetDataProvider& targetDataProvider) {
         const ui32 numClasses = *targetDataProvider.GetTargetClassCount();
-        TConstArrayRef<float> target = *targetDataProvider.GetTarget();
+        TConstArrayRef<float> target = *targetDataProvider.GetOneDimensionalTarget();
         TVector<ui32> classes;
         classes.resize(target.size());
 
@@ -323,6 +349,7 @@ namespace NCB {
         const TMaybe<TString>& bordersFile, // load borders from it if specified
         bool ensureConsecutiveIfDenseLearnFeaturesDataForCpu,
         bool allowWriteFiles,
+        const TString& tmpDir,
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo, // can be nullptr, then create it
         NCatboostOptions::TCatBoostOptions* params,
         TLabelConverter* labelConverter,
@@ -338,9 +365,9 @@ namespace NCB {
             /*isLearnData*/ true,
             "learn",
             bordersFile,
-            /*unloadCatFeaturePerfectHashFromRamIfPossible*/ srcData.Test.empty(),
+            /*unloadCatFeaturePerfectHashFromRam*/ allowWriteFiles && srcData.Test.empty(),
             ensureConsecutiveIfDenseLearnFeaturesDataForCpu,
-            allowWriteFiles,
+            tmpDir,
             quantizedFeaturesInfo,
             params,
             labelConverter,
@@ -359,9 +386,10 @@ namespace NCB {
                     /*isLearnData*/ false,
                     TStringBuilder() << "test #" << testIdx,
                     Nothing(), // borders already loaded
-                    /*unloadCatFeaturePerfectHashFromRamIfPossible*/ (testIdx + 1) == srcData.Test.size(),
+                    /*unloadCatFeaturePerfectHashFromRam*/
+                        allowWriteFiles && ((testIdx + 1) == srcData.Test.size()),
                     /*ensureConsecutiveIfDenseFeaturesDataForCpu*/ false, // not needed for test
-                    allowWriteFiles,
+                    tmpDir,
                     quantizedFeaturesInfo,
                     params,
                     labelConverter,
@@ -387,7 +415,7 @@ namespace NCB {
             CheckCompatibilityWithEvalMetric(
                 params->MetricOptions->EvalMetric,
                 *trainingData.Test.back(),
-                GetApproxDimension(*params, *labelConverter)
+                GetApproxDimension(*params, *labelConverter, trainingData.Test.back()->TargetData->GetTargetDimension())
             );
         }
 
@@ -395,13 +423,4 @@ namespace NCB {
         return trainingData;
     }
 
-    TConstArrayRef<TString> GetTargetForStratifiedSplit(const TDataProvider& dataProvider) {
-        auto maybeTarget = dataProvider.RawTargetData.GetTarget();
-        CB_ENSURE(maybeTarget, "Cannot do stratified split: Target data is unavailable");
-        return *maybeTarget;
-    }
-
-    TConstArrayRef<float> GetTargetForStratifiedSplit(const TTrainingDataProvider& dataProvider) {
-        return *dataProvider.TargetData->GetTarget();
-    }
 }

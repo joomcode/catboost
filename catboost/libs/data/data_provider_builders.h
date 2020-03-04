@@ -33,6 +33,9 @@ namespace NCB {
     struct IDataProviderBuilder {
         virtual ~IDataProviderBuilder() = default;
 
+        /* can return nullptr when processing is by blocks, it means after processing current block no new
+         * complete groups found, adding data from subsequent blocks is required
+         */
         virtual TDataProviderPtr GetResult() = 0;
 
         /* can return nullptr, needed to get last group data when processing is by blocks,
@@ -44,6 +47,8 @@ namespace NCB {
     struct TDataProviderBuilderOptions {
         bool CpuCompatibleFormat = true;
         bool GpuCompatibleFormat = true;
+        bool GpuDistributedFormat = false;
+        TPathWithScheme PoolPath = TPathWithScheme();
         ui64 MaxCpuRamUsage = Max<ui64>();
         bool SkipCheck = false; // to increase speed, esp. when applying
         ESparseArrayIndexingType SparseArrayIndexingType = ESparseArrayIndexingType::Undefined;
@@ -63,13 +68,14 @@ namespace NCB {
     public:
         TDataProviderClosure(
             EDatasetVisitorType visitorType,
-            const TDataProviderBuilderOptions& options
+            const TDataProviderBuilderOptions& options,
+            NPar::TLocalExecutor* localExecutor
         ) {
             DataProviderBuilder = CreateDataProviderBuilder(
                 visitorType,
                 options,
                 TDatasetSubset::MakeColumns(),
-                &NPar::LocalExecutor()
+                localExecutor
             );
             CB_ENSURE_INTERNAL(
                 DataProviderBuilder.Get(),
@@ -101,12 +107,14 @@ namespace NCB {
     template <class IVisitor>
     void CreateDataProviderBuilderAndVisitor(
         const TDataProviderBuilderOptions& options,
+        NPar::TLocalExecutor* localExecutor,
         THolder<IDataProviderBuilder>* dataProviderBuilder,
         IVisitor** builderVisitor
     ) {
         auto dataProviderClosure = MakeHolder<TDataProviderClosure>(
             IVisitor::Type,
-            options
+            options,
+            localExecutor
         );
         *builderVisitor = dataProviderClosure->template GetVisitor<IVisitor>();
         *dataProviderBuilder = dataProviderClosure.Release();
@@ -115,13 +123,15 @@ namespace NCB {
     /*
      * uses global LocalExecutor inside
      * call IVisitor's methods in loader
+     *
+     * needed by unit tests and R-package
      */
     template <class IVisitor = IRawFeaturesOrderDataVisitor, class TLoader>
     TDataProviderPtr CreateDataProvider(
         TLoader&& loader,
         const TDataProviderBuilderOptions& options = TDataProviderBuilderOptions()
     ) {
-        TDataProviderClosure dataProviderClosure(IVisitor::Type, options);
+        TDataProviderClosure dataProviderClosure(IVisitor::Type, options, &NPar::LocalExecutor());
         loader(dataProviderClosure.GetVisitor<IVisitor>());
         return dataProviderClosure.GetResult();
     }

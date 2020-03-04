@@ -2,6 +2,7 @@
 
 #include "data_provider.h"
 #include "feature_index.h"
+#include "lazy_columns.h"
 #include "objects.h"
 #include "target.h"
 #include "util.h"
@@ -12,6 +13,7 @@
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/resource_holder.h>
 #include <catboost/libs/logging/logging.h>
+#include <catboost/private/libs/labels/helpers.h>
 #include <catboost/private/libs/options/restrictions.h>
 #include <catboost/private/libs/quantization/utils.h>
 
@@ -110,6 +112,28 @@ namespace NCB {
             prepareFeaturesStorage(FloatFeaturesStorage);
             prepareFeaturesStorage(CatFeaturesStorage);
             prepareFeaturesStorage(TextFeaturesStorage);
+
+            switch (Data.MetaInfo.TargetType) {
+                case ERawTargetType::Float:
+                case ERawTargetType::Integer:
+                    PrepareForInitialization(
+                        Data.MetaInfo.TargetCount,
+                        ObjectCount,
+                        prevTailSize,
+                        &FloatTarget
+                    );
+                    break;
+                case ERawTargetType::String:
+                    PrepareForInitialization(
+                        Data.MetaInfo.TargetCount,
+                        ObjectCount,
+                        prevTailSize,
+                        &StringTarget
+                    );
+                    break;
+                default:
+                    ;
+            }
 
             if (metaInfo.HasWeights) {
                 PrepareForInitialization(ObjectCount, prevTailSize, &WeightsBuffer);
@@ -214,6 +238,15 @@ namespace NCB {
             CatFeaturesStorage.SetDefaultValue(catFeatureIdx, GetCatFeatureValue(flatFeatureIdx, feature));
         }
 
+        void AddTextFeature(ui32 localObjectIdx, ui32 flatFeatureIdx, TStringBuf feature) override {
+            auto textFeatureIdx = GetInternalFeatureIdx<EFeatureType::Text>(flatFeatureIdx);
+            TextFeaturesStorage.Set(
+                textFeatureIdx,
+                Cursor + localObjectIdx,
+                TString(feature)
+            );
+        }
+
         void AddTextFeature(ui32 localObjectIdx, ui32 flatFeatureIdx, const TString& feature) override {
             auto textFeatureIdx = GetInternalFeatureIdx<EFeatureType::Text>(flatFeatureIdx);
             TextFeaturesStorage.Set(
@@ -243,15 +276,22 @@ namespace NCB {
 
         // TRawTargetData
 
-        /* if raw data contains target data as strings (label is a synonym for target)
-            prefer passing it as TString to avoid unnecessary memory copies
-            even if these strings represent float or ints
-        */
         void AddTarget(ui32 localObjectIdx, const TString& value) override {
-            (*Data.TargetData.Target)[Cursor + localObjectIdx] = value;
+            AddTarget(0, localObjectIdx, value);
         }
         void AddTarget(ui32 localObjectIdx, float value) override {
-            (*Data.TargetData.Target)[Cursor + localObjectIdx] = ToString(value);
+            AddTarget(0, localObjectIdx, value);
+        }
+        void AddTarget(ui32 flatTargetIdx, ui32 localObjectIdx, const TString& value) override {
+            Y_ASSERT(Data.MetaInfo.TargetType == ERawTargetType::String);
+            StringTarget[flatTargetIdx][Cursor + localObjectIdx] = value;
+        }
+        void AddTarget(ui32 flatTargetIdx, ui32 localObjectIdx, float value) override {
+            Y_ASSERT(
+                (Data.MetaInfo.TargetType == ERawTargetType::Float) ||
+                (Data.MetaInfo.TargetType == ERawTargetType::Integer)
+            );
+            FloatTarget[flatTargetIdx][Cursor + localObjectIdx] = value;
         }
         void AddBaseline(ui32 localObjectIdx, ui32 baselineIdx, float value) override {
             Data.TargetData.Baseline[baselineIdx][Cursor + localObjectIdx] = value;
@@ -276,6 +316,11 @@ namespace NCB {
 
         void SetPairs(TVector<TPair>&& pairs) override {
             Data.TargetData.Pairs = std::move(pairs);
+        }
+
+        void SetTimestamps(TVector<ui64>&& timestamps) override {
+            CheckDataSize(timestamps.size(), (size_t)ObjectCount, "timestamps");
+            Data.CommonObjectsData.Timestamp = std::move(timestamps);
         }
 
         // needed for checking groupWeights consistency while loading from separate file
@@ -311,20 +356,59 @@ namespace NCB {
             CB_ENSURE_INTERNAL(!ResultTaken, "Attempt to GetResult several times");
 
             if (InBlock && Data.MetaInfo.HasGroupId) {
-                // copy, not move weights buffers
-
+                // copy, not move target & weights buffers
+                if (Data.MetaInfo.TargetType == ERawTargetType::String) {
+                    for (auto targetIdx : xrange(Data.MetaInfo.TargetCount)) {
+                        Data.TargetData.Target[targetIdx] = StringTarget[targetIdx];
+                    }
+                } else {
+                    for (auto targetIdx : xrange(Data.MetaInfo.TargetCount)) {
+                        Data.TargetData.Target[targetIdx] =
+                            (ITypedSequencePtr<float>)MakeIntrusive<TTypeCastArrayHolder<float, float>>(
+                                TVector<float>(FloatTarget[targetIdx])
+                            );
+                    }
+                }
                 if (Data.MetaInfo.HasWeights) {
-                    Data.TargetData.Weights = TWeights<float>(TVector<float>(WeightsBuffer));
+                    Data.TargetData.Weights = TWeights<float>(
+                        TVector<float>(WeightsBuffer),
+                        AsStringBuf("Weights"),
+                        /*allWeightsCanBeZero*/ true
+                    );
                 }
                 if (Data.MetaInfo.HasGroupWeight) {
-                    Data.TargetData.GroupWeights = TWeights<float>(TVector<float>(GroupWeightsBuffer));
+                    Data.TargetData.GroupWeights = TWeights<float>(
+                        TVector<float>(GroupWeightsBuffer),
+                        AsStringBuf("GroupWeights"),
+                        /*allWeightsCanBeZero*/ true
+                    );
                 }
             } else {
+                if (Data.MetaInfo.TargetType == ERawTargetType::String) {
+                    for (auto targetIdx : xrange(Data.MetaInfo.TargetCount)) {
+                        Data.TargetData.Target[targetIdx] = std::move(StringTarget[targetIdx]);
+                    }
+                } else {
+                    for (auto targetIdx : xrange(Data.MetaInfo.TargetCount)) {
+                        Data.TargetData.Target[targetIdx] =
+                            (ITypedSequencePtr<float>)MakeIntrusive<TTypeCastArrayHolder<float, float>>(
+                                std::move(FloatTarget[targetIdx])
+                            );
+                    }
+                }
                 if (Data.MetaInfo.HasWeights) {
-                    Data.TargetData.Weights = TWeights<float>(std::move(WeightsBuffer));
+                    Data.TargetData.Weights = TWeights<float>(
+                        std::move(WeightsBuffer),
+                        AsStringBuf("Weights"),
+                        /*allWeightsCanBeZero*/ InBlock
+                    );
                 }
                 if (Data.MetaInfo.HasGroupWeight) {
-                    Data.TargetData.GroupWeights = TWeights<float>(std::move(GroupWeightsBuffer));
+                    Data.TargetData.GroupWeights = TWeights<float>(
+                        std::move(GroupWeightsBuffer),
+                        AsStringBuf("GroupWeights"),
+                        /*allWeightsCanBeZero*/ InBlock
+                    );
                 }
             }
 
@@ -372,20 +456,25 @@ namespace NCB {
                     LocalExecutor
                 );
 
+                TDataProviderPtr result;
+
                 ui32 groupCount = fullData->ObjectsGrouping->GetGroupCount();
-                CB_ENSURE(groupCount != 1, "blocks must be big enough to contain more than a single group");
-                TVector<TSubsetBlock<ui32>> subsetBlocks = {TSubsetBlock<ui32>{{ui32(0), groupCount - 1}, 0}};
-                auto result = fullData->GetSubset(
-                    GetSubset(
-                        fullData->ObjectsGrouping,
-                        TArraySubsetIndexing<ui32>(
-                            TRangesSubset<ui32>(groupCount - 1, std::move(subsetBlocks))
+                if (groupCount != 1) {
+                    TVector<TSubsetBlock<ui32>> subsetBlocks = {
+                        TSubsetBlock<ui32>{{ui32(0), groupCount - 1}, 0}
+                    };
+                    result = fullData->GetSubset(
+                        GetSubset(
+                            fullData->ObjectsGrouping,
+                            TArraySubsetIndexing<ui32>(
+                                TRangesSubset<ui32>(groupCount - 1, std::move(subsetBlocks))
+                            ),
+                            EObjectsOrder::Ordered
                         ),
-                        EObjectsOrder::Ordered
-                    ),
-                    Options.MaxCpuRamUsage,
-                    LocalExecutor
-                )->CastMoveTo<TObjectsDataProvider>();
+                        Options.MaxCpuRamUsage,
+                        LocalExecutor
+                    )->CastMoveTo<TObjectsDataProvider>();
+                }
 
                 // save Data parts - it still contains last group data
                 Data = TRawBuilderDataHelper::Extract(std::move(*fullData));
@@ -417,17 +506,22 @@ namespace NCB {
             );
 
             ui32 groupCount = fullData->ObjectsGrouping->GetGroupCount();
-            Y_VERIFY(groupCount != 1);
-            TVector<TSubsetBlock<ui32>> subsetBlocks = {TSubsetBlock<ui32>{{groupCount - 1, groupCount}, 0}};
-            return fullData->GetSubset(
-                GetSubset(
-                    fullData->ObjectsGrouping,
-                    TArraySubsetIndexing<ui32>(TRangesSubset<ui32>(1, std::move(subsetBlocks))),
-                    EObjectsOrder::Ordered
-                ),
-                Options.MaxCpuRamUsage,
-                LocalExecutor
-            )->CastMoveTo<TObjectsDataProvider>();
+            if (groupCount == 1) {
+                return fullData->CastMoveTo<TObjectsDataProvider>();
+            } else {
+                TVector<TSubsetBlock<ui32>> subsetBlocks = {
+                    TSubsetBlock<ui32>{{groupCount - 1, groupCount}, 0}
+                };
+                return fullData->GetSubset(
+                    GetSubset(
+                        fullData->ObjectsGrouping,
+                        TArraySubsetIndexing<ui32>(TRangesSubset<ui32>(1, std::move(subsetBlocks))),
+                        EObjectsOrder::Ordered
+                    ),
+                    Options.MaxCpuRamUsage,
+                    LocalExecutor
+                )->CastMoveTo<TObjectsDataProvider>();
+            }
         }
 
     private:
@@ -801,6 +895,10 @@ namespace NCB {
         TRawBuilderData Data;
 
         // will be moved to Data.RawTargetData at GetResult
+        TVector<TVector<TString>> StringTarget;
+        TVector<TVector<float>> FloatTarget;
+
+        // will be moved to Data.RawTargetData at GetResult
         TVector<float> WeightsBuffer;
         TVector<float> GroupWeightsBuffer;
 
@@ -946,6 +1044,17 @@ namespace NCB {
             );
         }
 
+        void AddTextFeature(ui32 flatFeatureIdx, TConstArrayRef<TString> features) override {
+            auto textFeatureIdx = GetInternalFeatureIdx<EFeatureType::Text>(flatFeatureIdx);
+            TVector<TString> featuresCopy(features.begin(), features.end());
+
+            Data.ObjectsData.TextFeatures[*textFeatureIdx] = MakeHolder<TStringTextArrayValuesHolder>(
+                flatFeatureIdx,
+                TMaybeOwningConstArrayHolder<TString>::CreateOwning(std::move(featuresCopy)),
+                Data.CommonObjectsData.SubsetIndexing.Get()
+            );
+        }
+
         void AddTextFeature(ui32 flatFeatureIdx, TMaybeOwningConstArrayHolder<TString> features) override {
             auto textFeatureIdx = GetInternalFeatureIdx<EFeatureType::Text>(flatFeatureIdx);
             Data.ObjectsData.TextFeatures[*textFeatureIdx] = MakeHolder<TStringTextArrayValuesHolder>(
@@ -966,19 +1075,16 @@ namespace NCB {
         // TRawTargetData
 
         void AddTarget(TConstArrayRef<TString> value) override {
-            Data.TargetData.Target->assign(value.begin(), value.end());
+            AddTarget(0, value);
         }
-        void AddTarget(TConstArrayRef<float> value) override {
-            TArrayRef<TString> target = *Data.TargetData.Target;
-
-            LocalExecutor->ExecRange(
-                [&](int objectIdx) {
-                    target[objectIdx] = ToString(value[objectIdx]);
-                },
-                *ObjectCalcParams,
-                NPar::TLocalExecutor::WAIT_COMPLETE
-            );
-
+        void AddTarget(ITypedSequencePtr<float> value) override {
+            AddTarget(0, std::move(value));
+        }
+        void AddTarget(ui32 flatTargetIdx, TConstArrayRef<TString> value) override {
+            Data.TargetData.Target[flatTargetIdx] = TVector<TString>(value.begin(), value.end());
+        }
+        void AddTarget(ui32 flatTargetIdx, ITypedSequencePtr<float> value) override {
+            Data.TargetData.Target[flatTargetIdx] = std::move(value);
         }
         void AddBaseline(ui32 baselineIdx, TConstArrayRef<float> value) override {
             Data.TargetData.Baseline[baselineIdx].assign(value.begin(), value.end());
@@ -1006,6 +1112,11 @@ namespace NCB {
 
         void SetPairs(TVector<TPair>&& pairs) override {
             Data.TargetData.Pairs = std::move(pairs);
+        }
+
+        void SetTimestamps(TVector<ui64>&& timestamps) override {
+            CheckDataSize(timestamps.size(), (size_t)ObjectCount, "timestamps");
+            Data.CommonObjectsData.Timestamp = timestamps;
         }
 
         // needed for checking groupWeights consistency while loading from separate file
@@ -1162,6 +1273,55 @@ namespace NCB {
 
             CB_ENSURE(!poolQuantizationSchema.FeatureIndices.empty(), "No features in quantized pool!");
 
+            TConstArrayRef<NJson::TJsonValue> schemaClassLabels = poolQuantizationSchema.ClassLabels;
+
+            if (metaInfo.TargetType == ERawTargetType::String) {
+                CB_ENSURE(
+                    !schemaClassLabels.empty(),
+                    "poolQuantizationSchema must have class labels when target data type is String"
+                );
+                CB_ENSURE(
+                    schemaClassLabels[0].GetType() == NJson::JSON_STRING,
+                    "poolQuantizationSchema must have string class labels when target data type is String"
+                );
+                StringClassLabels.reserve(schemaClassLabels.size());
+                for (const NJson::TJsonValue& classLabel : schemaClassLabels) {
+                    StringClassLabels.push_back(classLabel.GetString());
+                }
+            } else if ((metaInfo.TargetType != ERawTargetType::None) && !schemaClassLabels.empty()) {
+                FloatClassLabels.reserve(schemaClassLabels.size());
+                switch (schemaClassLabels[0].GetType()) {
+                    case NJson::JSON_INTEGER:
+                        CB_ENSURE_INTERNAL(
+                            metaInfo.TargetType == ERawTargetType::Integer,
+                            "metaInfo.TargetType (" << metaInfo.TargetType
+                            << ") is inconsistent with schemaClassLabels type ("
+                            << schemaClassLabels[0].GetType() << ')'
+                        );
+                        for (const NJson::TJsonValue& classLabel : schemaClassLabels) {
+                            FloatClassLabels.push_back(static_cast<float>(classLabel.GetInteger()));
+                        }
+                        break;
+                    case NJson::JSON_DOUBLE:
+                        CB_ENSURE_INTERNAL(
+                            metaInfo.TargetType == ERawTargetType::Float,
+                            "metaInfo.TargetType (" << metaInfo.TargetType
+                            << ") is inconsistent with schemaClassLabels type ("
+                            << schemaClassLabels[0].GetType() << ')'
+                        );
+                        for (const NJson::TJsonValue& classLabel : schemaClassLabels) {
+                            FloatClassLabels.push_back(static_cast<float>(classLabel.GetDouble()));
+                        }
+                        break;
+                    default:
+                        CB_ENSURE_INTERNAL(
+                            false,
+                            "Unexpected JSON label type for numeric target type : "
+                            << schemaClassLabels[0].GetType()
+                        );
+                }
+            }
+
             InProcess = true;
             ResultTaken = false;
 
@@ -1169,13 +1329,16 @@ namespace NCB {
 
             Data.MetaInfo = metaInfo;
 
-            if (Data.MetaInfo.ClassNames.empty()) {
-                Data.MetaInfo.ClassNames = poolQuantizationSchema.ClassNames;
+            if (Data.MetaInfo.ClassLabels.empty()) {
+                Data.MetaInfo.ClassLabels.assign(schemaClassLabels.begin(), schemaClassLabels.end());
             } else {
-                size_t prefixLength = Min(Data.MetaInfo.ClassNames.size(), poolQuantizationSchema.ClassNames.size());
-                auto firstGivenNames = TConstArrayRef<TString>(Data.MetaInfo.ClassNames.begin(), Data.MetaInfo.ClassNames.begin() + prefixLength);
-                CB_ENSURE(firstGivenNames == TConstArrayRef<TString>(poolQuantizationSchema.ClassNames),
-                          "Class-names incompatible with quantized pool, expected: " << JoinSeq(",", poolQuantizationSchema.ClassNames));
+                size_t prefixLength = Min(Data.MetaInfo.ClassLabels.size(), schemaClassLabels.size());
+                auto firstGivenLabels = TConstArrayRef<NJson::TJsonValue>(
+                    Data.MetaInfo.ClassLabels.begin(),
+                    Data.MetaInfo.ClassLabels.begin() + prefixLength
+                );
+                CB_ENSURE(firstGivenLabels == schemaClassLabels,
+                          "Class-names incompatible with quantized pool, expected: " << JoinSeq(",", schemaClassLabels));
             }
 
             Data.TargetData.PrepareForInitialization(metaInfo, objectCount, 0);
@@ -1208,7 +1371,7 @@ namespace NCB {
                 Data.ObjectsData.ExclusiveFeatureBundlesData,
 
                 // packed binary features are present only in TQuantizedForCPUObjectsDataProvider
-                /*dontPack*/ !Options.CpuCompatibleFormat
+                /*dontPack*/ !Options.CpuCompatibleFormat || Options.GpuDistributedFormat
             );
 
             Data.ObjectsData.FeaturesGroupsData = TFeatureGroupsData(
@@ -1235,6 +1398,22 @@ namespace NCB {
                     Data.ObjectsData.Data.QuantizedFeaturesInfo,
                     BinaryFeaturesStorage,
                     Data.ObjectsData.PackedBinaryFeaturesData.FlatFeatureIndexToPackedBinaryIndex
+                );
+            }
+
+            if (Data.MetaInfo.TargetType == ERawTargetType::String) {
+                PrepareForInitialization(
+                    Data.MetaInfo.TargetCount,
+                    ObjectCount,
+                    /*prevTailSize*/ 0,
+                    &StringTarget
+                );
+            } else {
+                PrepareForInitialization(
+                    Data.MetaInfo.TargetCount,
+                    ObjectCount,
+                    /*prevTailSize*/ 0,
+                    &FloatTarget
                 );
             }
 
@@ -1305,27 +1484,51 @@ namespace NCB {
         // TRawTargetData
 
         void AddTargetPart(ui32 objectOffset, TUnalignedArrayBuf<float> targetPart) override {
-            auto& target = *Data.TargetData.Target;
-            if (Data.MetaInfo.ClassNames) {
-                for (auto it = targetPart.GetIterator(); !it.AtEnd(); it.Next(), ++objectOffset) {
-                    target[objectOffset] = Data.MetaInfo.ClassNames[int(it.Cur())];
-                }
-                return;
-            }
-            TString zero{"0"};
-            TString one{"1"};
-            for (auto it = targetPart.GetIterator(); !it.AtEnd(); it.Next(), ++objectOffset) {
-                const auto cur = it.Cur();
-                target[objectOffset] = cur == 0.f ? zero : cur == 1.f ? one : ToString(cur);
-            }
+            AddTargetPart(0, objectOffset, targetPart);
         }
 
         void AddTargetPart(ui32 objectOffset, TMaybeOwningConstArrayHolder<TString> targetPart) override {
+            AddTargetPart(0, objectOffset, targetPart);
+        }
+
+        void AddTargetPart(ui32 flatTargetIdx, ui32 objectOffset, TMaybeOwningConstArrayHolder<TString> targetPart) override {
+            Y_ASSERT(Data.MetaInfo.TargetType == ERawTargetType::String);
             Copy(
                 (*targetPart).begin(),
                 (*targetPart).end(),
-                std::next((*Data.TargetData.Target).begin(), objectOffset)
+                std::next(StringTarget[flatTargetIdx].begin(), objectOffset)
             );
+        }
+
+        void AddTargetPart(ui32 flatTargetIdx, ui32 objectOffset, TUnalignedArrayBuf<float> targetPart) override {
+            if (!StringClassLabels.empty()) {
+                Y_ASSERT(Data.MetaInfo.TargetType == ERawTargetType::String);
+                AddTargetPartWithClassLabels<TString>(
+                    objectOffset,
+                    targetPart,
+                    StringClassLabels,
+                    StringTarget[flatTargetIdx]
+                );
+            } else {
+                Y_ASSERT(
+                    (Data.MetaInfo.TargetType == ERawTargetType::Integer) ||
+                    (Data.MetaInfo.TargetType == ERawTargetType::Float)
+                );
+                if (!FloatClassLabels.empty()) {
+                    AddTargetPartWithClassLabels<float>(
+                       objectOffset,
+                       targetPart,
+                       FloatClassLabels,
+                       FloatTarget[flatTargetIdx]
+                   );
+                } else {
+                    TArrayRef<float> dstPart(
+                        FloatTarget[flatTargetIdx].data() + objectOffset,
+                        targetPart.GetSize()
+                    );
+                    targetPart.WriteTo(&dstPart);
+                }
+            }
         }
 
         void AddBaselinePart(
@@ -1359,6 +1562,11 @@ namespace NCB {
             Data.TargetData.Pairs = std::move(pairs);
         }
 
+        void SetTimestamps(TVector<ui64>&& timestamps) override {
+            CheckDataSize(timestamps.size(), (size_t)ObjectCount, "timestamps");
+            Data.CommonObjectsData.Timestamp = std::move(timestamps);
+        }
+
         // needed for checking groupWeights consistency while loading from separate file
         TMaybeData<TConstArrayRef<TGroupId>> GetGroupIds() const override {
             return Data.CommonObjectsData.GroupIds;
@@ -1378,21 +1586,7 @@ namespace NCB {
         }
 
         TDataProviderPtr GetResult() override {
-            CB_ENSURE_INTERNAL(!InProcess, "Attempt to GetResult before finishing processing");
-            CB_ENSURE_INTERNAL(!ResultTaken, "Attempt to GetResult several times");
-
-            if (Data.MetaInfo.HasWeights) {
-                Data.TargetData.Weights = TWeights<float>(std::move(WeightsBuffer));
-            }
-            if (Data.MetaInfo.HasGroupWeight) {
-                Data.TargetData.GroupWeights = TWeights<float>(std::move(GroupWeightsBuffer));
-            }
-
-            Data.CommonObjectsData.SubsetIndexing = MakeAtomicShared<TArraySubsetIndexing<ui32>>(
-                TFullSubset<ui32>(ObjectCount)
-            );
-
-            GetBinaryFeaturesDataResult();
+            GetTargetAndBinaryFeaturesData();
 
             if (DatasetSubset.HasFeatures) {
                 FloatFeaturesStorage.GetResult(
@@ -1412,9 +1606,9 @@ namespace NCB {
                 );
             }
 
-            ResultTaken = true;
+            SetResultsTaken();
 
-            if (Options.CpuCompatibleFormat) {
+            if (Options.CpuCompatibleFormat && !Options.GpuDistributedFormat) {
                 return MakeDataProvider<TQuantizedForCPUObjectsDataProvider>(
                     /*objectsGrouping*/ Nothing(), // will init from data
                     std::move(Data),
@@ -1429,6 +1623,63 @@ namespace NCB {
                     LocalExecutor
                 )->CastMoveTo<TObjectsDataProvider>();
             }
+        }
+
+        void GetTargetAndBinaryFeaturesData() {
+            CB_ENSURE_INTERNAL(!InProcess, "Attempt to GetResult before finishing processing");
+            CB_ENSURE_INTERNAL(!ResultTaken, "Attempt to GetResult several times");
+
+            if (Data.MetaInfo.TargetType == ERawTargetType::String) {
+                for (auto targetIdx : xrange(Data.MetaInfo.TargetCount)) {
+                    Data.TargetData.Target[targetIdx] = std::move(StringTarget[targetIdx]);
+                }
+            } else {
+                for (auto targetIdx : xrange(Data.MetaInfo.TargetCount)) {
+                    Data.TargetData.Target[targetIdx] =
+                        (ITypedSequencePtr<float>)MakeIntrusive<TTypeCastArrayHolder<float, float>>(
+                            std::move(FloatTarget[targetIdx])
+                        );
+                }
+            }
+            if (Data.MetaInfo.HasWeights) {
+                Data.TargetData.Weights = TWeights<float>(std::move(WeightsBuffer));
+            }
+            if (Data.MetaInfo.HasGroupWeight) {
+                Data.TargetData.GroupWeights = TWeights<float>(std::move(GroupWeightsBuffer));
+            }
+
+            Data.CommonObjectsData.SubsetIndexing = MakeAtomicShared<TArraySubsetIndexing<ui32>>(
+                TFullSubset<ui32>(ObjectCount)
+            );
+
+            GetBinaryFeaturesDataResult();
+        }
+
+        TQuantizedForCPUBuilderData& GetDataRef() {
+            return Data;
+        }
+
+        ui32 GetObjectCount() const {
+            return ObjectCount;
+        }
+
+        void SetResultsTaken() {
+            ResultTaken = true;
+        }
+
+        template <EFeatureType FeatureType>
+        static TVector<bool> MakeIsAvailable(const TFeaturesLayout& featuresLayout) {
+            const size_t perTypeFeatureCount = (size_t)featuresLayout.GetFeatureCount(FeatureType);
+            TVector<bool> isAvailable(perTypeFeatureCount, false);
+            const auto& metaInfos = featuresLayout.GetExternalFeaturesMetaInfo();
+            for (auto perTypeFeatureIdx : xrange(perTypeFeatureCount)) {
+                const auto flatFeatureIdx = featuresLayout.GetExternalFeatureIdx(perTypeFeatureIdx, FeatureType);
+                if (!metaInfos[flatFeatureIdx].IsAvailable) {
+                    continue;
+                }
+                isAvailable[perTypeFeatureIdx] = true;
+            }
+            return isAvailable;
         }
 
     private:
@@ -1553,6 +1804,18 @@ namespace NCB {
             }
         }
 
+        template <class T>
+        static void AddTargetPartWithClassLabels(
+            ui32 objectOffset,
+            TUnalignedArrayBuf<float> targetPart,
+            TConstArrayRef<T> classLabels,
+            TArrayRef<T> target
+        ) {
+            for (auto it = targetPart.GetIterator(); !it.AtEnd(); it.Next(), ++objectOffset) {
+                target[objectOffset] = classLabels[int(it.Cur())];
+            }
+        }
+
     private:
         // ui64 because passed to TCompressedArray later
         using TBinaryFeaturesStorage = TVector<TIntrusivePtr<TVectorHolder<ui64>>>;
@@ -1604,9 +1867,10 @@ namespace NCB {
                 const size_t perTypeFeatureCount = (size_t)featuresLayout.GetFeatureCount(FeatureType);
                 DenseDataStorage.resize(perTypeFeatureCount);
                 DenseDstView.resize(perTypeFeatureCount);
-                IsAvailable.resize(perTypeFeatureCount, false); // filled from quantization Schema, then checked
                 IndexHelpers.resize(perTypeFeatureCount, TIndexHelper<ui64>(8));
                 FeatureIdxToPackedBinaryIndex.resize(perTypeFeatureCount);
+
+                IsAvailable = MakeIsAvailable<FeatureType>(featuresLayout);
 
                 const auto metaInfos = featuresLayout.GetExternalFeaturesMetaInfo();
 
@@ -1633,7 +1897,6 @@ namespace NCB {
                         }
                     }
 
-                    IsAvailable[perTypeFeatureIdx] = true;
                     IndexHelpers[perTypeFeatureIdx] = TIndexHelper<ui64>(bitsPerFeature);
                     FeatureIdxToPackedBinaryIndex[perTypeFeatureIdx]
                         = flatFeatureIndexToPackedBinaryIndex[flatFeatureIdx];
@@ -1791,17 +2054,17 @@ namespace NCB {
     private:
         ui32 ObjectCount;
 
-        /* for conversion back to string representation
-         * if empty - no conversion
-         *
-         *  TODO(akhropov): conversion back will be removed in MLTOOLS-2393
-         */
-        TVector<TString> ClassNames;
-
         /* ForCPU because TQuantizedForCPUObjectsData is more generic than TQuantizedObjectsData -
          * it contains it as a subset
          */
         TQuantizedForCPUBuilderData Data;
+
+        TVector<TString> StringClassLabels; // if poolQuantizationSchema.ClassLabels has Strings
+        TVector<float> FloatClassLabels;    // if poolQuantizationSchema.ClassLabels has Integer or Float
+
+        // will be moved to Data.RawTargetData at GetResult
+        TVector<TVector<TString>> StringTarget;
+        TVector<TVector<float>> FloatTarget;
 
         // will be moved to Data.RawTargetData at GetResult
         TVector<float> WeightsBuffer;
@@ -1821,6 +2084,75 @@ namespace NCB {
     };
 
 
+    class TLazyQuantizedFeaturesDataProviderBuilder : public TQuantizedFeaturesDataProviderBuilder
+    {
+    public:
+        TLazyQuantizedFeaturesDataProviderBuilder(
+            const TDataProviderBuilderOptions& options,
+            NPar::TLocalExecutor* localExecutor
+        )
+            : TQuantizedFeaturesDataProviderBuilder(options, TDatasetSubset::MakeColumns(/*hasFeatures*/false), localExecutor)
+            , Options(options)
+            , PoolLoader(GetProcessor<IQuantizedPoolLoader, const TPathWithScheme&>(options.PoolPath, options.PoolPath))
+            , LocalExecutor(localExecutor)
+        {
+            CB_ENSURE(PoolLoader, "Cannot load dataset because scheme " << options.PoolPath.Scheme << " is unsupported");
+            CB_ENSURE(Options.GpuDistributedFormat, "Lazy columns are supported only in distributed GPU mode");
+        }
+
+        TDataProviderPtr GetResult() override {
+            GetTargetAndBinaryFeaturesData();
+
+            auto& dataRef = GetDataRef();
+            const auto& subsetIndexing = *dataRef.CommonObjectsData.SubsetIndexing;
+            const auto& featuresLayout = *dataRef.MetaInfo.FeaturesLayout;
+
+            CB_ENSURE(featuresLayout.GetFeatureCount(EFeatureType::Categorical) == 0, "Categorical Lazy columns are not supported");
+            dataRef.ObjectsData.Data.CatFeatures.clear();
+
+            const size_t featureCount = (size_t)featuresLayout.GetFeatureCount(EFeatureType::Float);
+
+            const auto& flatFeatureIdxToPackedBinaryIdx =
+                dataRef.ObjectsData.PackedBinaryFeaturesData.FlatFeatureIndexToPackedBinaryIndex;
+
+            const auto& isAvailable = MakeIsAvailable<EFeatureType::Float>(featuresLayout);
+
+            TVector<THolder<IQuantizedFloatValuesHolder>>& lazyQuantizedColumns =
+                dataRef.ObjectsData.Data.FloatFeatures;
+            lazyQuantizedColumns.clear();
+            lazyQuantizedColumns.reserve(featureCount);
+            for (auto perTypeFeatureIdx : xrange(featureCount)) {
+                if (isAvailable[perTypeFeatureIdx]) {
+                    auto flatFeatureIdx = featuresLayout.GetExternalFeatureIdx(perTypeFeatureIdx, EFeatureType::Float);
+                    CB_ENSURE(!flatFeatureIdxToPackedBinaryIdx[flatFeatureIdx], "Packed lazy columns are not supported");
+                    lazyQuantizedColumns.push_back(
+                        MakeHolder<TLazyCompressedValuesHolderImpl<ui8, EFeatureValuesType::QuantizedFloat>>(
+                            flatFeatureIdx,
+                            &subsetIndexing,
+                            PoolLoader)
+                    );
+                } else {
+                    lazyQuantizedColumns.push_back(nullptr);
+                }
+            }
+
+            SetResultsTaken();
+
+            return MakeDataProvider<TQuantizedObjectsDataProvider>(
+                /*objectsGrouping*/ Nothing(), // will init from data
+                CastToBase(std::move(dataRef)),
+                Options.SkipCheck,
+                LocalExecutor
+            )->CastMoveTo<TObjectsDataProvider>();
+        }
+
+    private:
+        TDataProviderBuilderOptions Options;
+        TAtomicSharedPtr<IQuantizedPoolLoader> PoolLoader;
+        NPar::TLocalExecutor* const LocalExecutor;
+    };
+
+
     THolder<IDataProviderBuilder> CreateDataProviderBuilder(
         EDatasetVisitorType visitorType,
         const TDataProviderBuilderOptions& options,
@@ -1833,7 +2165,11 @@ namespace NCB {
             case EDatasetVisitorType::RawFeaturesOrder:
                 return MakeHolder<TRawFeaturesOrderDataProviderBuilder>(options, localExecutor);
             case EDatasetVisitorType::QuantizedFeatures:
-                return MakeHolder<TQuantizedFeaturesDataProviderBuilder>(options, loadSubset, localExecutor);
+                if (options.GpuDistributedFormat) {
+                    return MakeHolder<TLazyQuantizedFeaturesDataProviderBuilder>(options, localExecutor);
+                } else {
+                    return MakeHolder<TQuantizedFeaturesDataProviderBuilder>(options, loadSubset, localExecutor);
+                }
             default:
                 return nullptr;
         }

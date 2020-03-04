@@ -11,9 +11,9 @@ class catboost_model(object):
         [2]
     ]
     tree_depth = [1, 1, 1, 1, 1]
-    tree_split_border = [255, 255, 1, 1, 1]
-    tree_split_feature_index = [1, 1, 0, 0, 0]
-    tree_split_xor_mask = [254, 254, 0, 0, 0]
+    tree_split_border = [255, 255, 255, 1, 1]
+    tree_split_feature_index = [1, 1, 1, 0, 0]
+    tree_split_xor_mask = [254, 254, 254, 0, 0]
     cat_features_index = [0]
     one_hot_cat_feature_index = [0]
     one_hot_hash_values = [
@@ -24,12 +24,14 @@ class catboost_model(object):
 
     ## Aggregated array of leaf values for trees. Each tree is represented by a separate line:
     leaf_values = [
-        0.503749999916181, 0.496250000083819,
-        0.003721874917438254, -0.003721874917438254,
-        0.003693960856181395, -0.003693960856181395,
-        0.003666256150379283, -0.003666256150379283,
-        0.003638759229866043, -0.003638759229866042
+        0.0625, -0.0625,
+        0.0546875, -0.0546875,
+        0.0478515625, -0.0478515625,
+        0.0418701171875, -0.0418701171875,
+        0.0366363525390625, -0.0366363525390625
     ]
+    scale = 1
+    bias = 0.5
 cat_features_hashes = {
     "2": -1284790409,
     "4": -78686594,
@@ -116,7 +118,7 @@ def apply_catboost_model(float_features, cat_features=[], ntree_start=0, ntree_e
         result += model.leaf_values[current_tree_leaf_values_index + index]
         tree_splits_index += current_tree_depth
         current_tree_leaf_values_index += (1 << current_tree_depth)
-    return result
+    return model.scale * result + model.bias
 
 
 

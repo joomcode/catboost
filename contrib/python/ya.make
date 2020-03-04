@@ -23,7 +23,14 @@ RECURSE(
     setuptools
     six
     subprocess32
+    testpath
 )
+
+IF (OS_WINDOWS)
+    RECURSE(
+    
+)
+ENDIF()
 
 IF (OS_DARWIN)
     RECURSE(

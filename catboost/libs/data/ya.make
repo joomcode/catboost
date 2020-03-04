@@ -19,6 +19,7 @@ SRCS(
     feature_index.cpp
     features_layout.cpp
     feature_names_converter.cpp
+    lazy_columns.cpp
     GLOBAL libsvm_loader.cpp
     load_data.cpp
     loader.cpp
@@ -39,6 +40,7 @@ SRCS(
 
 PEERDIR(
     library/dbg_output
+    library/json
     library/object_factory
     library/pop_count
     library/string_utils/csv
@@ -52,6 +54,7 @@ PEERDIR(
     catboost/private/libs/feature_estimator
     catboost/libs/helpers
     catboost/private/libs/index_range
+    catboost/private/libs/labels
     catboost/libs/logging
     catboost/libs/model
     catboost/private/libs/options

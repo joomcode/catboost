@@ -179,13 +179,14 @@ namespace NThreading {
             UNIT_ASSERT(!promise.HasValue());
             UNIT_ASSERT(promise.HasException());
             UNIT_ASSERT_EXCEPTION(promise.GetValue(), TCustomException);
+            UNIT_ASSERT_EXCEPTION(promise.TryRethrow(), TCustomException);
         }
 
-        Y_UNIT_TEST(ShouldWaitAll) {
+        Y_UNIT_TEST(ShouldWaitExceptionOrAll) {
             TPromise<void> promise1 = NewPromise();
             TPromise<void> promise2 = NewPromise();
 
-            TFuture<void> future = WaitAll(promise1, promise2);
+            TFuture<void> future = WaitExceptionOrAll(promise1, promise2);
             UNIT_ASSERT(!future.HasValue());
 
             promise1.SetValue();
@@ -195,7 +196,7 @@ namespace NThreading {
             UNIT_ASSERT(future.HasValue());
         }
 
-        Y_UNIT_TEST(ShouldWaitAllVector) {
+        Y_UNIT_TEST(ShouldWaitExceptionOrAllVector) {
             TPromise<void> promise1 = NewPromise();
             TPromise<void> promise2 = NewPromise();
 
@@ -203,7 +204,7 @@ namespace NThreading {
             promises.push_back(promise1);
             promises.push_back(promise2);
 
-            TFuture<void> future = WaitAll(promises);
+            TFuture<void> future = WaitExceptionOrAll(promises);
             UNIT_ASSERT(!future.HasValue());
 
             promise1.SetValue();
@@ -213,7 +214,7 @@ namespace NThreading {
             UNIT_ASSERT(future.HasValue());
         }
 
-        Y_UNIT_TEST(ShouldWaitAllVectorWithValueType) {
+        Y_UNIT_TEST(ShouldWaitExceptionOrAllVectorWithValueType) {
             TPromise<int> promise1 = NewPromise<int>();
             TPromise<int> promise2 = NewPromise<int>();
 
@@ -221,7 +222,7 @@ namespace NThreading {
             promises.push_back(promise1);
             promises.push_back(promise2);
 
-            TFuture<void> future = WaitAll(promises);
+            TFuture<void> future = WaitExceptionOrAll(promises);
             UNIT_ASSERT(!future.HasValue());
 
             promise1.SetValue(0);
@@ -231,7 +232,7 @@ namespace NThreading {
             UNIT_ASSERT(future.HasValue());
         }
 
-        Y_UNIT_TEST(ShouldWaitAllList) {
+        Y_UNIT_TEST(ShouldWaitExceptionOrAllList) {
             TPromise<void> promise1 = NewPromise();
             TPromise<void> promise2 = NewPromise();
 
@@ -239,7 +240,7 @@ namespace NThreading {
             promises.push_back(promise1);
             promises.push_back(promise2);
 
-            TFuture<void> future = WaitAll(promises);
+            TFuture<void> future = WaitExceptionOrAll(promises);
             UNIT_ASSERT(!future.HasValue());
 
             promise1.SetValue();
@@ -249,10 +250,10 @@ namespace NThreading {
             UNIT_ASSERT(future.HasValue());
         }
 
-        Y_UNIT_TEST(ShouldWaitAllVectorEmpty) {
+        Y_UNIT_TEST(ShouldWaitExceptionOrAllVectorEmpty) {
             TVector<TFuture<void>> promises;
 
-            TFuture<void> future = WaitAll(promises);
+            TFuture<void> future = WaitExceptionOrAll(promises);
             UNIT_ASSERT(future.HasValue());
         }
 
@@ -430,6 +431,46 @@ namespace NThreading {
             auto future4 = MakeFuture<std::unique_ptr<int>>(nullptr);
             UNIT_ASSERT(future4.HasValue());
             UNIT_CHECK_GENERATED_NO_EXCEPTION(future4.GetValue(), TFutureException);
+        }
+
+        Y_UNIT_TEST(WaitAllowsExtract) {
+            auto future = MakeFuture<int>(42);
+            TVector vec{future, future, future};
+            WaitExceptionOrAll(vec).GetValue();
+            WaitAny(vec).GetValue();
+
+            UNIT_ASSERT_EQUAL(future.ExtractValue(), 42);
+        }
+
+        Y_UNIT_TEST(IgnoreAllowsExtract) {
+            auto future = MakeFuture<int>(42);
+            future.IgnoreResult().GetValue();
+
+            UNIT_ASSERT_EQUAL(future.ExtractValue(), 42);
+        }
+
+        Y_UNIT_TEST(WaitExceptionOrAllException) {
+            auto promise1 = NewPromise();
+            auto promise2 = NewPromise();
+            auto future1 = promise1.GetFuture();
+            auto future2 = promise2.GetFuture();
+            auto wait = WaitExceptionOrAll(future1, future2);
+            promise2.SetException("foo-exception");
+            wait.Wait();
+            UNIT_ASSERT(future2.HasException());
+            UNIT_ASSERT(!future1.HasValue() && !future1.HasException());
+        }
+
+        Y_UNIT_TEST(WaitAllException) {
+            auto promise1 = NewPromise();
+            auto promise2 = NewPromise();
+            auto future1 = promise1.GetFuture();
+            auto future2 = promise2.GetFuture();
+            auto wait = WaitAll(future1, future2);
+            promise2.SetException("foo-exception");
+            UNIT_ASSERT(!wait.HasValue() && !wait.HasException());
+            promise1.SetValue();
+            UNIT_ASSERT_EXCEPTION_CONTAINS(wait.GetValueSync(), yexception, "foo-exception");
         }
     }
 

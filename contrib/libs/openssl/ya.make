@@ -30,17 +30,55 @@ ADDINCL(
     GLOBAL contrib/libs/openssl/include
 )
 
+IF (OS_LINUX)
+    IF (ARCH_ARM64)
+        SET(LINUX_ARM64 yes)
+    ELSEIF(ARCH_ARM7)
+        SET(LINUX_ARMV7 yes)
+    ELSEIF(ARCH_X86_64)
+        SET(LINUX_X86_64 yes)
+    ENDIF()
+ENDIF()
+
+IF (OS_IOS)
+    IF (ARCH_ARM64)
+        SET(IOS_ARM64 yes)
+    ELSEIF(ARCH_ARM7)
+        SET(IOS_ARMV7 yes)
+    ELSEIF(ARCH_X86_64)
+        SET(IOS_X86_64 yes)
+    ELSEIF(ARCH_I386)
+        SET(IOS_I386 yes)
+    ENDIF()
+ENDIF()
+
+IF (OS_ANDROID)
+    IF (ARCH_ARM64)
+        SET(ANDROID_ARM64 yes)
+    ELSEIF(ARCH_ARM7)
+        SET(ANDROID_ARMV7 yes)
+    ELSEIF(ARCH_X86_64)
+        SET(ANDROID_X86_64 yes)
+    ELSEIF(ARCH_I686)
+        SET(ANDROID_I686 yes)
+    ENDIF()
+ENDIF()
+
 CFLAGS(
     -DECP_NISTZ256_ASM
-    -DKECCAK1600_ASM
     -DOPENSSL_BN_ASM_MONT
     -DOPENSSL_CPUID_OBJ
     -DPOLY1305_ASM
     -DSHA1_ASM
     -DSHA256_ASM
     -DSHA512_ASM
-    -DVPAES_ASM
 )
+
+IF (NOT ANDROID_I686)
+    CFLAGS(
+        -DKECCAK1600_ASM
+    )
+ENDIF()
 
 IF (NOT OS_WINDOWS)
     CFLAGS(
@@ -63,7 +101,7 @@ IF (OS_DARWIN AND ARCH_X86_64 OR OS_LINUX AND ARCH_X86_64 OR OS_WINDOWS AND ARCH
     )
 ENDIF()
 
-IF (OS_LINUX AND ARCH_AARCH64 OR OS_LINUX AND ARCH_X86_64)
+IF (OS_LINUX AND ARCH_AARCH64 OR OS_LINUX AND ARCH_X86_64 OR OS_ANDROID)
     CFLAGS(-DOPENSSL_USE_NODELETE)
 ENDIF()
 
@@ -100,8 +138,6 @@ IF (ARCH_TYPE_32)
 ENDIF()
 
 SRCS(
-    engines/e_capi.c
-    engines/e_padlock.c
     ssl/bio_ssl.c
     ssl/d1_lib.c
     ssl/d1_msg.c
@@ -148,7 +184,20 @@ SRCS(
     ssl/tls_srp.c
 )
 
-IF (OS_LINUX AND ARCH_AARCH64 OR OS_LINUX AND ARCH_X86_64 OR OS_LINUX AND ARCH_PPC64LE)
+IF (NOT IOS_ARMV7 AND NOT LINUX_ARMV7)
+    CFLAGS(
+        -DVPAES_ASM
+    )
+ENDIF()
+
+IF (NOT IOS_ARM64 AND NOT IOS_ARMV7)
+    SRCS(
+        engines/e_capi.c
+        engines/e_padlock.c
+    )
+ENDIF()
+
+IF (OS_LINUX AND ARCH_ARM7 OR OS_LINUX AND ARCH_AARCH64 OR OS_LINUX AND ARCH_X86_64 OR OS_LINUX AND ARCH_PPC64LE)
     SRCS(
         engines/e_afalg.c
     )
@@ -169,6 +218,88 @@ ENDIF()
 IF (OS_WINDOWS AND ARCH_X86_64)
     SRCS(
         asm/windows/engines/e_padlock-x86_64.asm
+    )
+ENDIF()
+
+IF (OS_IOS AND ARCH_X86_64)
+    CFLAGS(
+        -DPADLOCK_ASM
+        -D_REENTRANT
+    )
+    SRCS(
+        asm/ios/x86_64/engines/e_padlock-x86_64.s
+        engines/e_dasync.c
+        engines/e_ossltest.c
+    )
+ENDIF()
+
+IF (OS_IOS AND ARCH_I386)
+    CFLAGS(
+        -DPADLOCK_ASM
+        -D_REENTRANT
+    )
+    SRCS(
+        asm/ios/i386/engines/e_padlock-x86.s
+        engines/e_dasync.c
+        engines/e_ossltest.c
+    )
+ENDIF()
+
+IF (OS_ANDROID AND ARCH_X86_64)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -DOPENSSL_IA32_SSE2
+        -DOPENSSL_BN_ASM_MONT5
+        -DOPENSSL_BN_ASM_GF2m
+        -DDRC4_ASM
+        -DMD5_ASM
+        -DGHASH_ASM
+        -DX25519_ASM
+        -D__ANDROID_API__=21
+    )
+    SRCS(
+        asm/android/x86_64/engines/e_padlock-x86_64.s
+    )
+ENDIF()
+
+IF (OS_ANDROID AND ARCH_I686)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -DOPENSSL_BN_ASM_PART_WORDS
+        -DOPENSSL_IA32_SSE2
+        -DOPENSSL_BN_ASM_MONT
+        -DOPENSSL_BN_ASM_GF2m
+        -DRC4_ASM
+        -DMD5_ASM
+        -DRMD160_ASM
+        -DVPAES_ASM
+        -DWHIRLPOOL_ASM
+        -DGHASH_ASM
+        -D__ANDROID_API__=15
+    )
+    SRCS(
+        asm/android/i686/engines/e_padlock-x86.s
+    )
+ENDIF()
+
+IF (OS_ANDROID AND ARCH_ARM7)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -DOPENSSL_BN_ASM_GF2m
+        -DKECCAK1600_ASM
+        -DAES_ASM
+        -DBSAES_ASM
+        -DGHASH_ASM
+        -D__ANDROID_API__=15
+    )
+ENDIF()
+
+IF (OS_ANDROID AND ARCH_ARM64)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -DKECCAK1600_ASM
+        -DVPAES_ASM
+        -D__ANDROID_API__=21
     )
 ENDIF()
 

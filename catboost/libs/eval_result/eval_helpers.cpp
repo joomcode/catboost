@@ -3,19 +3,21 @@
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/model/eval_processing.h>
 #include <catboost/libs/logging/logging.h>
-#include <catboost/private/libs/labels/label_helper_builder.h>
+#include <catboost/private/libs/labels/external_label_helper.h>
 
 #include <util/generic/array_ref.h>
 #include <util/generic/utility.h>
 #include <util/generic/xrange.h>
 #include <util/string/cast.h>
 
+#include <cmath>
 #include <limits>
 
-
-static TVector<TVector<double>> CalcSoftmax(
+template <typename Function>
+static TVector<TVector<double>> CalcSomeSoftmax(
     const TVector<TVector<double>>& approx,
-    NPar::TLocalExecutor* executor)
+    NPar::TLocalExecutor* executor,
+    Function func)
 {
     TVector<TVector<double>> probabilities = approx;
     probabilities.resize(approx.size());
@@ -23,28 +25,50 @@ static TVector<TVector<double>> CalcSoftmax(
     const int executorThreadCount = executor ? executor->GetThreadCount() : 0;
     const int threadCount = executorThreadCount + 1;
     const int blockSize = (approx[0].ysize() + threadCount - 1) / threadCount;
-    const auto calcSoftmaxInBlock = [&](const int blockId) {
+    const auto calcSomeSoftmaxInBlock = [&](const int blockId) {
         int lastLineId = Min((blockId + 1) * blockSize, approx[0].ysize());
         TVector<double> line;
         line.yresize(approx.size());
-        TVector<double> softmax;
-        softmax.yresize(approx.size());
+        TVector<double> someSoftmax;
+        someSoftmax.yresize(approx.size());
         for (int lineInd = blockId * blockSize; lineInd < lastLineId; ++lineInd) {
             for (int dim = 0; dim < approx.ysize(); ++dim) {
                 line[dim] = approx[dim][lineInd];
             }
-            CalcSoftmax(line, softmax);
+            func(line, someSoftmax);
             for (int dim = 0; dim < approx.ysize(); ++dim) {
-                probabilities[dim][lineInd] = softmax[dim];
+                probabilities[dim][lineInd] = someSoftmax[dim];
             }
         }
     };
     if (executor) {
-        executor->ExecRange(calcSoftmaxInBlock, 0, threadCount, NPar::TLocalExecutor::WAIT_COMPLETE);
+        executor->ExecRange(calcSomeSoftmaxInBlock, 0, threadCount, NPar::TLocalExecutor::WAIT_COMPLETE);
     } else {
-        calcSoftmaxInBlock(0);
+        calcSomeSoftmaxInBlock(0);
     }
     return probabilities;
+}
+
+static TVector<TVector<double>> CalcSoftmax(
+    const TVector<TVector<double>>& approx,
+    NPar::TLocalExecutor* executor)
+{
+    return CalcSomeSoftmax(
+        approx, executor,
+        [](const TConstArrayRef<double> approx, TArrayRef<double> target) {
+            CalcSoftmax(approx, target);
+        });
+}
+
+static TVector<TVector<double>> CalcLogSoftmax(
+    const TVector<TVector<double>>& approx,
+    NPar::TLocalExecutor* executor)
+{
+    return CalcSomeSoftmax(
+        approx, executor,
+        [](const TConstArrayRef<double> approx, TArrayRef<double> target) {
+            CalcLogSoftmax(approx, target);
+        });
 }
 
 static TVector<int> SelectBestClass(
@@ -105,32 +129,6 @@ TVector<TVector<double>> MakeExternalApprox(
     return externalApprox;
 }
 
-TVector<TString> ConvertTargetToExternalName(
-    const TVector<float>& target,
-    const TExternalLabelsHelper& externalLabelsHelper
-) {
-    TVector<TString> convertedTarget(target.ysize());
-
-    if (externalLabelsHelper.IsInitialized()) {
-        for (int targetIdx = 0; targetIdx < target.ysize(); ++targetIdx) {
-            convertedTarget[targetIdx] = externalLabelsHelper.GetVisibleClassNameFromLabel(target[targetIdx]);
-        }
-    } else {
-        for (int targetIdx = 0; targetIdx < target.ysize(); ++targetIdx) {
-            convertedTarget[targetIdx] = ToString<float>(target[targetIdx]);
-        }
-    }
-
-    return convertedTarget;
-}
-
-TVector<TString> ConvertTargetToExternalName(
-    const TVector<float>& target,
-    const TFullModel& model
-) {
-    const auto& externalLabelsHelper = BuildLabelsHelper<TExternalLabelsHelper>(model);
-    return ConvertTargetToExternalName(target, externalLabelsHelper);
-}
 
 TVector<TVector<double>> PrepareEvalForInternalApprox(
     const EPredictionType predictionType,
@@ -149,11 +147,11 @@ TVector<TVector<double>> PrepareEvalForInternalApprox(
     const TVector<TVector<double>>& approx,
     NPar::TLocalExecutor* localExecutor
 ) {
-    const auto& externalLabelsHelper = BuildLabelsHelper<TExternalLabelsHelper>(model);
-    CB_ENSURE(externalLabelsHelper.IsInitialized() == IsMulticlass(approx),
-              "Inappropriate usage of visible label helper: it MUST be initialized ONLY for multiclass problem");
-    const auto& externalApprox = externalLabelsHelper.IsInitialized() ?
-                                 MakeExternalApprox(approx, externalLabelsHelper) : approx;
+    const TExternalLabelsHelper externalLabelsHelper(model);
+    const auto& externalApprox
+        = (externalLabelsHelper.IsInitialized() && (externalLabelsHelper.GetExternalApproxDimension() > 1)) ?
+            MakeExternalApprox(approx, externalLabelsHelper)
+            : approx;
     return PrepareEval(predictionType, model.GetLossFunctionName(), externalApprox, localExecutor);
 }
 
@@ -174,22 +172,37 @@ void PrepareEval(const EPredictionType predictionType,
                  TVector<TVector<double>>* result) {
 
     switch (predictionType) {
+        case EPredictionType::LogProbability:
         case EPredictionType::Probability:
             if (IsMulticlass(approx)) {
                 if (lossFunctionName == "MultiClassOneVsAll") {
                     result->resize(approx.size());
-                    for (auto dim : xrange(approx.size())) {
-                        (*result)[dim] = CalcSigmoid(approx[dim]);
+                    if (predictionType == EPredictionType::Probability) {
+                        for (auto dim : xrange(approx.size())) {
+                            (*result)[dim] = CalcSigmoid(approx[dim]);
+                        }
+                    } else {
+                        for (auto dim : xrange(approx.size())) {
+                            (*result)[dim] = CalcLogSigmoid(approx[dim]);
+                        }
                     }
                 } else {
                     if (lossFunctionName.empty()) {
                         CATBOOST_WARNING_LOG << "Optimized loss function was not saved in the model. Probabilities will be calculated \
                                                  under the assumption that it is MultiClass loss function" << Endl;
                     }
-                    *result = CalcSoftmax(approx, executor);
+                    if (predictionType == EPredictionType::Probability) {
+                        *result = CalcSoftmax(approx, executor);
+                    } else {
+                        *result = CalcLogSoftmax(approx, executor);
+                    }
                 }
             } else {
-                *result = {CalcSigmoid(approx[0])};
+                if (predictionType == EPredictionType::Probability) {
+                    *result = {CalcSigmoid(approx[0])};
+                } else {
+                    *result = {CalcLogSigmoid(InvertSign(approx[0])), CalcLogSigmoid(approx[0])};
+                }
             }
             break;
         case EPredictionType::Class:

@@ -1,13 +1,15 @@
 #include "options_helper.h"
 
+#include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/vector_helpers.h>
 #include <catboost/private/libs/options/enum_helpers.h>
 #include <catboost/private/libs/options/defaults_helper.h>
 
-#include <util/system/types.h>
-#include <util/generic/ymath.h>
+#include <util/generic/algorithm.h>
 #include <util/generic/maybe.h>
+#include <util/generic/ymath.h>
 #include <util/string/builder.h>
+#include <util/system/types.h>
 
 
 static double Round(double number, int precision) {
@@ -109,37 +111,174 @@ static void UpdateUseBestModel(bool learningContinuation, bool hasTest, bool has
     }
 }
 
+namespace {
+    struct TLearningRateCoefficients {
+        // learning_rate = exp(B + A log size + C log iter - C log 1000);
+        double DatasetSizeCoeff = 0; // A
+        double DatasetSizeConst = 0; // B
+        double IterCountCoeff = 0; // C
+        double IterCountConst = 0; // D
+    };
+
+    enum class ETargetType {
+        RMSE,
+        Logloss,
+        MultiClass,
+        Unknown
+    };
+
+    enum class EUseBestModel {
+        False,
+        True
+    };
+
+    enum class EBoostFromAverage {
+        False,
+        True
+    };
+
+    struct TAutoLearningRateKey {
+        ETargetType TargetType;
+        ETaskType TaskType;
+        EUseBestModel UseBestModel;
+        EBoostFromAverage BoostFromAverage;
+
+        TAutoLearningRateKey() {}
+
+        TAutoLearningRateKey(ETargetType targetType, ETaskType taskType, EUseBestModel useBestModel,
+                             EBoostFromAverage boostFromAverage)
+            : TargetType(targetType), TaskType(taskType), UseBestModel(useBestModel),
+              BoostFromAverage(boostFromAverage) {}
+
+        TAutoLearningRateKey(ETargetType targetType, ETaskType taskType, bool useBestModel, bool boostFromAverage)
+            : TargetType(targetType), TaskType(taskType),
+              UseBestModel(useBestModel ? EUseBestModel::True : EUseBestModel::False),
+              BoostFromAverage(boostFromAverage ? EBoostFromAverage::True : EBoostFromAverage::False) {}
+
+        bool operator==(const TAutoLearningRateKey &rhs) const {
+            return std::tie(TargetType, TaskType, UseBestModel, BoostFromAverage)
+                   == std::tie(rhs.TargetType, rhs.TaskType, rhs.UseBestModel, rhs.BoostFromAverage);
+        }
+
+        size_t GetHash() const {
+            return MultiHash(TargetType, TaskType, UseBestModel, BoostFromAverage);
+        }
+    };
+};
+
+template<>
+struct THash<TAutoLearningRateKey> {
+    inline size_t operator()(const TAutoLearningRateKey& lrKey) const noexcept {
+        return lrKey.GetHash();
+    }
+};
+
+namespace {
+    struct TAutoLRParamsGuesser {
+    private:
+
+        static ETargetType GetTargetType(ELossFunction lossFunction) {
+            if (lossFunction == ELossFunction::Logloss) {
+                return ETargetType::Logloss;
+            } else if (lossFunction == ELossFunction::MultiClass) {
+                return ETargetType::MultiClass;
+            } else if (lossFunction == ELossFunction::RMSE) {
+                return ETargetType::RMSE;
+            }
+            return ETargetType::Unknown;
+        }
+
+    public:
+        TAutoLRParamsGuesser() {
+            Coefficients[TAutoLearningRateKey(ETargetType::Logloss, ETaskType::CPU, EUseBestModel::True, EBoostFromAverage::True)] =
+                {0.246, -5.127, -0.451, 0.978};
+            Coefficients[TAutoLearningRateKey(ETargetType::Logloss, ETaskType::CPU, EUseBestModel::False, EBoostFromAverage::True)] =
+                {0.408, -7.299, -0.928, 2.701};
+            Coefficients[TAutoLearningRateKey(ETargetType::Logloss, ETaskType::CPU, EUseBestModel::True, EBoostFromAverage::False)] =
+                {0.247, -5.158, -0.435, 0.934};
+            Coefficients[TAutoLearningRateKey(ETargetType::Logloss, ETaskType::CPU, EUseBestModel::False, EBoostFromAverage::False)] =
+                {0.427, -7.525, -0.917, 2.63};
+
+            Coefficients[TAutoLearningRateKey(ETargetType::MultiClass, ETaskType::CPU, EUseBestModel::True, EBoostFromAverage::False)] =
+                {0.02, -2.364, -0.382, 0.924};
+            Coefficients[TAutoLearningRateKey(ETargetType::MultiClass, ETaskType::CPU, EUseBestModel::False, EBoostFromAverage::False)] =
+                {0.051, -2.889, -0.845, 2.928};
+
+            Coefficients[TAutoLearningRateKey(ETargetType::RMSE, ETaskType::CPU, EUseBestModel::True, EBoostFromAverage::True)] =
+                {0.157, -4.062, -0.61, 1.557};
+            Coefficients[TAutoLearningRateKey(ETargetType::RMSE, ETaskType::CPU, EUseBestModel::False, EBoostFromAverage::True)] =
+                {0.158, -4.287, -0.813, 2.571};
+            Coefficients[TAutoLearningRateKey(ETargetType::RMSE, ETaskType::CPU, EUseBestModel::True, EBoostFromAverage::False)] =
+                {0.189, -4.383, -0.623, 1.439};
+            Coefficients[TAutoLearningRateKey(ETargetType::RMSE, ETaskType::CPU, EUseBestModel::False, EBoostFromAverage::False)] =
+                {0.178, -4.473, -0.76, 2.133};
+
+            Coefficients[TAutoLearningRateKey(ETargetType::Logloss, ETaskType::GPU, EUseBestModel::True, EBoostFromAverage::True)] =
+                {0.04, -3.226, -0.488, 0.758};
+            Coefficients[TAutoLearningRateKey(ETargetType::Logloss, ETaskType::GPU, EUseBestModel::False, EBoostFromAverage::True)] =
+                {0.427, -7.316, -0.907, 2.354};
+            Coefficients[TAutoLearningRateKey(ETargetType::Logloss, ETaskType::GPU, EUseBestModel::True, EBoostFromAverage::False)] =
+                {-0.085, -2.055, -0.414, 0.427};
+            Coefficients[TAutoLearningRateKey(ETargetType::Logloss, ETaskType::GPU, EUseBestModel::False, EBoostFromAverage::False)] =
+                {-0.055, -3.01, -0.896, 2.366};
+
+            Coefficients[TAutoLearningRateKey(ETargetType::MultiClass, ETaskType::GPU, EUseBestModel::True, EBoostFromAverage::False)] =
+                {0.101, -2.95, -0.437, 1.136};
+            Coefficients[TAutoLearningRateKey(ETargetType::MultiClass, ETaskType::GPU, EUseBestModel::False, EBoostFromAverage::False)] =
+                {0.204, -4.144, -0.833, 2.889};
+
+
+            Coefficients[TAutoLearningRateKey(ETargetType::RMSE, ETaskType::GPU, EUseBestModel::True, EBoostFromAverage::True)] =
+                {0.158, -3.762 , -0.377, 0.392};
+            Coefficients[TAutoLearningRateKey(ETargetType::RMSE, ETaskType::GPU, EUseBestModel::False, EBoostFromAverage::True)] =
+                {0.171, -4.015, -0.599, 1.561};
+            Coefficients[TAutoLearningRateKey(ETargetType::RMSE, ETaskType::GPU, EUseBestModel::True, EBoostFromAverage::False)] =
+                {0.186, -4.065, -0.512, 1.062};
+            Coefficients[TAutoLearningRateKey(ETargetType::RMSE, ETaskType::GPU, EUseBestModel::False, EBoostFromAverage::False)] =
+                {0.194, -4.251, -0.61, 1.536};
+        }
+
+        static bool NeedToUpdate(ETaskType taskType, ELossFunction lossFunction, bool useBestModel, bool boostFromAverage) {
+            const auto& wat = Singleton<TAutoLRParamsGuesser>();
+            return wat->Coefficients.contains(TAutoLearningRateKey(GetTargetType(lossFunction), taskType, useBestModel, boostFromAverage));
+        }
+
+
+        static double GetLearningRate(
+            ETaskType taskType, ELossFunction lossFunction, bool useBestModel, bool boostFromAverage, double iterationCount, double learnObjectCount
+        ) {
+            const auto& wat = Singleton<TAutoLRParamsGuesser>();
+            TLearningRateCoefficients& coeffs = wat->Coefficients.at(TAutoLearningRateKey(GetTargetType(lossFunction), taskType, useBestModel, boostFromAverage));
+
+            const double customIterationConstant = exp(coeffs.IterCountCoeff * log(iterationCount) + coeffs.IterCountConst);
+            const double defaultIterationConstant = exp(coeffs.IterCountCoeff * log(1000) + coeffs.IterCountConst);
+            const double defaultLearningRate = exp(coeffs.DatasetSizeCoeff * log(learnObjectCount) + coeffs.DatasetSizeConst);
+            return Round(Min(defaultLearningRate * customIterationConstant / defaultIterationConstant, 0.5), /*precision=*/6);
+        }
+
+    private:
+        THashMap<TAutoLearningRateKey, TLearningRateCoefficients> Coefficients;
+    };
+};
+
 static void UpdateLearningRate(ui32 learnObjectCount, bool useBestModel, NCatboostOptions::TCatBoostOptions* catBoostOptions) {
+    const bool boostFromAverage = catBoostOptions->BoostingOptions->BoostFromAverage.Get();
     auto& learningRate = catBoostOptions->BoostingOptions->LearningRate;
     const int iterationCount = catBoostOptions->BoostingOptions->IterationCount;
-    const bool doUpdateLearningRate = (
+    const auto lossFunction = catBoostOptions->LossFunctionDescription->GetLossFunction();
+    const auto taskType = catBoostOptions->GetTaskType();
+
+    if (
         learningRate.NotSet() &&
-        IsBinaryClassOnlyMetric(catBoostOptions->LossFunctionDescription->GetLossFunction()) &&
         catBoostOptions->ObliviousTreeOptions->LeavesEstimationMethod.NotSet() &&
         catBoostOptions->ObliviousTreeOptions->LeavesEstimationIterations.NotSet() &&
         catBoostOptions->ObliviousTreeOptions->L2Reg.NotSet()
-    );
-    if (doUpdateLearningRate) {
-        double a = 0, b = 0, c = 0, d = 0;
-        if (useBestModel) {
-            a = 0.105;
-            b = -3.276;
-            c = -0.428;
-            d = 0.911;
-        } else {
-            a = 0.283;
-            b = -6.044;
-            c = -0.891;
-            d = 2.620;
+    ) {
+        TAutoLRParamsGuesser lrGuesser;
+        if (lrGuesser.NeedToUpdate(taskType, lossFunction, useBestModel, boostFromAverage)) {
+            learningRate = lrGuesser.GetLearningRate(taskType, lossFunction, useBestModel, boostFromAverage, iterationCount, learnObjectCount);
+            CATBOOST_NOTICE_LOG << "Learning rate set to " << learningRate << Endl;
         }
-        // TODO(nikitxskv): Don't forget to change formula when add l2-leaf-reg depending on weights.
-        const double customIterationConstant = exp(c * log(iterationCount) + d);
-        const double defaultIterationConstant = exp(c * log(1000) + d);
-        const double defaultLearningRate = exp(a * log(learnObjectCount) + b);
-        learningRate = Min(defaultLearningRate * customIterationConstant / defaultIterationConstant, 0.5);
-        learningRate = Round(learningRate, /*precision=*/6);
-
-        CATBOOST_NOTICE_LOG << "Learning rate set to " << learningRate << Endl;
     }
 }
 
@@ -169,37 +308,20 @@ static void UpdateAndValidateMonotoneConstraints(
     if (catBoostOptions->GetTaskType() != ETaskType::CPU) {
         return;
     }
-    TVector<int>* monotoneConstraints = &catBoostOptions->ObliviousTreeOptions->MonotoneConstraints.Get();
-    CB_ENSURE(
-        monotoneConstraints->size() <= featuresLayout.GetExternalFeatureCount(),
-        "length of monotone constraints vector exceeds number of features."
-    );
-    CB_ENSURE(
-        AllOf(
-            xrange(monotoneConstraints->size()),
-            [&] (int featureIndex) {
-                return (
-                    (*monotoneConstraints)[featureIndex] == 0 ||
-                    featuresLayout.GetExternalFeatureType(featureIndex) == EFeatureType::Float
-                );
-            }
-        ),
-        "Monotone constraints may be imposed only on float features."
-    );
+    auto& monotoneConstraints = catBoostOptions->ObliviousTreeOptions->MonotoneConstraints.Get();
 
-    // Ensure that monotoneConstraints size is zero or equals to the number of float features.
-    if (AllOf(*monotoneConstraints, [] (int constraint) { return constraint == 0; })) {
-        monotoneConstraints->clear();
-    } else {
-        TVector<int> floatFeatureMonotonicConstraints(featuresLayout.GetFloatFeatureCount(), 0);
-        ui32 floatFeatureIdx = 0;
-        for (ui32 featureIdx : xrange(monotoneConstraints->size())) {
-            if (featuresLayout.GetExternalFeatureType(featureIdx) == EFeatureType::Float) {
-                floatFeatureMonotonicConstraints[floatFeatureIdx++] = (*monotoneConstraints)[featureIdx];
-            }
+    TMap<ui32, int> floatFeatureMonotonicConstraints;
+    for (auto [featureIdx, constraint] : monotoneConstraints) {
+        if (constraint != 0) {
+            CB_ENSURE(
+                featuresLayout.GetExternalFeatureType(featureIdx) == EFeatureType::Float,
+                "Monotone constraints may be imposed only on float features."
+            );
+            ui32 floatFeatureIdx = featuresLayout.GetInternalFeatureIdx(featureIdx);
+            floatFeatureMonotonicConstraints[floatFeatureIdx] = constraint;
         }
-        *monotoneConstraints = floatFeatureMonotonicConstraints;
     }
+    monotoneConstraints = floatFeatureMonotonicConstraints;
 }
 
 static void DropModelShrinkageIfBaselineUsed(
@@ -234,8 +356,10 @@ static void AdjustBoostFromAverageDefaultValue(
     }
     if (catBoostOptions->SystemOptions->IsSingleHost()
         && !continueFromModel
-        // boost from average is enabled by default only for RMSE now
-        && catBoostOptions->LossFunctionDescription->GetLossFunction() == ELossFunction::RMSE
+        // boost from average is enabled by default only for RMSE, MAE, Quantile and MAPE now
+        && EqualToOneOf(
+            catBoostOptions->LossFunctionDescription->GetLossFunction(),
+            ELossFunction::RMSE, ELossFunction::MAE, ELossFunction::Quantile, ELossFunction::MAPE)
     ) {
         catBoostOptions->BoostingOptions->BoostFromAverage.Set(true);
     }
@@ -244,11 +368,11 @@ static void AdjustBoostFromAverageDefaultValue(
     }
 }
 
-static void UpdateMinTokenOccurrenceDefaultValue(
+static void UpdateDictionaryDefaults(
     ui64 learnPoolSize,
     NCatboostOptions::TCatBoostOptions* catBoostOptions
 ) {
-    const ui64 minTokenOccurence = (learnPoolSize < 1000) ? 1 : 50;
+    const ui64 minTokenOccurence = (learnPoolSize < 1000) ? 1 : 5;
     auto& textProcessingOptions = catBoostOptions->DataProcessingOptions->TextProcessingOptions;
     textProcessingOptions->SetDefaultMinTokenOccurrence(minTokenOccurence);
 }
@@ -270,7 +394,7 @@ void SetDataDependentDefaults(
     UpdateLearningRate(learnPoolSize, useBestModel->Get(), catBoostOptions);
     UpdateOneHotMaxSize(
         trainDataMetaInfo.MaxCatFeaturesUniqValuesOnLearn,
-        trainDataMetaInfo.HasTarget,
+        trainDataMetaInfo.TargetCount > 0,
         catBoostOptions
     );
     UpdateYetiRankEvalMetric(
@@ -282,5 +406,6 @@ void SetDataDependentDefaults(
     UpdateAndValidateMonotoneConstraints(*trainDataMetaInfo.FeaturesLayout.Get(), catBoostOptions);
     DropModelShrinkageIfBaselineUsed(trainDataMetaInfo, continueFromModel || continueFromProgress, catBoostOptions);
     AdjustBoostFromAverageDefaultValue(trainDataMetaInfo, testDataMetaInfo, continueFromModel, catBoostOptions);
-    UpdateMinTokenOccurrenceDefaultValue(learnPoolSize, catBoostOptions);
+    UpdateDictionaryDefaults(learnPoolSize, catBoostOptions);
+    UpdateSampleRateOption(learnPoolSize, catBoostOptions);
 }

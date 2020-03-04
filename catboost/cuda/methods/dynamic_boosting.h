@@ -538,7 +538,7 @@ namespace NCatboostCuda {
                     "You can't use boost_from_average with baseline now.");
                 state->StartingPoint = NCB::CalcOptimumConstApprox(
                     CatBoostOptions.LossFunctionDescription,
-                    DataProvider->TargetData->GetTarget().GetOrElse(TConstArrayRef<float>()),
+                    DataProvider->TargetData->GetOneDimensionalTarget().GetOrElse(TConstArrayRef<float>()),
                     GetWeights(*DataProvider->TargetData));
             }
 
@@ -631,7 +631,7 @@ namespace NCatboostCuda {
                 TestDataProvider ? &state->TestCursor : nullptr,
                 state->BestTestCursor.Get(),
                 resultModel.Get());
-            resultModel->ShiftFirstWeakModelValues(state->StartingPoint.GetOrElse(0.0f));
+            resultModel->SetBias(state->StartingPoint.GetOrElse(0.0f));
             return resultModel;
         }
 

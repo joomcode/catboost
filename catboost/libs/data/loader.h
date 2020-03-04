@@ -15,10 +15,17 @@
 #include <library/object_factory/object_factory.h>
 #include <library/threading/local_executor/local_executor.h>
 
+#include <util/generic/maybe.h>
 #include <util/generic/strbuf.h>
 #include <util/generic/string.h>
 #include <util/generic/vector.h>
 #include <util/generic/ylimits.h>
+
+
+namespace NJson {
+    class TJsonValue;
+}
+
 
 namespace NCB {
 
@@ -42,7 +49,9 @@ namespace NCB {
         TPathWithScheme PairsFilePath;
         TPathWithScheme GroupWeightsFilePath;
         TPathWithScheme BaselineFilePath;
-        const TVector<TString>& ClassNames;
+        TPathWithScheme TimestampsFilePath;
+        TPathWithScheme FeatureNamesPath;
+        const TVector<NJson::TJsonValue>& ClassLabels;
         TDsvFormatOptions PoolFormat;
         THolder<ICdProvider> CdProvider;
         TVector<ui32> IgnoredFeatures;
@@ -138,10 +147,14 @@ namespace NCB {
      * init ignored features information in dataMetaInfo and ignoredFeaturesMask
      * from ignoredFeaturesFlatIndices
      *
+     * it is possible to redefine default message when all features are ignored by specifying non-Nothing()
+     *   allFeaturesIgnoredMessage parameter
+     *
      * note that ignoredFeaturesFlatIndices can contain indices beyond featuresCount in dataMetaInfo
      */
     void ProcessIgnoredFeaturesList(
         TConstArrayRef<ui32> ignoredFeatures, // [flatFeatureIdx]
+        TMaybe<TString> allFeaturesIgnoredMessage,
         TDataMetaInfo* dataMetaInfo, // inout, must be inited, only ignored flags are updated
         TVector<bool>* ignoredFeaturesMask // [flatFeatureIdx]
     );
@@ -165,6 +178,21 @@ namespace NCB {
         TDatasetSubset loadSubset,
         const TVector<TString>& classNames,
         IDatasetVisitor* visitor
+    );
+    void SetTimestamps(
+        const TPathWithScheme& timestampsPath,
+        ui32 objectCount,
+        TDatasetSubset loadSubset,
+        IDatasetVisitor* visitor
+    );
+
+    // returns empty vector if featureNamesPath is not inited
+    TVector<TString> LoadFeatureNames(const TPathWithScheme& featureNamesPath);
+
+    TVector<TString> GetFeatureNames(
+        const TDataColumnsMetaInfo& columnsDescription,
+        const TMaybe<TVector<TString>>& headerColumns,
+        const TPathWithScheme& featureNamesPath // can be uninited
     );
 
     /*
@@ -196,7 +224,7 @@ namespace NCB {
     protected:
         template <class TReadDataFunc, class TReadBaselineFunc>
         void Do(TReadDataFunc readFunc, TReadBaselineFunc readBaselineFunc, IRawObjectsOrderDataVisitor* visitor) {
-            StartBuilder(false, GetObjectCount(), 0, visitor);
+            StartBuilder(false, GetObjectCountSynchronized(), 0, visitor);
             while (AsyncRowProcessor.ReadBlock(readFunc)) {
                 CB_ENSURE(!Args.BaselineFilePath.Inited() || AsyncBaselineRowProcessor.ReadBlock(readBaselineFunc), "Failed to read baseline");
                 ProcessBlock(visitor);
@@ -226,8 +254,8 @@ namespace NCB {
             return true;
         }
 
-
-        virtual ui32 GetObjectCount() = 0;
+        // Some implementations use caching with synchronized access
+        virtual ui32 GetObjectCountSynchronized() = 0;
 
         virtual void StartBuilder(bool inBlock,
                                   ui32 objectCount, ui32 offset,
@@ -237,8 +265,10 @@ namespace NCB {
 
         virtual void FinalizeBuilder(bool inBlock, IRawObjectsOrderDataVisitor* visitor) {
             if (!inBlock) {
-                SetGroupWeights(Args.GroupWeightsFilePath, GetObjectCount(), Args.DatasetSubset, visitor);
-                SetPairs(Args.PairsFilePath, GetObjectCount(), Args.DatasetSubset, visitor);
+                const ui32 objectCount = GetObjectCountSynchronized();
+                SetGroupWeights(Args.GroupWeightsFilePath, objectCount, Args.DatasetSubset, visitor);
+                SetPairs(Args.PairsFilePath, objectCount, Args.DatasetSubset, visitor);
+                SetTimestamps(Args.TimestampsFilePath, objectCount, Args.DatasetSubset, visitor);
             }
             visitor->Finish();
         }

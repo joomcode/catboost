@@ -6,8 +6,9 @@
 
 TConstArrayRef<ELossFunction> GetAllObjectives();
 
-// metric type (regression, classification(bin, multi), ranking(pair, group))
+// metric type (regression, multi-regression, classification(bin, multi), ranking(pair, group))
 bool IsRegressionMetric(ELossFunction lossFunction);
+bool IsMultiRegressionMetric(ELossFunction loss);
 
 bool IsClassificationMetric(ELossFunction lossFunction);
 bool IsBinaryClassCompatibleMetric(ELossFunction lossFunction);
@@ -29,6 +30,8 @@ bool IsClassificationObjective(ELossFunction lossFunction);
 bool IsClassificationObjective(TStringBuf lossDescription);
 bool IsRegressionObjective(ELossFunction lossFunction);
 bool IsRegressionObjective(TStringBuf lossDescription);
+bool IsMultiRegressionObjective(ELossFunction loss);
+bool IsMultiRegressionObjective(TStringBuf loss);
 
 // various
 bool UsesPairsForCalculation(ELossFunction lossFunction);
@@ -55,8 +58,6 @@ bool IsUserDefined(ELossFunction lossFunction);
 
 bool IsEmbeddingFeatureEstimator(EFeatureCalcerType estimatorType);
 
-bool ShouldSkipFstrGrowPolicy(EGrowPolicy growPolicy);
-
 bool IsBuildingFullBinaryTree(EGrowPolicy growPolicy);
 
 bool IsPlainOnlyModeScoreFunction(EScoreFunction scoreFunction);
@@ -64,3 +65,8 @@ bool IsPlainOnlyModeScoreFunction(EScoreFunction scoreFunction);
 bool ShouldBinarizeLabel(ELossFunction lossFunction);
 
 bool IsCvStratifiedObjective(TStringBuf lossDescription);
+
+EFstrType AdjustFeatureImportanceType(EFstrType type, ELossFunction lossFunction);
+EFstrType AdjustFeatureImportanceType(EFstrType type, TStringBuf lossDescription);
+
+bool IsInternalFeatureImportanceType(EFstrType type);

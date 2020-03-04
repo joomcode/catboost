@@ -1905,11 +1905,6 @@ async_gen_athrow_throw(PyAsyncGenAThrow *o, PyObject *args)
 {
     PyObject *retval;
 
-    if (o->agt_state == AWAITABLE_STATE_INIT) {
-        PyErr_SetString(PyExc_RuntimeError, NON_INIT_CORO_MSG);
-        return NULL;
-    }
-
     if (o->agt_state == AWAITABLE_STATE_CLOSED) {
         PyErr_SetNone(PyExc_StopIteration);
         return NULL;
@@ -1924,6 +1919,17 @@ async_gen_athrow_throw(PyAsyncGenAThrow *o, PyObject *args)
             Py_DECREF(retval);
             PyErr_SetString(PyExc_RuntimeError, ASYNC_GEN_IGNORED_EXIT_MSG);
             return NULL;
+        }
+        if (PyErr_ExceptionMatches(PyExc_StopAsyncIteration) ||
+            PyErr_ExceptionMatches(PyExc_GeneratorExit))
+        {
+            /* when aclose() is called we don't want to propagate
+               StopAsyncIteration or GeneratorExit; just raise
+               StopIteration, signalling that this 'aclose()' await
+               is done.
+            */
+            PyErr_Clear();
+            PyErr_SetNone(PyExc_StopIteration);
         }
         return retval;
     }

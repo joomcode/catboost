@@ -7,7 +7,7 @@ namespace NCB::NModelEvaluation {
     namespace NDetail {
         template <typename TFloatFeatureAccessor, typename TCatFeatureAccessor, typename TTextFeatureAccessor>
         inline void CalcGeneric(
-            const TObliviousTrees& trees,
+            const TModelTrees& trees,
             const TIntrusivePtr<ICtrProvider>& ctrProvider,
             const TIntrusivePtr<TTextProcessingCollection>& textProcessingCollection,
             TFloatFeatureAccessor floatFeatureAccessor,
@@ -22,16 +22,18 @@ namespace NCB::NModelEvaluation {
         ) {
             const size_t blockSize = Min(FORMULA_EVALUATION_BLOCK_SIZE, docCount);
             auto calcTrees = GetCalcTreesFunction(trees, blockSize);
-            std::fill(results.begin(), results.end(), 0.0);
             if (trees.GetTreeCount() == 0) {
+                Fill(results.begin(), results.end(), trees.GetScaleAndBias().Bias);
                 return;
             }
+            Fill(results.begin(), results.end(), 0.0);
             TVector<TCalcerIndexType> indexesVec(blockSize);
             TEvalResultProcessor resultProcessor(
                 docCount,
                 results,
                 predictionType,
-                trees.ApproxDimension,
+                trees.GetScaleAndBias(),
+                trees.GetDimensionsCount(),
                 blockSize
             );
             ui32 blockId = 0;
@@ -55,7 +57,7 @@ namespace NCB::NModelEvaluation {
                         treeEnd,
                         blockResultsView.data()
                     );
-                    resultProcessor.PostprocessBlock(blockId);
+                    resultProcessor.PostprocessBlock(blockId, treeStart);
                     ++blockId;
                 },
                 featureInfo
@@ -65,7 +67,7 @@ namespace NCB::NModelEvaluation {
         class TCpuEvaluator final : public IModelEvaluator {
         public:
             explicit TCpuEvaluator(const TFullModel& fullModel)
-                : ObliviousTrees(fullModel.ObliviousTrees)
+                : ModelTrees(fullModel.ModelTrees)
                 , CtrProvider(fullModel.CtrProvider)
                 , TextProcessingCollection(fullModel.TextProcessingCollection)
             {}
@@ -83,7 +85,7 @@ namespace NCB::NModelEvaluation {
             }
 
             size_t GetTreeCount() const {
-                return ObliviousTrees->GetTreeCount();
+                return ModelTrees->GetTreeCount();
             }
 
             TModelEvaluatorPtr Clone() const override {
@@ -91,7 +93,7 @@ namespace NCB::NModelEvaluation {
             }
 
             i32 GetApproxDimension() const override {
-                return ObliviousTrees->ApproxDimension;
+                return ModelTrees->GetDimensionsCount();
             }
 
             void SetProperty(const TStringBuf propName, const TStringBuf propValue) override {
@@ -110,11 +112,11 @@ namespace NCB::NModelEvaluation {
                     featureInfo = ExtFeatureLayout.Get();
                 }
                 CB_ENSURE(
-                    ObliviousTrees->GetFlatFeatureVectorExpectedSize() <= transposedFeatures.size(),
-                    "Not enough features provided" << LabeledOutput(ObliviousTrees->GetFlatFeatureVectorExpectedSize(), transposedFeatures.size())
+                    ModelTrees->GetFlatFeatureVectorExpectedSize() <= transposedFeatures.size(),
+                    "Not enough features provided" << LabeledOutput(ModelTrees->GetFlatFeatureVectorExpectedSize(), transposedFeatures.size())
                 );
                 TMaybe<size_t> docCount;
-                CB_ENSURE(!ObliviousTrees->FloatFeatures.empty() || !ObliviousTrees->CatFeatures.empty(),
+                CB_ENSURE(!ModelTrees->GetFloatFeatures().empty() || !ModelTrees->GetCatFeatures().empty(),
                           "Both float features and categorical features information are empty");
                 auto getPosition = [featureInfo] (const auto& feature) -> TFeaturePosition {
                     if (!featureInfo) {
@@ -123,16 +125,16 @@ namespace NCB::NModelEvaluation {
                         return featureInfo->GetRemappedPosition(feature);
                     }
                 };
-                if (!ObliviousTrees->FloatFeatures.empty()) {
-                    for (const auto& floatFeature : ObliviousTrees->FloatFeatures) {
+                if (!ModelTrees->GetFloatFeatures().empty()) {
+                    for (const auto& floatFeature : ModelTrees->GetFloatFeatures()) {
                         if (floatFeature.UsedInModel()) {
                             docCount = transposedFeatures[getPosition(floatFeature).FlatIndex].size();
                             break;
                         }
                     }
                 }
-                if (!docCount.Defined() && !ObliviousTrees->CatFeatures.empty()) {
-                    for (const auto& catFeature : ObliviousTrees->CatFeatures) {
+                if (!docCount.Defined() && !ModelTrees->GetCatFeatures().empty()) {
+                    for (const auto& catFeature : ModelTrees->GetCatFeatures()) {
                         if (catFeature.UsedInModel()) {
                             docCount = transposedFeatures[getPosition(catFeature).FlatIndex].size();
                             break;
@@ -142,7 +144,7 @@ namespace NCB::NModelEvaluation {
 
                 CB_ENSURE(docCount.Defined(), "couldn't determine document count, something went wrong");
                 CalcGeneric(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     CtrProvider,
                     TextProcessingCollection,
                     [&transposedFeatures](TFeaturePosition floatFeature, size_t index) -> float {
@@ -171,7 +173,7 @@ namespace NCB::NModelEvaluation {
                 if (!featureInfo) {
                     featureInfo = ExtFeatureLayout.Get();
                 }
-                auto expectedFlatVecSize = ObliviousTrees->GetFlatFeatureVectorExpectedSize();
+                auto expectedFlatVecSize = ModelTrees->GetFlatFeatureVectorExpectedSize();
                 if (featureInfo && featureInfo->FlatIndexes) {
                     CB_ENSURE(
                         featureInfo->FlatIndexes->size() >= expectedFlatVecSize,
@@ -186,7 +188,7 @@ namespace NCB::NModelEvaluation {
                     );
                 }
                 CalcGeneric(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     CtrProvider,
                     TextProcessingCollection,
                     [&features](TFeaturePosition position, size_t index) -> float {
@@ -216,11 +218,11 @@ namespace NCB::NModelEvaluation {
                     featureInfo = ExtFeatureLayout.Get();
                 }
                 CB_ENSURE(
-                    ObliviousTrees->GetFlatFeatureVectorExpectedSize() <= features.size(),
+                    ModelTrees->GetFlatFeatureVectorExpectedSize() <= features.size(),
                     "Not enough features provided"
                 );
                 CalcGeneric(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     CtrProvider,
                     TextProcessingCollection,
                     [&features](TFeaturePosition position, size_t ) -> float {
@@ -248,7 +250,7 @@ namespace NCB::NModelEvaluation {
                 const TFeatureLayout* featureInfo
             ) const override {
                 CB_ENSURE(
-                    ObliviousTrees->TextFeatures.empty(),
+                    ModelTrees->GetTextFeatures().empty(),
                     "Model contains text features but they aren't provided"
                 );
                 Calc(
@@ -277,7 +279,7 @@ namespace NCB::NModelEvaluation {
                 ValidateInputFeatures(floatFeatures, catFeatures, textFeatures, featureInfo);
                 const size_t docCount = Max(catFeatures.size(), floatFeatures.size());
                 CalcGeneric(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     CtrProvider,
                     TextProcessingCollection,
                     [&floatFeatures](TFeaturePosition position, size_t index) -> float {
@@ -307,7 +309,7 @@ namespace NCB::NModelEvaluation {
                 const TFeatureLayout* featureInfo
             ) const override {
                 CB_ENSURE(
-                    ObliviousTrees->TextFeatures.empty(),
+                    ModelTrees->GetTextFeatures().empty(),
                     "Model contains text features but they aren't provided"
                 );
                 Calc(
@@ -336,7 +338,7 @@ namespace NCB::NModelEvaluation {
                 ValidateInputFeatures(floatFeatures, catFeatures, textFeatures, featureInfo);
                 const size_t docCount = Max(catFeatures.size(), floatFeatures.size(), textFeatures.size());
                 CalcGeneric(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     CtrProvider,
                     TextProcessingCollection,
                     [&floatFeatures](TFeaturePosition position, size_t index) -> float {
@@ -370,7 +372,7 @@ namespace NCB::NModelEvaluation {
                 }
                 ValidateInputFeatures<TConstArrayRef<TStringBuf>>({floatFeatures}, {catFeatures}, {}, featureInfo);
                 CalcLeafIndexesGeneric(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     CtrProvider,
                     [&floatFeatures](TFeaturePosition position, size_t) -> float {
                         return floatFeatures[position.Index];
@@ -401,7 +403,7 @@ namespace NCB::NModelEvaluation {
                 const size_t docCount = Max(catFeatures.size(), floatFeatures.size());
                 CB_ENSURE(docCount * (treeEnd - treeStart) == indexes.size(), LabeledOutput(docCount * (treeEnd - treeStart), indexes.size()));
                 CalcLeafIndexesGeneric(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     CtrProvider,
                     [&floatFeatures](TFeaturePosition position, size_t index) -> float {
                         return floatFeatures[index][position.Index];
@@ -424,35 +426,37 @@ namespace NCB::NModelEvaluation {
             ) const override {
                 const TCPUEvaluatorQuantizedData* cpuQuantizedFeatures = reinterpret_cast<const TCPUEvaluatorQuantizedData*>(quantizedFeatures);
                 CB_ENSURE(cpuQuantizedFeatures != nullptr, "Expected pointer to TCPUEvaluatorQuantizedData");
-                if (ObliviousTrees->GetEffectiveBinaryFeaturesBucketsCount() != 0) {
+                if (ModelTrees->GetEffectiveBinaryFeaturesBucketsCount() != 0) {
                     CB_ENSURE(
-                        cpuQuantizedFeatures->BlockStride % ObliviousTrees->GetEffectiveBinaryFeaturesBucketsCount() == 0,
+                        cpuQuantizedFeatures->BlockStride % ModelTrees->GetEffectiveBinaryFeaturesBucketsCount() == 0,
                         "Unexpected block stride: " << cpuQuantizedFeatures->BlockStride
-                        << " (EffectiveBinaryFeaturesBucketsCount == " << ObliviousTrees->GetEffectiveBinaryFeaturesBucketsCount() << " )"
+                        << " (EffectiveBinaryFeaturesBucketsCount == " << ModelTrees->GetEffectiveBinaryFeaturesBucketsCount() << " )"
                     );
                 }
                 CB_ENSURE(cpuQuantizedFeatures->BlocksCount * FORMULA_EVALUATION_BLOCK_SIZE >= cpuQuantizedFeatures->ObjectsCount);
                 std::fill(results.begin(), results.end(), 0.0);
                 auto subBlockSize = Min<size_t>(FORMULA_EVALUATION_BLOCK_SIZE, cpuQuantizedFeatures->ObjectsCount);
                 auto calcFunction = GetCalcTreesFunction(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     subBlockSize,
                     false
                 );
-                CB_ENSURE(results.size() == ObliviousTrees->ApproxDimension * cpuQuantizedFeatures->ObjectsCount);
+                CB_ENSURE(results.size() == ModelTrees->GetDimensionsCount() * cpuQuantizedFeatures->ObjectsCount);
                 TVector<TCalcerIndexType> indexesVec(subBlockSize);
                 double* resultPtr = results.data();
                 for (size_t blockId = 0; blockId < cpuQuantizedFeatures->BlocksCount; ++blockId) {
                     auto subBlock = cpuQuantizedFeatures->ExtractBlock(blockId);
                     calcFunction(
-                        *ObliviousTrees, &subBlock,
+                        *ModelTrees, &subBlock,
                         subBlock.ObjectsCount,
                         indexesVec.data(),
                         treeStart,
                         treeEnd,
                         resultPtr
                     );
-                    resultPtr += subBlock.GetObjectsCount() * ObliviousTrees->ApproxDimension;
+                    size_t items = subBlock.GetObjectsCount() * ModelTrees->GetDimensionsCount();
+                    ApplyScaleAndBias(ModelTrees->GetScaleAndBias(), TArrayRef<double>(resultPtr, resultPtr + items), treeStart);
+                    resultPtr += items;
                 }
             }
 
@@ -464,16 +468,16 @@ namespace NCB::NModelEvaluation {
             ) const override {
                 const TCPUEvaluatorQuantizedData* cpuQuantizedFeatures = reinterpret_cast<const TCPUEvaluatorQuantizedData*>(quantizedFeatures);
                 CB_ENSURE(cpuQuantizedFeatures != nullptr, "Expected pointer to TCPUEvaluatorQuantizedData");
-                if (ObliviousTrees->GetEffectiveBinaryFeaturesBucketsCount() != 0) {
+                if (ModelTrees->GetEffectiveBinaryFeaturesBucketsCount() != 0) {
                     CB_ENSURE(
-                        cpuQuantizedFeatures->BlockStride % ObliviousTrees->GetEffectiveBinaryFeaturesBucketsCount() == 0,
+                        cpuQuantizedFeatures->BlockStride % ModelTrees->GetEffectiveBinaryFeaturesBucketsCount() == 0,
                         "Unexpected block stride: " << cpuQuantizedFeatures->BlockStride
-                        << " (EffectiveBinaryFeaturesBucketsCount == " << ObliviousTrees->GetEffectiveBinaryFeaturesBucketsCount() << " )"
+                        << " (EffectiveBinaryFeaturesBucketsCount == " << ModelTrees->GetEffectiveBinaryFeaturesBucketsCount() << " )"
                     );
                 }
                 CB_ENSURE(cpuQuantizedFeatures->BlocksCount * FORMULA_EVALUATION_BLOCK_SIZE >= cpuQuantizedFeatures->ObjectsCount);
                 auto calcFunction = GetCalcTreesFunction(
-                    *ObliviousTrees,
+                    *ModelTrees,
                     Min<size_t>(FORMULA_EVALUATION_BLOCK_SIZE, cpuQuantizedFeatures->ObjectsCount),
                     /*calcIndexesOnly*/ true
                 );
@@ -486,7 +490,7 @@ namespace NCB::NModelEvaluation {
                     tmpLeafIndexHolder.yresize(subBlock.GetObjectsCount() * treeCount);
                     TCalcerIndexType* transposedLeafIndexesPtr = tmpLeafIndexHolder.data();
                     calcFunction(
-                        *ObliviousTrees,
+                        *ModelTrees,
                         &subBlock,
                         subBlock.ObjectsCount,
                         transposedLeafIndexesPtr,
@@ -517,18 +521,18 @@ namespace NCB::NModelEvaluation {
                     CB_ENSURE(catFeatures.size() == floatFeatures.size());
                 }
                 CB_ENSURE(
-                    ObliviousTrees->GetUsedFloatFeaturesCount() == 0 || !floatFeatures.empty(),
+                    ModelTrees->GetUsedFloatFeaturesCount() == 0 || !floatFeatures.empty(),
                     "Model has float features but no float features provided"
                 );
                 CB_ENSURE(
-                    ObliviousTrees->GetUsedCatFeaturesCount() == 0 || !catFeatures.empty(),
+                    ModelTrees->GetUsedCatFeaturesCount() == 0 || !catFeatures.empty(),
                     "Model has categorical features but no categorical features provided"
                 );
                 CB_ENSURE(
-                    ObliviousTrees->GetUsedTextFeaturesCount() == 0 || !textFeatures.empty(),
+                    ModelTrees->GetUsedTextFeaturesCount() == 0 || !textFeatures.empty(),
                     "Model has text features but no text features provided"
                 );
-                size_t minimalSufficientFloatFeatureCount = ObliviousTrees->GetMinimalSufficientFloatFeaturesVectorSize();
+                size_t minimalSufficientFloatFeatureCount = ModelTrees->GetMinimalSufficientFloatFeaturesVectorSize();
                 if (featureInfo && featureInfo->FloatFeatureIndexes.Defined()) {
                     CB_ENSURE(featureInfo->FloatFeatureIndexes->size() >= minimalSufficientFloatFeatureCount);
                     minimalSufficientFloatFeatureCount = *MaxElement(
@@ -543,7 +547,7 @@ namespace NCB::NModelEvaluation {
                         << " expected: " << minimalSufficientFloatFeatureCount
                     );
                 }
-                size_t minimalSufficientCatFeatureCount = ObliviousTrees->GetMinimalSufficientCatFeaturesVectorSize();
+                size_t minimalSufficientCatFeatureCount = ModelTrees->GetMinimalSufficientCatFeaturesVectorSize();
                 if (featureInfo && featureInfo->CatFeatureIndexes.Defined()) {
                     CB_ENSURE(featureInfo->CatFeatureIndexes->size() >= minimalSufficientCatFeatureCount);
                     minimalSufficientCatFeatureCount = *MaxElement(
@@ -558,7 +562,7 @@ namespace NCB::NModelEvaluation {
                         << " expected: " << minimalSufficientCatFeatureCount
                     );
                 }
-                size_t minimalSufficientTextFeatureCount = ObliviousTrees->GetMinimalSufficientTextFeaturesVectorSize();
+                size_t minimalSufficientTextFeatureCount = ModelTrees->GetMinimalSufficientTextFeaturesVectorSize();
                 if (featureInfo && featureInfo->TextFeatureIndexes.Defined()) {
                     CB_ENSURE(featureInfo->TextFeatureIndexes->size() >= minimalSufficientTextFeatureCount);
                     minimalSufficientTextFeatureCount = *MaxElement(
@@ -580,7 +584,7 @@ namespace NCB::NModelEvaluation {
                 CB_ENSURE(false, "This type of apply interface is not implemented with text features yet");
             }
         private:
-            TCOWTreeWrapper ObliviousTrees;
+            TCOWTreeWrapper ModelTrees;
             const TIntrusivePtr<ICtrProvider> CtrProvider;
             const TIntrusivePtr<TTextProcessingCollection> TextProcessingCollection;
             EPredictionType PredictionType = EPredictionType::RawFormulaVal;

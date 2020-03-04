@@ -309,13 +309,6 @@ def get_values_list(unit, key):
     return [r for r in res if r and r not in ['""', "''"]]
 
 
-def strip_roots(path):
-    for prefix in ["$B/", "$S/"]:
-        if path.startswith(prefix):
-            return path[len(prefix):]
-    return path
-
-
 def get_unit_list_variable(unit, name):
     items = unit.get(name)
     if items:
@@ -337,7 +330,7 @@ def match_coverage_extractor_requirements(unit):
         # build doesn't imply clang coverage, which supports segment extraction from the binaries
         unit.get("CLANG_COVERAGE") == "yes",
         # contrib wasn't requested
-        implies(strip_roots(unit.path()).startswith("contrib/"), unit.get("ENABLE_CONTRIB_COVERAGE") == "yes"),
+        implies(_common.strip_roots(unit.path()).startswith("contrib/"), unit.get("ENABLE_CONTRIB_COVERAGE") == "yes"),
     ])
 
 
@@ -347,11 +340,13 @@ def onadd_ytest(unit, *args):
     flat_args, spec_args = _common.sort_by_keywords(keywords, args)
 
     if flat_args[1] == "fuzz.test":
-        unit.ondata("arcadia/fuzzing/{}/corpus.json".format(strip_roots(unit.path())))
+        unit.ondata("arcadia/fuzzing/{}/corpus.json".format(_common.strip_roots(unit.path())))
     elif flat_args[1] == "coverage.extractor" and not match_coverage_extractor_requirements(unit):
         # XXX
         # Current ymake implementation doesn't allow to call macro inside the 'when' body
         # that's why we add ADD_YTEST(coverage.extractor) to every PROGRAM entry and check requirements later
+        return
+    elif flat_args[1] == "no.test":
         return
 
     fork_mode = []
@@ -368,8 +363,8 @@ def onadd_ytest(unit, *args):
         'TESTED-PROJECT-NAME': unit.name(),
         'TESTED-PROJECT-FILENAME': unit.filename(),
         'SOURCE-FOLDER-PATH': unit.resolve(unit.path()),
-        'BUILD-FOLDER-PATH': strip_roots(unit.path()),
-        'BINARY-PATH': strip_roots(os.path.join(unit.path(), unit.filename())),
+        'BUILD-FOLDER-PATH': _common.strip_roots(unit.path()),
+        'BINARY-PATH': _common.strip_roots(os.path.join(unit.path(), unit.filename())),
         'CUSTOM-DEPENDENCIES': ' '.join(spec_args.get('DEPENDS', []) + get_values_list(unit, 'TEST_DEPENDS_VALUE')),
         'TEST-RECIPES': prepare_recipes(unit.get("TEST_RECIPES_VALUE")),
         'TEST-ENV': prepare_env(unit.get("TEST_ENV_VALUE")),
@@ -455,10 +450,17 @@ def onadd_check(unit, *args):
     test_dir = unit.resolve(os.path.join(unit.path()))
 
     test_timeout = ''
+    fork_mode = ''
+
     if check_type in ["PEP8", "PYFLAKES", "PY_FLAKES", "PEP8_2", "PYFLAKES_2"]:
         script_rel_path = "py.lint.pylint"
+        fork_mode = unit.get('TEST_FORK_MODE') or ''
     elif check_type in ["PEP8_3", "PYFLAKES_3"]:
         script_rel_path = "py.lint.pylint.3"
+        fork_mode = unit.get('TEST_FORK_MODE') or ''
+    elif check_type in ["flake8.py2", "flake8.py3"]:
+        script_rel_path = check_type
+        fork_mode = unit.get('TEST_FORK_MODE') or ''
     elif check_type == "JAVA_STYLE":
         if len(flat_args) < 2:
             raise Exception("Not enough arguments for JAVA_STYLE check")
@@ -467,12 +469,14 @@ def onadd_check(unit, *args):
             'base': '/yandex_checks.xml',
             'strict': '/yandex_checks_strict.xml',
             'extended': '/yandex_checks_extended.xml',
+            'library': '/yandex_checks_library.xml',
         }
         if check_level not in allowed_levels:
             raise Exception('{} is not allowed in LINT(), use one of {}'.format(check_level, allowed_levels.keys()))
         flat_args[1] = allowed_levels[check_level]
         script_rel_path = "java.style"
         test_timeout = '120'
+        fork_mode = unit.get('TEST_FORK_MODE') or ''
     elif check_type == "gofmt":
         script_rel_path = check_type
         go_files = flat_args[1:]
@@ -492,7 +496,7 @@ def onadd_check(unit, *args):
         'TEST-DATA': '',
         'SPLIT-FACTOR': '',
         'TEST_PARTITION': 'SEQUENTIAL',
-        'FORK-MODE': '',
+        'FORK-MODE': fork_mode,
         'FORK-TEST-FILES': '',
         'SIZE': 'SMALL',
         'TAG': '',
@@ -502,6 +506,7 @@ def onadd_check(unit, *args):
         'PYTHON-PATHS': '',
         'FILES': serialize_list(flat_args[1:])
     }
+
     data = dump_test(unit, test_record)
     if data:
         unit.set_property(["DART_DATA", data])
@@ -540,7 +545,7 @@ def onadd_check_py_imports(unit, *args):
         'USE_ARCADIA_PYTHON': use_arcadia_python or '',
         'OLD_PYTEST': 'no',
         'PYTHON-PATHS': '',
-        'FILES': serialize_list(["{}/{}".format(strip_roots(unit.path()), unit.filename())])
+        'FILES': serialize_list(["{}/{}".format(_common.strip_roots(unit.path()), unit.filename())])
     }
     if unit.get('NO_CHECK_IMPORTS_FOR_VALUE') != "None":
         test_record["NO-CHECK"] = serialize_list(get_values_list(unit, 'NO_CHECK_IMPORTS_FOR_VALUE') or ["*"])
@@ -619,31 +624,25 @@ def add_test_to_dart(unit, test_type, binary_path=None, runner_bin=None):
 
 
 def extract_java_system_properties(unit, args):
-    props = []
-
     if len(args) % 2:
-        print>>sys.stderr, 'wrong use of SYSTEM_PROPERTIES in {}: odd number of arguments'.format(unit.path())  # TODO: configure error
-        return []
+        return [], 'Wrong use of SYSTEM_PROPERTIES in {}: odd number of arguments'.format(unit.path())
 
+    props = []
     for x, y in zip(args[::2], args[1::2]):
         if x == 'FILE':
             if y.startswith('${BINDIR}') or y.startswith('${ARCADIA_BUILD_ROOT}') or y.startswith('/'):
-                print>>sys.stderr, 'wrong use of SYSTEM_PROPERTIES in {}: absolute/build file path {}'.format(unit.path(), y)  # TODO: configure error
-                continue
+                return [], 'Wrong use of SYSTEM_PROPERTIES in {}: absolute/build file path {}'.format(unit.path(), y)
 
             y = _common.rootrel_arc_src(y, unit)
             if not os.path.exists(unit.resolve('$S/' + y)):
-                print>>sys.stderr, 'wrong use of SYSTEM_PROPERTIES in {}: can\'t resolve {}'.format(unit.path(), y)  # TODO: configure error
-                continue
+                return [], 'Wrong use of SYSTEM_PROPERTIES in {}: can\'t resolve {}'.format(unit.path(), y)
 
             y = '${ARCADIA_ROOT}/' + y
-
             props.append({'type': 'file', 'path': y})
-
         else:
             props.append({'type': 'inline', 'key': x, 'value': y})
 
-    return props
+    return props, None
 
 
 def onjava_test(unit, *args):
@@ -651,15 +650,29 @@ def onjava_test(unit, *args):
 
     if unit.get('MODULE_TYPE') == 'JTEST_FOR':
         if not unit.get('UNITTEST_DIR'):
-            print>>sys.stderr, 'skip JTEST_FOR in {}: no args provided'.format(unit.path())  # TODO: configure error
-            return  # do not add such tests into dart
+            ymake.report_configure_error('skip JTEST_FOR in {}: no args provided'.format(unit.path()))
+            return
 
-    path = strip_roots(unit.path())
+    java_cp_arg_type = unit.get('JAVA_CLASSPATH_CMD_TYPE_VALUE') or 'MANIFEST'
+    if java_cp_arg_type not in ('MANIFEST', 'COMMAND_FILE', 'LIST'):
+        ymake.report_configure_error('{}: TEST_JAVA_CLASSPATH_CMD_TYPE({}) are invalid. Choose argument from MANIFEST, COMMAND_FILE or LIST)'.format(unit.path(), java_cp_arg_type))
+        return
+
+    unit_path = unit.path()
+    path = _common.strip_roots(unit_path)
+    test_dir = unit.resolve(unit_path)
 
     test_data = get_values_list(unit, 'TEST_DATA_VALUE')
-    test_data.append('arcadia/build/scripts')
+    test_data.append('arcadia/build/scripts/unpacking_jtest_runner.py')
+    test_data.append('arcadia/build/scripts/run_testng.py')
 
-    props = extract_java_system_properties(unit, get_values_list(unit, 'SYSTEM_PROPERTIES_VALUE'))
+    data, data_files = get_canonical_test_resources(test_dir, unit_path)
+    test_data += data
+
+    props, error_mgs = extract_java_system_properties(unit, get_values_list(unit, 'SYSTEM_PROPERTIES_VALUE'))
+    if error_mgs:
+        ymake.report_configure_error(error_mgs)
+        return
     for prop in props:
         if prop['type'] == 'file':
             test_data.append(prop['path'].replace('${ARCADIA_ROOT}', 'arcadia'))
@@ -699,6 +712,7 @@ def onjava_test(unit, *args):
         'SYSTEM_PROPERTIES': props,
         'TEST-CWD': test_cwd,
         'SKIP_TEST': unit.get('SKIP_TEST_VALUE') or '',
+        'JAVA_CLASSPATH_CMD_TYPE': java_cp_arg_type,
     }
 
     data = dump_test(unit, test_record)
@@ -709,7 +723,7 @@ def onjava_test(unit, *args):
 def onjava_test_deps(unit, *args):
     assert unit.get('MODULE_TYPE') is not None
 
-    path = strip_roots(unit.path())
+    path = _common.strip_roots(unit.path())
 
     test_record = {
         'SOURCE-FOLDER-PATH': path,
@@ -770,6 +784,7 @@ def _dump_test(
     else:
         script_rel_path = test_type
 
+    unit_path = unit.path()
     fork_test_files = unit.get('FORK_TEST_FILES_MODE')
     fork_mode = ' '.join(fork_mode) if fork_mode else ''
     use_arcadia_python = unit.get('USE_ARCADIA_PYTHON')
@@ -807,11 +822,11 @@ def _dump_test(
             'PYTHON-PATHS': serialize_list(python_paths),
             'TEST-CWD': test_cwd or '',
             'SKIP_TEST': unit.get('SKIP_TEST_VALUE') or '',
-            'BUILD-FOLDER-PATH': strip_roots(unit.path()),
+            'BUILD-FOLDER-PATH': _common.strip_roots(unit_path),
             'BLOB': unit.get('TEST_BLOB_DATA') or '',
         }
         if binary_path:
-            test_record['BINARY-PATH'] = strip_roots(binary_path)
+            test_record['BINARY-PATH'] = _common.strip_roots(binary_path)
         if runner_bin:
             test_record['TEST-RUNNER-BIN'] = runner_bin
         if yt_spec:
@@ -820,10 +835,6 @@ def _dump_test(
         if data:
             unit.set_property(["DART_DATA", data])
             save_in_file(unit.get('TEST_DART_OUT_FILE'), data)
-            if data_files:
-                data_files = [os.path.relpath(i, test_dir) for i in data_files]
-                data_files = [os.path.join(unit.path(), i) for i in data_files]
-                unit.set_property(['DART_DATA_FILES', serialize_list(sorted(data_files))])
 
 
 def onsetup_pytest_bin(unit, *args):
@@ -843,7 +854,11 @@ def onrun(unit, *args):
 
 
 def onsetup_exectest(unit, *args):
-    command = unit.get(["EXECTEST_COMMAND_VALUE"]).replace("$EXECTEST_COMMAND_VALUE", "")
+    command = unit.get(["EXECTEST_COMMAND_VALUE"])
+    if command is None:
+        ymake.report_configure_error("EXECTEST must have at least one RUN macro")
+        return
+    command = command.replace("$EXECTEST_COMMAND_VALUE", "")
     if "PYTHON_BIN" in command:
         unit.ondepends('contrib/tools/python')
     unit.set(["TEST_BLOB_DATA", base64.b64encode(command)])
@@ -866,7 +881,7 @@ def get_canonical_test_resources(test_dir, unit_path):
 
     if CANON_RESULT_FILE_NAME in files:
         return _get_canonical_data_resources_v2(os.path.join(canon_data_dir, CANON_RESULT_FILE_NAME), unit_path)
-    return _get_canonical_data_resources_v1(canon_data_dir, dirs, unit_path)
+    return ([], [])
 
 
 def _load_canonical_file(filename, unit_path):
@@ -920,17 +935,3 @@ def _get_external_resources_from_canon_data(data):
 
 def _get_canonical_data_resources_v2(filename, unit_path):
     return (_get_external_resources_from_canon_data(_load_canonical_file(filename, unit_path)), [filename])
-
-
-# TODO migrate all canondata to v2 canonization + remove v1 canonization support
-def _get_canonical_data_resources_v1(test_dir, subdirs, unit_path):
-    res = set()
-    files = []
-
-    for dirname in subdirs:
-        filename = os.path.join(test_dir, dirname, CANON_RESULT_FILE_NAME)
-        files.append(filename)
-        if os.path.exists(filename):
-            res.update(_get_external_resources_from_canon_data(_load_canonical_file(filename, unit_path)))
-
-    return (res, files)

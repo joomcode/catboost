@@ -63,12 +63,12 @@
       <RemoveUnreferencedCodeData Condition="'$(Configuration)|$(Platform)'=='Debug|x64'"/>
       <WarningLevel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Level4</WarningLevel>
       <RemoveUnreferencedCodeData Condition="'$(Configuration)|$(Platform)'=='Release|x64'"/>
-      <AdditionalIncludeDirectories>;$(SolutionDir)$(Configuration);$(SolutionDir)..;$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include;$(SolutionDir)../contrib/libs/double-conversion/include;$(SolutionDir)$(Configuration)/library/unittest;$(SolutionDir)../contrib/libs/brotli/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>;$(SolutionDir)$(Configuration);$(SolutionDir)..;$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include;$(SolutionDir)../contrib/libs/zlib/include;$(SolutionDir)../contrib/libs/double-conversion/include;$(SolutionDir)$(Configuration)/library/unittest;$(SolutionDir)../contrib/libs/brotli/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib;crypt32.lib;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\reduce_scatter.obj;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\task.obj;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\enable_peers.obj;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\host_tasks.obj;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\kernel_task.obj;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\memory_allocation.obj;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\memory_copy_tasks.obj;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\memory_state_func.obj;$(SolutionDir)$(Configuration)\MSVS\8F0089E7-CD22-2D41-938B-A9A7A3319AE7\request_stream_task.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\bootstrap.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\compression_helpers_gpu.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\dot_product.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\fill.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\filter.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\gpu_random.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\helpers.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\partitions.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\partitions_reduce.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\reduce.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\reorder_bins.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\scan.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\segmented_scan.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\segmented_sort.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\sort.obj;$(SolutionDir)$(Configuration)\MSVS\46C6451F-4D82-1C63-28D4-7F5FD766784A\transform.obj;$(SolutionDir)$(Configuration)\MSVS\62440384-FCD2-5217-9DB5-BBEF00D51E9B\exists_checker.obj;$(SolutionDir)$(Configuration)\MSVS\62440384-FCD2-5217-9DB5-BBEF00D51E9B\line_data_reader.obj;$(SolutionDir)$(Configuration)\MSVS\2674849B-0330-C348-578B-DB562AA37E65\brotli.obj;$(SolutionDir)$(Configuration)\MSVS\AC376A6B-93D4-59AC-5493-C2308B528517\bzip.obj;$(SolutionDir)$(Configuration)\MSVS\A880DD8B-7948-E7DF-FDDB-6F6C1A23012A\fastlz.obj;$(SolutionDir)$(Configuration)\MSVS\39206ED1-8CD9-0701-178E-0631ABD19D17\legacy_zstd06.obj;$(SolutionDir)$(Configuration)\MSVS\F13B7D24-08DF-93EE-EF06-0A42A67F1F2A\lz4.obj;$(SolutionDir)$(Configuration)\MSVS\005F2BD3-F54E-2F5E-204D-10BBF3ABD244\lzma.obj;$(SolutionDir)$(Configuration)\MSVS\96581D45-46BF-09E3-6477-BFA2BF8C22E1\snappy.obj;$(SolutionDir)$(Configuration)\MSVS\DD085378-CB32-3420-0F56-EB3498FD2743\zlib.obj;$(SolutionDir)$(Configuration)\MSVS\AC7594FF-6F1D-C755-11B7-918627CFBD0B\zstd.obj;$(SolutionDir)$(Configuration)\MSVS\B2E67D35-D818-4BB5-60B7-B6EEC460B8F8\cpu_id_check.obj;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">/NOLOGO /ERRORREPORT:PROMPT /SUBSYSTEM:CONSOLE /TLBID:1 /NXCOMPAT /IGNORE:4221 /MACHINE:X64 /INCREMENTAL  "/LIBPATH:$(CUDA_PATH)/lib/x64" cublas.lib curand.lib cudart_static.lib cusparse.lib</AdditionalOptions>
-      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">/NOLOGO /ERRORREPORT:PROMPT /SUBSYSTEM:CONSOLE /TLBID:1 /NXCOMPAT /IGNORE:4221 /MACHINE:X64 /INCREMENTAL  "/LIBPATH:$(CUDA_PATH)/lib/x64" cublas.lib curand.lib cudart_static.lib cusparse.lib</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">/NOLOGO /ERRORREPORT:PROMPT /SUBSYSTEM:CONSOLE /TLBID:1 /NXCOMPAT /IGNORE:4221 /MACHINE:X64 /INCREMENTAL  "/LIBPATH:$(CUDA_PATH)/lib/x64" cudart_static.lib</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">/NOLOGO /ERRORREPORT:PROMPT /SUBSYSTEM:CONSOLE /TLBID:1 /NXCOMPAT /IGNORE:4221 /MACHINE:X64 /INCREMENTAL  "/LIBPATH:$(CUDA_PATH)/lib/x64" cudart_static.lib</AdditionalOptions>
       <SubSystem Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Console</SubSystem>
       <GenerateDebugInformation Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">DebugFastLink</GenerateDebugInformation>
       <RandomizedBaseAddress Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</RandomizedBaseAddress>
@@ -103,9 +103,6 @@
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\catboost\cuda\cuda_util\catboost-cuda-cuda_util.vcxproj">
       <Project>{46C6451F-4D82-1C63-28D4-7F5FD766784A}</Project>
-    </ProjectReference>
-    <ProjectReference Include="$(SolutionDir)Projects\catboost\libs\cuda_wrappers\catboost-libs-cuda_wrappers.vcxproj">
-      <Project>{1913A6ED-B427-7353-0A27-3C443B10E85E}</Project>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\catboost\libs\helpers\catboost-libs-helpers.vcxproj">
       <Project>{1ED2E5C8-4D20-BC86-8EEB-C69117E1D3FA}</Project>
@@ -185,6 +182,9 @@
     <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\nayuki_md5\contrib-libs-nayuki_md5.vcxproj">
       <Project>{C0251DC8-E401-B1AF-785F-72D686693CB9}</Project>
     </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\rapidjson\contrib-libs-rapidjson.vcxproj">
+      <Project>{9CDB08FB-219D-3356-E006-1AC8AECC636E}</Project>
+    </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\contrib\libs\snappy\contrib-libs-snappy.vcxproj">
       <Project>{31072066-3C10-BD50-C299-F4AF4767798E}</Project>
     </ProjectReference>
@@ -254,6 +254,9 @@
     <ProjectReference Include="$(SolutionDir)Projects\library\cpuid_check\library-cpuid_check.vcxproj">
       <Project>{B2E67D35-D818-4BB5-60B7-B6EEC460B8F8}</Project>
     </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\cuda\wrappers\library-cuda-wrappers.vcxproj">
+      <Project>{B83E09E6-36E4-BF0E-BBC4-CCC2D4B42CCC}</Project>
+    </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\dbg_output\library-dbg_output.vcxproj">
       <Project>{806C141C-ADC5-203A-DF01-02F7E1563621}</Project>
     </ProjectReference>
@@ -268,6 +271,12 @@
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\json\common\library-json-common.vcxproj">
       <Project>{3B322F11-1D2A-AEFE-BC14-4F74683E14DB}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\json\fast_sax\library-json-fast_sax.vcxproj">
+      <Project>{8AAB2F9B-ECAA-2170-D871-1CEE27B498C2}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\json\library-json.vcxproj">
+      <Project>{E633ADF4-A720-EDCB-A12B-52A8216FF956}</Project>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\json\writer\library-json-writer.vcxproj">
       <Project>{C27A0E65-4FDF-D0F0-5127-62A23E33B196}</Project>
@@ -295,6 +304,9 @@
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\string_utils\base64\library-string_utils-base64.vcxproj">
       <Project>{137212F6-D2FE-719F-EBE2-99060434BC72}</Project>
+    </ProjectReference>
+    <ProjectReference Include="$(SolutionDir)Projects\library\string_utils\relaxed_escaper\library-string_utils-relaxed_escaper.vcxproj">
+      <Project>{91423FEC-8B3D-547B-2674-3740D83114B5}</Project>
     </ProjectReference>
     <ProjectReference Include="$(SolutionDir)Projects\library\terminate_handler\library-terminate_handler.vcxproj">
       <Project>{4E4966F6-2368-4B6C-B986-DF5B07F94F72}</Project>

@@ -6,6 +6,7 @@
 #include <util/generic/cast.h>
 #include <util/generic/xrange.h>
 #include <util/generic/ymath.h>
+#include <util/system/mutex.h>
 
 #include <algorithm>
 
@@ -55,6 +56,9 @@ inline TMinMax<T> CalcMinMax(TConstArrayRef<T> array) {
     return CalcMinMax(array.begin(), array.end());
 }
 
+template <typename T>
+void GuardedUpdateMinMax(const TMinMax<T>& value, TMinMax<T> volatile* target, TMutex& guard);
+
 inline bool IsConst(TConstArrayRef<float> array) {
     if (array.empty()) {
         return true;
@@ -71,6 +75,14 @@ inline void ResizeRank2(Int1 dim1, Int2 dim2, TVector<TVector<T>>& vvt) {
     vvt.resize(dim1);
     for (auto& vt : vvt) {
         vt.resize(dim2);
+    }
+}
+
+template <typename Int1, typename Int2, typename T>
+inline void AllocateRank2(Int1 dim1, Int2 dim2, TVector<TVector<T>>& vvt) {
+    vvt.resize(dim1);
+    for (auto& vt : vvt) {
+        vt.yresize(dim2);
     }
 }
 
@@ -120,6 +132,31 @@ inline void SumTransposedBlocks(
     int srcColumnEnd,
     TConstArrayRef<TVector<T>> srcA,
     TConstArrayRef<TVector<T>> srcB,
+    TArrayRef<TVector<T>> dst
+) {
+    Y_ASSERT(srcColumnEnd - srcColumnBegin <= IntegerCast<int>(dst.size()));
+    if (srcB.empty()) {
+        for (int srcRowIdx : xrange(srcA.size())) {
+            for (int srcColumnIdx : xrange(srcColumnBegin, srcColumnEnd)) {
+                dst[srcColumnIdx - srcColumnBegin][srcRowIdx] = srcA[srcRowIdx][srcColumnIdx];
+            }
+        }
+    } else {
+        Y_ASSERT(srcA.size() == srcB.size());
+        for (int srcRowIdx : xrange(srcA.size())) {
+            for (int srcColumnIdx : xrange(srcColumnBegin, srcColumnEnd)) {
+                dst[srcColumnIdx - srcColumnBegin][srcRowIdx] = srcA[srcRowIdx][srcColumnIdx] + srcB[srcRowIdx][srcColumnIdx];
+            }
+        }
+    }
+}
+
+template <typename T>
+inline void SumTransposedBlocks(
+    int srcColumnBegin,
+    int srcColumnEnd,
+    TConstArrayRef<TConstArrayRef<T>> srcA,
+    TConstArrayRef<TConstArrayRef<T>> srcB,
     TArrayRef<TVector<T>> dst
 ) {
     Y_ASSERT(srcColumnEnd - srcColumnBegin <= IntegerCast<int>(dst.size()));

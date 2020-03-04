@@ -5,12 +5,6 @@
 #include <util/system/types.h>
 
 
-enum class EConvertTargetPolicy {
-    CastFloat,
-    UseClassNames,
-    MakeClassNames
-};
-
 enum class EOverfittingDetectorType {
     None,
     Wilcoxon,
@@ -77,6 +71,11 @@ enum class EScoreFunction {
     LOOL2,
     SatL2,
     L2
+};
+
+enum class EModelShrinkMode {
+    Constant,
+    Decreasing
 };
 
 enum class EBootstrapType {
@@ -191,7 +190,10 @@ enum class ELossFunction {
     MAP,
     NDCG,
     DCG,
-    FilteredDCG
+    FilteredDCG,
+
+    /* multi-regression */
+    MultiRMSE
 };
 
 enum class ERankingType {
@@ -212,6 +214,7 @@ enum class ECounterCalc {
 
 enum class EPredictionType {
     Probability,
+    LogProbability,
     Class,
     RawFormulaVal,
     InternalRawFormulaVal
@@ -226,6 +229,12 @@ enum class EFstrType {
     InternalInteraction,
     ShapValues,
     PredictionDiff
+};
+
+enum class EFstrCalculatedInFitType {
+    PredictionValuesChange,
+    LossFunctionChange,
+    FeatureImportance
 };
 
 enum class EPreCalcShapValues {
@@ -318,15 +327,18 @@ enum class EFeatureCalcerType : ui32 {
     EmbeddingDistanceToClass
 };
 
-enum class ETokenizerType {
-    Naive,
-    UserDefined
-};
-
 namespace NCB {
     enum class EFeatureEvalMode {
         OneVsNone,
         OneVsOthers,
-        OneVsAll
+        OneVsAll,
+        OthersVsAll
+    };
+
+    enum class ERawTargetType : ui32 {
+        Integer,
+        Float,
+        String,
+        None
     };
 }

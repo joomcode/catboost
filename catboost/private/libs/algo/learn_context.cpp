@@ -5,17 +5,17 @@
 #include "approx_updater_helpers.h"
 #include "calc_score_cache.h"
 
-#include <catboost/private/libs/algo_helpers/error_functions.h>
 #include "helpers.h"
 #include "online_ctr.h"
 
-#include <catboost/private/libs/distributed/master.h>
 #include <catboost/libs/helpers/checksum.h>
 #include <catboost/libs/helpers/parallel_tasks.h>
 #include <catboost/libs/helpers/progress_helper.h>
 #include <catboost/libs/helpers/vector_helpers.h>
-#include <catboost/private/libs/index_range/index_range.h>
 #include <catboost/libs/model/model.h>
+#include <catboost/private/libs/algo_helpers/error_functions.h>
+#include <catboost/private/libs/distributed/master.h>
+#include <catboost/private/libs/index_range/index_range.h>
 #include <catboost/private/libs/options/defaults_helper.h>
 
 #include <library/digest/crc32c/crc32c.h>
@@ -204,21 +204,21 @@ static inline ui32 UpdateCheckSumImpl(ui32 init, const TCtrFeature& ctrFeature) 
 
 
 static ui32 CalcCoreModelCheckSum(const TFullModel& model) {
-    const auto& trees = *model.ObliviousTrees;
+    const auto& trees = *model.ModelTrees;
 
     return UpdateCheckSum(
         ui32(0),
-        trees.ApproxDimension,
-        trees.TreeSplits,
-        trees.TreeSizes,
-        trees.TreeStartOffsets,
-        trees.NonSymmetricStepNodes,
-        trees.NonSymmetricNodeIdToLeafId,
-        trees.LeafValues,
-        trees.CatFeatures,
-        trees.FloatFeatures,
-        trees.OneHotFeatures,
-        trees.CtrFeatures
+        trees.GetDimensionsCount(),
+        trees.GetTreeSplits(),
+        trees.GetTreeSizes(),
+        trees.GetTreeStartOffsets(),
+        trees.GetNonSymmetricStepNodes(),
+        trees.GetNonSymmetricNodeIdToLeafId(),
+        trees.GetLeafValues(),
+        trees.GetCatFeatures(),
+        trees.GetFloatFeatures(),
+        trees.GetOneHotFeatures(),
+        trees.GetCtrFeatures()
     );
 }
 
@@ -258,18 +258,16 @@ TLearnContext::TLearnContext(
     ui32 featuresCheckSum = data.CalcFeaturesCheckSum(localExecutor);
     CATBOOST_DEBUG_LOG << "Features checksum calculation time: " << calcHashTimer.Passed() << Endl;
 
-    ui32 approxDimension = GetApproxDimension(Params, labelConverter);
+    ui32 approxDimension = GetApproxDimension(Params, labelConverter, data.Learn->TargetData->GetTargetDimension());
     if (initLearnProgress) {
         CB_ENSURE(
             approxDimension == SafeIntegerCast<ui32>(initLearnProgress->ApproxDimension),
             "Attempt to continue learning with a different approx dimension"
         );
-        if (approxDimension > 1) {
-            CB_ENSURE(
-                labelConverter == initLearnProgress->LabelConverter,
-                "Attempt to continue learning with different class labels"
-            );
-        }
+        CB_ENSURE(
+            labelConverter == initLearnProgress->LabelConverter,
+            "Attempt to continue learning with different class labels"
+        );
     }
 
     const TFoldsCreationParams foldsCreationParams(
@@ -287,14 +285,19 @@ TLearnContext::TLearnContext(
 
     UpdateCtrsTargetBordersOption(lossFunction, approxDimension, &Params.CatFeatureParams.Get());
 
-    CtrsHelper.InitCtrHelper(
-        Params.CatFeatureParams,
-        *Layout,
-        data.Learn->TargetData->GetTarget(),
-        lossFunction,
-        ObjectiveDescriptor,
-        Params.DataProcessingOptions->AllowConstLabel
-    );
+    // TODO(fedorlebed): add counters support for multiregression
+    if (IsMultiRegressionObjective(lossFunction)) {
+        CB_ENSURE(Params.CatFeatureParams->PerFeatureCtrs->empty(), "Multi-dimensional target counters are unimplemented yet");
+    } else {
+        CtrsHelper.InitCtrHelper(
+            Params.CatFeatureParams,
+            *Layout,
+            data.Learn->TargetData->GetOneDimensionalTarget(),
+            lossFunction,
+            ObjectiveDescriptor,
+            Params.DataProcessingOptions->AllowConstLabel
+        );
+    }
 
     // TODO(akhropov): implement effective RecalcApprox for shrinked models instead of completely new context
     if (initLearnProgress &&
@@ -341,7 +344,6 @@ TLearnContext::TLearnContext(
             CtrsHelper.GetTargetClassifiers(),
             featuresCheckSum,
             foldCreationParamsCheckSum,
-            ParseMemorySizeDescription(Params.SystemOptions->CpuUsedRamLimit.Get()),
             initModel,
             initModelApplyCompatiblePools,
             LocalExecutor
@@ -369,20 +371,22 @@ TLearnContext::~TLearnContext() {
     }
 }
 
-void TLearnContext::SaveProgress(std::function<void(IOutputStream*)> onSnapshotSaved) {
+void TLearnContext::SaveProgress(std::function<void(IOutputStream*)> onSaveSnapshot) {
     if (!OutputOptions.SaveSnapshot()) {
         return;
     }
+    const auto snapshotBackup = Files.SnapshotFile + ".bak";
     TProgressHelper(ToString(ETaskType::CPU)).Write(
-        Files.SnapshotFile,
+        snapshotBackup,
         [&](IOutputStream* out) {
+            onSaveSnapshot(out);
             ::SaveMany(out, *LearnProgress, Profile.DumpProfileInfo());
-            onSnapshotSaved(out);
         }
     );
+    TFsPath(snapshotBackup).ForceRenameTo(Files.SnapshotFile);
 }
 
-bool TLearnContext::TryLoadProgress(std::function<void(IInputStream*)> onSnapshotLoaded) {
+bool TLearnContext::TryLoadProgress(std::function<bool(IInputStream*)> onLoadSnapshot) {
     if (!OutputOptions.SaveSnapshot() || !NFs::Exists(Files.SnapshotFile)) {
         return false;
     }
@@ -390,13 +394,15 @@ bool TLearnContext::TryLoadProgress(std::function<void(IInputStream*)> onSnapsho
         TProgressHelper(ToString(ETaskType::CPU)).CheckedLoad(
             Files.SnapshotFile,
             [&](TIFStream* in) {
+                if (!onLoadSnapshot(in)) {
+                    return;
+                }
                 // use progress copy to avoid partial deserialization of corrupted progress file
                 THolder<TLearnProgress> learnProgressRestored = MakeHolder<TLearnProgress>(*LearnProgress);
                 TProfileInfoData ProfileRestored;
 
                 // fail here does nothing with real LearnProgress
                 ::LoadMany(in, *learnProgressRestored, ProfileRestored);
-                onSnapshotLoaded(in);
 
                 const bool paramsCompatible = NCatboostOptions::IsParamsCompatible(
                     learnProgressRestored->SerializedTrainParams,
@@ -411,11 +417,9 @@ bool TLearnContext::TryLoadProgress(std::function<void(IInputStream*)> onSnapsho
                        == LearnProgress->LearnAndTestQuantizedFeaturesCheckSum);
                 CB_ENSURE(
                     poolCompatible,
-                    "Current learn and test datasets differ from the datasets used for snapshot"
-                    LabeledOutput(
-                        learnProgressRestored->LearnAndTestQuantizedFeaturesCheckSum,
-                        LearnProgress->LearnAndTestQuantizedFeaturesCheckSum
-                    )
+                    "Current learn and test datasets differ from the datasets used for snapshot "
+                    << LabeledOutput(learnProgressRestored->LearnAndTestQuantizedFeaturesCheckSum) << ' '
+                    << LabeledOutput(LearnProgress->LearnAndTestQuantizedFeaturesCheckSum)
                 );
 
                 LearnProgress = std::move(learnProgressRestored);
@@ -452,7 +456,6 @@ TLearnProgress::TLearnProgress(
     const TVector<TTargetClassifier>& targetClassifiers,
     ui32 featuresCheckSum,
     ui32 foldCreationParamsCheckSum,
-    ui64 cpuRamLimit,
     TMaybe<TFullModel*> initModel,
     NCB::TDataProviders initModelApplyCompatiblePools,
     NPar::TLocalExecutor* localExecutor)
@@ -469,9 +472,7 @@ TLearnProgress::TLearnProgress(
     , LearnAndTestQuantizedFeaturesCheckSum(featuresCheckSum)
     , Rand(randomSeed) {
 
-    if (ApproxDimension > 1) {
-        LabelConverter = labelConverter;
-    }
+    LabelConverter = labelConverter;
 
     if (initRand) {
         Rand.Advance((**initRand).GetCallCount());
@@ -584,7 +585,6 @@ TLearnProgress::TLearnProgress(
             initModelApplyCompatiblePools,
             foldsCreationParams.IsOrderedBoosting,
             foldsCreationParams.StoreExpApproxes,
-            cpuRamLimit,
             localExecutor
         );
     }
@@ -596,7 +596,6 @@ void TLearnProgress::SetSeparateInitModel(
     const TDataProviders& initModelApplyCompatiblePools,
     bool isOrderedBoosting,
     bool storeExpApproxes,
-    ui64 cpuRamLimit,
     NPar::TLocalExecutor* localExecutor) {
 
     CATBOOST_DEBUG_LOG << "TLearnProgress::SetSeparateInitModel\n";
@@ -607,68 +606,14 @@ void TLearnProgress::SetSeparateInitModel(
     // Calc approxes
 
     auto calcApproxFunction = [&] (const TObjectsDataProvider& objectsData) -> TVector<TVector<double>> {
-        // needed for ApplyModelMulti
-        TIntrusiveConstPtr<TObjectsDataProvider> objectsDataWithConsecutiveFeaturesData;
-        TMaybe<TVector<ui32>> srcPermutation;
-        if (const auto* rawObjectsData = dynamic_cast<const TRawObjectsDataProvider*>(&objectsData)) {
-            objectsDataWithConsecutiveFeaturesData
-                = rawObjectsData->GetWithPermutedConsecutiveArrayFeaturesData(
-                    cpuRamLimit,
-                    localExecutor,
-                    &srcPermutation
-                );
-        } else if (const auto* quantizedObjectsData
-                       = dynamic_cast<const TQuantizedObjectsDataProvider*>(&objectsData))
-        {
-            objectsDataWithConsecutiveFeaturesData
-                = quantizedObjectsData->GetWithPermutedConsecutiveArrayFeaturesData(
-                    cpuRamLimit,
-                    localExecutor,
-                    &srcPermutation
-                );
-        } else {
-            CB_ENSURE_INTERNAL(false, "Unknown ObjectsDataProvider type");
-        }
-
-        TVector<TVector<double>> approx = ApplyModelMulti(
+        return ApplyModelMulti(
             initModel,
-            *objectsDataWithConsecutiveFeaturesData,
+            objectsData,
             EPredictionType::RawFormulaVal,
             0,
             SafeIntegerCast<int>(initModel.GetTreeCount()),
             localExecutor
         );
-
-        if (srcPermutation) {
-            CATBOOST_DEBUG_LOG << "srcPermutation present\n";
-
-            TConstArrayRef<ui32> srcPermutationArray = *srcPermutation;
-            const int objectCount = SafeIntegerCast<int>(approx.at(0).size());
-
-            TVector<TVector<double>> resultApprox(approx.size());
-
-            localExecutor->ExecRangeWithThrow(
-                [&] (int approxDimension) {
-                    resultApprox[approxDimension].yresize(objectCount);
-                    TConstArrayRef<double> srcArray = approx[approxDimension];
-                    TArrayRef<double> resultArray = resultApprox[approxDimension];
-                    NPar::ParallelFor(
-                        *localExecutor,
-                        0,
-                        objectCount,
-                        [resultArray, srcPermutationArray, srcArray] (int i) {
-                            resultArray[srcPermutationArray[i]] = srcArray[i];
-                        }
-                    );
-                },
-                0,
-                SafeIntegerCast<int>(approx.size()),
-                NPar::TLocalExecutor::WAIT_COMPLETE
-            );
-            return resultApprox;
-        } else {
-            return approx;
-        }
     };
 
     TVector<std::function<void()>> tasks;
@@ -686,7 +631,6 @@ void TLearnProgress::SetSeparateInitModel(
             auto setFoldApproxes = [&] (bool isPlainFold, TFold* fold) {
                 for (auto& bodyTail : fold->BodyTailArr) {
                     InitApproxFromBaseline(
-                        isPlainFold ? ui32(0) : SafeIntegerCast<ui32>(bodyTail.BodyFinish),
                         isPlainFold ? learnObjectCount : SafeIntegerCast<ui32>(bodyTail.TailFinish),
                         TConstArrayRef<TConstArrayRef<double>>(approxRef),
                         fold->GetLearnPermutationArray(),
@@ -760,7 +704,8 @@ void TLearnProgress::Save(IOutputStream* s) const {
         LearnAndTestQuantizedFeaturesCheckSum,
         SeparateInitModelTreesSize,
         SeparateInitModelCheckSum,
-        Rand
+        Rand,
+        StartingApprox
     );
 }
 
@@ -794,7 +739,8 @@ void TLearnProgress::Load(IInputStream* s) {
         LearnAndTestQuantizedFeaturesCheckSum,
         SeparateInitModelTreesSize,
         SeparateInitModelCheckSum,
-        Rand
+        Rand,
+        StartingApprox
     );
 }
 

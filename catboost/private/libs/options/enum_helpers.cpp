@@ -1,6 +1,8 @@
 #include "enum_helpers.h"
 #include "loss_description.h"
 
+#include <catboost/libs/logging/logging.h>
+
 #include <util/generic/array_ref.h>
 #include <util/generic/is_in.h>
 #include <util/generic/strbuf.h>
@@ -19,12 +21,13 @@ namespace {
         IsMultiClassCompatible         = 1 << 1,
         /** regression **/
         IsRegression                   = 1 << 2,
+        IsMultiRegression              = 1 << 3,
         /** ranking **/
-        IsGroupwise                    = 1 << 3,
-        IsPairwise                     = 1 << 4,
+        IsGroupwise                    = 1 << 4,
+        IsPairwise                     = 1 << 5,
 
         /* various */
-        IsUserDefined                  = 1 << 5
+        IsUserDefined                  = 1 << 6
     };
 
     using EMetricAttributes = TFlags<EMetricAttribute>;
@@ -44,7 +47,8 @@ namespace {
                       || HasFlags(EMetricAttribute::IsMultiClassCompatible)
                       || HasFlags(EMetricAttribute::IsGroupwise)
                       || HasFlags(EMetricAttribute::IsPairwise)
-                      || HasFlags(EMetricAttribute::IsUserDefined),
+                      || HasFlags(EMetricAttribute::IsUserDefined)
+                      || HasFlags(EMetricAttribute::IsMultiRegression),
                       "no type (regression, classification, ranking) for [" + ToString(loss) + "]");
         }
 
@@ -58,7 +62,8 @@ namespace {
                       || HasFlags(EMetricAttribute::IsMultiClassCompatible)
                       || HasFlags(EMetricAttribute::IsGroupwise)
                       || HasFlags(EMetricAttribute::IsPairwise)
-                      || HasFlags(EMetricAttribute::IsUserDefined),
+                      || HasFlags(EMetricAttribute::IsUserDefined)
+                      || HasFlags(EMetricAttribute::IsMultiRegression),
                       "no type (regression, classification, ranking) for [" + ToString(loss) + "]");
         }
 
@@ -125,6 +130,9 @@ MakeRegister(LossInfos,
     ),
     Registree(CtrFactor,
         EMetricAttribute::IsBinaryClassCompatible
+    ),
+    Registree(MultiRMSE,
+        EMetricAttribute::IsMultiRegression
     ),
     Registree(RMSE,
         EMetricAttribute::IsRegression
@@ -414,6 +422,10 @@ static const TVector<ELossFunction> RegressionObjectives = {
     ELossFunction::Huber
 };
 
+static const TVector<ELossFunction> MultiRegressionObjectives = {
+    ELossFunction::MultiRMSE
+};
+
 static const TVector<ELossFunction> ClassificationObjectives = {
     ELossFunction::Logloss,
     ELossFunction::CrossEntropy,
@@ -436,14 +448,16 @@ static const TVector<ELossFunction> RankingObjectives = {
 
 static const TVector<ELossFunction> Objectives = []() {
     TVector<ELossFunction> objectives;
-    for (auto objective : RegressionObjectives) {
-        objectives.push_back(objective);
-    }
-    for (auto objective : ClassificationObjectives) {
-        objectives.push_back(objective);
-    }
-    for (auto objective : RankingObjectives) {
-        objectives.push_back(objective);
+    TVector<const TVector<ELossFunction>*> objectiveLists = {
+        &RegressionObjectives,
+        &MultiRegressionObjectives,
+        &ClassificationObjectives,
+        &RankingObjectives
+    };
+    for (auto objectiveList : objectiveLists) {
+        for (auto objective : *objectiveList) {
+            objectives.push_back(objective);
+        }
     }
     return objectives;
 }();
@@ -507,6 +521,18 @@ bool IsClassificationObjective(ELossFunction loss) {
 
 bool IsRegressionObjective(ELossFunction loss) {
     return IsIn(RegressionObjectives, loss);
+}
+
+bool IsMultiRegressionObjective(ELossFunction loss) {
+    return IsIn(MultiRegressionObjectives, loss);
+}
+
+bool IsMultiRegressionObjective(TStringBuf loss) {
+    return IsMultiRegressionObjective(ParseLossType(loss));
+}
+
+bool IsMultiRegressionMetric(ELossFunction loss) {
+    return GetInfo(loss)->HasFlags(EMetricAttribute::IsMultiRegression);
 }
 
 bool IsRegressionMetric(ELossFunction loss) {
@@ -597,13 +623,6 @@ bool IsEmbeddingFeatureEstimator(EFeatureCalcerType estimatorType) {
     );
 }
 
-bool ShouldSkipFstrGrowPolicy(EGrowPolicy growPolicy) {
-    return (
-        growPolicy == EGrowPolicy::Depthwise ||
-        growPolicy == EGrowPolicy::Lossguide
-    );
-}
-
 bool IsBuildingFullBinaryTree(EGrowPolicy growPolicy) {
     return (
         growPolicy == EGrowPolicy::SymmetricTree ||
@@ -615,5 +634,43 @@ bool IsPlainOnlyModeScoreFunction(EScoreFunction scoreFunction) {
     return (
         scoreFunction != EScoreFunction::Cosine &&
         scoreFunction != EScoreFunction::NewtonCosine
+    );
+}
+
+EFstrType AdjustFeatureImportanceType(EFstrType type, ELossFunction lossFunction) {
+    if (type == EFstrType::InternalInteraction) {
+        return EFstrType::Interaction;
+    }
+    if (type == EFstrType::InternalFeatureImportance || type == EFstrType::FeatureImportance) {
+        return IsGroupwiseMetric(lossFunction)
+           ? EFstrType::LossFunctionChange
+           : EFstrType::PredictionValuesChange;
+    }
+    return type;
+}
+
+EFstrType AdjustFeatureImportanceType(EFstrType type, TStringBuf lossDescription) {
+    switch (type) {
+        case EFstrType::InternalInteraction: {
+            return EFstrType::Interaction;
+        }
+        case EFstrType::FeatureImportance:
+        case EFstrType::InternalFeatureImportance: {
+            if (!lossDescription.empty()) {
+                return AdjustFeatureImportanceType(type, ParseLossType(lossDescription));
+            }
+            CATBOOST_WARNING_LOG << "Optimized objective is not known, "
+                                    "so use PredictionValuesChange for feature importance." << Endl;
+            return EFstrType::PredictionValuesChange;
+        }
+        default:
+            return type;
+    }
+}
+
+bool IsInternalFeatureImportanceType(EFstrType type) {
+    return (
+        type == EFstrType::InternalFeatureImportance ||
+        type == EFstrType::InternalInteraction
     );
 }

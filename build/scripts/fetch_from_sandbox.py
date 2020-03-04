@@ -15,6 +15,7 @@ import fetch_from
 
 ORIGIN_SUFFIX = '?origin=fetch-from-sandbox'
 MDS_PREFIX = 'http://storage-int.mds.yandex.net/get-sandbox/'
+TEMPORARY_ERROR_CODES = (429, 500, 503, 504)
 
 
 def parse_args():
@@ -22,6 +23,7 @@ def parse_args():
     fetch_from.add_common_arguments(parser)
     parser.add_argument('--resource-id', type=int, required=True)
     parser.add_argument('--custom-fetcher')
+    parser.add_argument('--resource-file')
     return parser.parse_args()
 
 
@@ -92,7 +94,7 @@ def _urlopen(url, data=None, headers=None):
             logging.error(e)
             retry_after = int(e.headers.get('Retry-After', str(retry_after)))
 
-            if e.code not in (500, 503, 504):
+            if e.code not in TEMPORARY_ERROR_CODES:
                 raise
 
         except Exception as e:
@@ -135,6 +137,9 @@ def fetch(resource_id, custom_fetcher):
         resource_info = get_resource_info(resource_id, touch=True, no_links=True)
     except Exception as e:
         raise ResourceInfoError(str(e))
+
+    if resource_info.get('state', 'DELETED') != 'READY':
+        raise ResourceInfoError("Resource {} is not READY".format(resource_id))
 
     logging.info('Resource %s info %s', str(resource_id), json.dumps(resource_info))
 
@@ -190,7 +195,7 @@ def fetch(resource_id, custom_fetcher):
             time.sleep(i)
         except urllib2.HTTPError as e:
             logging.error(e)
-            if e.code not in (500, 503, 504):
+            if e.code not in TEMPORARY_ERROR_CODES:
                 exc_info = exc_info or sys.exc_info()
             time.sleep(i)
         except Exception as e:
@@ -206,12 +211,44 @@ def fetch(resource_id, custom_fetcher):
     return fetched_file, resource_info['file_name']
 
 
+def _get_resource_info_from_file(resource_file):
+    if resource_file is None or not os.path.exists(resource_file):
+        return None
+
+    RESOURCE_INFO_JSON = "resource_info.json"
+    RESOURCE_CONTENT_FILE_NAME = "resource"
+
+    resource_dir, resource_file = os.path.split(resource_file)
+    if resource_file != RESOURCE_CONTENT_FILE_NAME:
+        return None
+
+    resource_json = os.path.join(resource_dir, RESOURCE_INFO_JSON)
+    if not os.path.isfile(resource_json):
+        return None
+
+    try:
+        with open(resource_json, 'r') as j:
+            resource_info = json.load(j)
+        resource_info['file_name']  # check consistency
+        return resource_info
+    except:
+        logging.debug('Invalid %s in %s', RESOURCE_INFO_JSON, resource_dir)
+
+    return None
+
+
 def main(args):
     custom_fetcher = os.environ.get('YA_CUSTOM_FETCHER')
 
-    fetched_file, file_name = fetch(args.resource_id, custom_fetcher)
+    resource_info = _get_resource_info_from_file(args.resource_file)
+    if resource_info:
+        fetched_file = args.resource_file
+        file_name = resource_info['file_name']
+    else:
+        # This code should be merged to ya and removed.
+        fetched_file, file_name = fetch(args.resource_id, custom_fetcher)
 
-    fetch_from.process(fetched_file, file_name, args, remove=not custom_fetcher)
+    fetch_from.process(fetched_file, file_name, args, remove=not custom_fetcher and not resource_info)
 
 
 if __name__ == '__main__':

@@ -613,7 +613,7 @@ def _win_kill_process_tree(pid):
 
 
 def _run_readelf(binary_path):
-    return subprocess.check_output([runtime.binary_path('contrib/python/pyelftools/readelf/readelf'), '-s', runtime.binary_path(binary_path)])
+    return str(subprocess.check_output([runtime.binary_path('contrib/python/pyelftools/readelf/readelf'), '-s', runtime.binary_path(binary_path)]))
 
 
 def check_glibc_version(binary_path):
@@ -627,9 +627,16 @@ def check_glibc_version(binary_path):
 
 
 def backtrace_to_html(bt_filename, output):
-    with open(output, "wb") as afile:
-        res = execute([runtime.python_path(), runtime.source_path("devtools/coredump_filter/core_proc.py"), bt_filename], check_exit_code=False, check_sanitizer=False, stdout=afile)
-    if res.exit_code != 0:
-        with open(output, "ab") as afile:
-            afile.write("\n")
-            afile.write(res.std_err)
+    try:
+        from library.python.coredump_filter import core_proc
+        with open(output, "wb") as afile:
+            core_proc.filter_stackdump(bt_filename, stream=afile)
+    except ImportError as e:
+        yatest_logger.debug("Failed to import coredump_filter: %s", e)
+
+        with open(output, "wb") as afile:
+            res = execute([runtime.python_path(), runtime.source_path("library/python/coredump_filter/core_proc.py"), bt_filename], check_exit_code=False, check_sanitizer=False, stdout=afile)
+        if res.exit_code != 0:
+            with open(output, "ab") as afile:
+                afile.write("\n")
+                afile.write(res.std_err)

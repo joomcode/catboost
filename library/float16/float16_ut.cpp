@@ -2,17 +2,13 @@
 
 #include <library/unittest/registar.h>
 #include <util/generic/bitops.h>
+#include <util/generic/cast.h>
 #include <util/stream/format.h>
 #include <util/string/builder.h>
-
+#include <util/generic/ylimits.h>
 
 static ui32 ReintrepretFloat(float v) {
-    union {
-        float fVal;
-        ui32 bitView;
-    } d;
-    d.fVal = v;
-    return d.bitView;
+    return BitCast<ui32>(v);
 }
 
 using namespace NFloat16Impl;
@@ -20,80 +16,75 @@ using namespace NFloat16Impl;
 Y_UNIT_TEST_SUITE(Conversations) {
     Y_UNIT_TEST(32To16) {
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(0)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(0)),
             TStringBuilder{} << Bin(ui16(0))
         );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(1)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(1)),
             TStringBuilder{} << Bin(ui16(0b0011110000000000))
         );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(-2)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(-2)),
             TStringBuilder{} <<  Bin(ui16(0b1100000000000000))
         );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(-2)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(-2)),
             TStringBuilder{} <<  Bin(ui16(0b1100000000000000))
         );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(65504)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(65504)),
             TStringBuilder{} <<  Bin(ui16(0b0111101111111111))
         );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(1e5)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(1e5)),
             TStringBuilder{} <<  Bin(ui16(0b0111110000000000))
         );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(-1e5)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(-1e5)),
             TStringBuilder{} <<  Bin(ui16(0b1111110000000000))
         );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(0.5)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(0.5)),
             TStringBuilder{} <<  Bin(ui16(0b0011100000000000))
         );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(1e-100)),
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(1e-100)),
             TStringBuilder{} <<  Bin(ui16(0))
         );
-        // negative-zero -> zero
-        // UNIT_ASSERT_NO_DIFF(
-        //     TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(-1e-100)),
-        //     TStringBuilder{} <<  Bin(ui16(0b1000000000000000))
-        // );
         UNIT_ASSERT_NO_DIFF(
-            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16(-1e-100)),
-            TStringBuilder{} <<  Bin(ui16(0b0000000000000000))
+            TStringBuilder{} << Bin(ConvertFloat32IntoFloat16Auto(-1e-100)),
+            TStringBuilder{} <<  Bin(ui16(0b1000000000000000))
         );
     }
 
     Y_UNIT_TEST(16To32) {
         UNIT_ASSERT_NO_DIFF(
             TStringBuilder{} << Bin(ReintrepretFloat(0.f)),
-            TStringBuilder{} << Bin(ConvertFloat16IntoFloat32Bitly(0))
+            TStringBuilder{} << Bin(ReintrepretFloat(ConvertFloat16IntoFloat32Auto(0)))
         );
         UNIT_ASSERT_NO_DIFF(
             TStringBuilder{} << Bin(ReintrepretFloat(1.f)),
-            TStringBuilder{} << Bin(ConvertFloat16IntoFloat32Bitly(0b0011110000000000))
+            TStringBuilder{} << Bin(ReintrepretFloat(ConvertFloat16IntoFloat32Auto(0b0011110000000000)))
         );
         UNIT_ASSERT_NO_DIFF(
             TStringBuilder{} << Bin(ReintrepretFloat(-2.f)),
-            TStringBuilder{} << Bin(ConvertFloat16IntoFloat32Bitly(0b1100000000000000))
+            TStringBuilder{} << Bin(ReintrepretFloat(ConvertFloat16IntoFloat32Auto(0b1100000000000000)))
         );
         UNIT_ASSERT_NO_DIFF(
             TStringBuilder{} << Bin(ReintrepretFloat(65504)),
-            TStringBuilder{} << Bin(ConvertFloat16IntoFloat32Bitly(0b0111101111111111))
+            TStringBuilder{} << Bin(ReintrepretFloat(ConvertFloat16IntoFloat32Auto(0b0111101111111111)))
         );
         UNIT_ASSERT_NO_DIFF(
             TStringBuilder{} << Bin(ReintrepretFloat(std::numeric_limits<float>::infinity())),
-            TStringBuilder{} << Bin(ConvertFloat16IntoFloat32Bitly(0b0111110000000000))
+            TStringBuilder{} << Bin(ReintrepretFloat(ConvertFloat16IntoFloat32Auto(0b0111110000000000)))
         );
         UNIT_ASSERT_NO_DIFF(
             TStringBuilder{} << Bin(ReintrepretFloat(-std::numeric_limits<float>::infinity())),
-            TStringBuilder{} << Bin(ConvertFloat16IntoFloat32Bitly(0b1111110000000000))
+            TStringBuilder{} << Bin(ReintrepretFloat(ConvertFloat16IntoFloat32Auto(0b1111110000000000)))
         );
         UNIT_ASSERT_NO_DIFF(
             TStringBuilder{} << Bin(ReintrepretFloat(0.5)),
-            TStringBuilder{} << Bin(ConvertFloat16IntoFloat32Bitly(0b0011100000000000))
+            TStringBuilder{} << Bin(ReintrepretFloat(ConvertFloat16IntoFloat32Auto(0b0011100000000000)))
         );
     }
 
@@ -115,7 +106,7 @@ Y_UNIT_TEST_SUITE(Conversations) {
 
 
     Y_UNIT_TEST(NegativeZero) {
-        TFloat16 a(0.f);
+        TFloat16 a(-0.f);
         TFloat16 b(-1.e-10f);
 
         UNIT_ASSERT_VALUES_EQUAL(a.Data, b.Data);
@@ -217,6 +208,25 @@ Y_UNIT_TEST_SUITE(Intrisincs) {
         UNIT_ASSERT_DOUBLES_EQUAL(expected_f32f16, expected_f32, 1e-2);
         float res = NFloat16Ops::DotProductOnFloatAuto(f32, f16, len);
         UNIT_ASSERT_DOUBLES_EQUAL(expected_f32f16, res, 1e-2);
+    }
+
+    Y_UNIT_TEST(ConvertSequenceFromFloat) {
+        constexpr size_t len = 10;
+        alignas(32) float src[len];
+        alignas(16) TFloat16 dst[len];
+
+        for(size_t i = 0; i < len; ++i) {
+            src[i] = i;
+        }
+        NFloat16Ops::PackFloat16SequenceAuto(src, dst, len);
+        for(size_t i = 0; i < len; ++i) {
+            UNIT_ASSERT_VALUES_EQUAL(dst[i], TFloat16(float(i)));
+        }
+    }
+
+    Y_UNIT_TEST(MaxValues) {
+        UNIT_ASSERT_VALUES_EQUAL(65504.0f, Max<TFloat16>());
+        UNIT_ASSERT_VALUES_EQUAL(-65504.0f, -Max<TFloat16>());
     }
 }
 

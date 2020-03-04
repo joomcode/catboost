@@ -6,7 +6,7 @@
 static TString FloatToStringWithSuffix(float value, bool addFloatingSuffix) {
     TString str = FloatToString(value, PREC_NDIGITS, 9);
     if (addFloatingSuffix) {
-        if (int value; TryFromString<int>(str, value)) {
+        if (int tmpValue; TryFromString<int>(str, tmpValue)) {
             str.append('.');
         }
         str.append("f");
@@ -17,7 +17,7 @@ static TString FloatToStringWithSuffix(float value, bool addFloatingSuffix) {
 namespace NCatboostModelExportHelpers {
     int GetBinaryFeatureCount(const TFullModel& model) {
         int binaryFeatureCount = 0;
-        for (const auto& floatFeature : model.ObliviousTrees->FloatFeatures) {
+        for (const auto& floatFeature : model.ModelTrees->GetFloatFeatures()) {
             if (!floatFeature.UsedInModel()) {
                 continue;
             }
@@ -27,13 +27,13 @@ namespace NCatboostModelExportHelpers {
     }
 
     TString OutputBorderCounts(const TFullModel& model) {
-        return OutputArrayInitializer([&model] (size_t i) { return model.ObliviousTrees->FloatFeatures[i].Borders.size(); }, model.ObliviousTrees->FloatFeatures.size());
+        return OutputArrayInitializer([&model] (size_t i) { return model.ModelTrees->GetFloatFeatures()[i].Borders.size(); }, model.ModelTrees->GetFloatFeatures().size());
     }
 
     TString OutputBorders(const TFullModel& model, bool addFloatingSuffix) {
         TStringBuilder outString;
-        TSequenceCommaSeparator comma(model.ObliviousTrees->FloatFeatures.size(), AddSpaceAfterComma);
-        for (const auto& floatFeature : model.ObliviousTrees->FloatFeatures) {
+        TSequenceCommaSeparator comma(model.ModelTrees->GetFloatFeatures().size(), AddSpaceAfterComma);
+        for (const auto& floatFeature : model.ModelTrees->GetFloatFeatures()) {
             if (!floatFeature.UsedInModel()) {
                 continue;
             }
@@ -44,11 +44,11 @@ namespace NCatboostModelExportHelpers {
 
     TString OutputLeafValues(const TFullModel& model, TIndent indent) {
         TStringBuilder outString;
-        TSequenceCommaSeparator commaOuter(model.ObliviousTrees->TreeSizes.size());
+        TSequenceCommaSeparator commaOuter(model.ModelTrees->GetTreeSizes().size());
         ++indent;
-        auto currentTreeFirstLeafPtr = model.ObliviousTrees->LeafValues.data();
-        for (const auto& treeSize : model.ObliviousTrees->TreeSizes) {
-            const auto treeLeafCount = (1uLL << treeSize) * model.ObliviousTrees->ApproxDimension;
+        auto currentTreeFirstLeafPtr = model.ModelTrees->GetLeafValues().data();
+        for (const auto& treeSize : model.ModelTrees->GetTreeSizes()) {
+            const auto treeLeafCount = (1uLL << treeSize) * model.ModelTrees->GetDimensionsCount();
             outString << '\n' << indent;
             outString << OutputArrayInitializer([&currentTreeFirstLeafPtr] (size_t i) { return FloatToString(currentTreeFirstLeafPtr[i], PREC_NDIGITS, 16); }, treeLeafCount);
             outString << commaOuter;

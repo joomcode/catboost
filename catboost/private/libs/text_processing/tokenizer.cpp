@@ -1,38 +1,45 @@
 #include "tokenizer.h"
-#include <catboost/libs/helpers/exception.h>
-#include <util/generic/string.h>
-#include <util/string/split.h>
 
-using namespace NCB;
+#include <catboost/libs/helpers/serialization.h>
 
+NCB::TTokenizer::TTokenizer(const NTextProcessing::NTokenizer::TTokenizerOptions& options)
+    : Guid(CreateGuid())
+    , TokenizerImpl(options)
+{
+}
 
-namespace {
-    class TNaiveTokenizer : public NCB::ITokenizer {
-    public:
-        void Tokenize(TStringBuf inputString, TVector<TStringBuf>* tokens) const override {
-            tokens->clear();
-            for (const auto& token : StringSplitter(inputString).Split(' ').SkipEmpty()) {
-                tokens->push_back(token);
-            }
+NCB::TGuid NCB::TTokenizer::Id() const {
+    return Guid;
+}
+
+NTextProcessing::NTokenizer::TTokenizerOptions NCB::TTokenizer::Options() const {
+    return TokenizerImpl.GetOptions();
+}
+
+void NCB::TTokenizer::Tokenize(TStringBuf inputString, TTokensWithBuffer* tokens) {
+    if (TokenizerImpl.NeedToModifyTokens()) {
+        TokenizerImpl.Tokenize(inputString, &tokens->Data);
+        tokens->View.clear();
+        for (const auto& token: tokens->Data) {
+            tokens->View.emplace_back(token);
         }
-    };
-}
-
-NCB::TTokenizerPtr NCB::CreateTokenizer(ETokenizerType tokenizerType) {
-    if (tokenizerType == ETokenizerType::Naive)
-        return new TNaiveTokenizer();
-    else {
-        CB_ENSURE(false, "Currently supported only naive tokenizer");
+    } else {
+        TokenizerImpl.TokenizeWithoutCopy(inputString, &tokens->View);
     }
 }
 
-TVector<TVector<TStringBuf>> Tokenize(TConstArrayRef<TStringBuf> textFeature, const TTokenizerPtr& tokenizer) {
-    TVector<TVector<TStringBuf>> tokens;
-    tokens.yresize(textFeature.size());
+void NCB::TTokenizer::Save(IOutputStream *stream) const {
+    WriteMagic(TokenizerMagic.data(), MagicSize, Alignment, stream);
+    Guid.Save(stream);
+    TokenizerImpl.Save(stream);
+}
 
-    for (ui32 i : xrange(textFeature.size())) {
-        tokenizer->Tokenize(textFeature[i], &tokens[i]);
-    }
+void NCB::TTokenizer::Load(IInputStream *stream) {
+    ReadMagic(TokenizerMagic.data(), MagicSize, Alignment, stream);
+    Guid.Load(stream);
+    TokenizerImpl.Load(stream);
+}
 
-    return tokens;
+NCB::TTokenizerPtr NCB::CreateTokenizer(const NTextProcessing::NTokenizer::TTokenizerOptions& options) {
+    return new TTokenizer(options);
 }

@@ -208,6 +208,11 @@ inline static void BuildSingleIndex(
                         splitEnsemble.ExclusiveFeaturesBundleRef.BundleIdx
                     )
                 );
+                break;
+            case ESplitEnsembleType::FeaturesGroup:
+                // FeaturesGroups are implemented only in leafwise scoring now
+                Y_UNREACHABLE();
+                break;
         }
     }
 }
@@ -389,7 +394,8 @@ static void CalcStatsImpl(
 
             auto computePairwiseStats = [&] (
                 const auto& column,
-                TMaybe<const TExclusiveFeaturesBundle*> exclusiveFeaturesBundle = Nothing()
+                TMaybe<const TExclusiveFeaturesBundle*> exclusiveFeaturesBundle = Nothing(),
+                TMaybe<const TFeaturesGroup*> featuresGroup = Nothing()
             ) {
                 ComputePairwiseStats(
                     fold,
@@ -399,6 +405,7 @@ static void CalcStatsImpl(
                     indexer.BucketCount,
                     oneHotMaxSize,
                     exclusiveFeaturesBundle,
+                    featuresGroup,
                     column,
                     docIndexRange,
                     pairIndexRange,
@@ -428,6 +435,7 @@ static void CalcStatsImpl(
                                         oneHotMaxSize,
                                         fold.Indices,
                                         /*exclusiveFeaturesBundle*/ Nothing(),
+                                        /*featuresGroup*/ Nothing(),
                                         docIndexRange,
                                         pairIndexRange,
                                         [buckets](ui32 docIdx) { return buckets[docIdx]; },
@@ -459,14 +467,20 @@ static void CalcStatsImpl(
                     );
                     break;
                 case ESplitEnsembleType::ExclusiveBundle:
-                    const auto bundleIdx = splitEnsemble.ExclusiveFeaturesBundleRef.BundleIdx;
-                    const auto* bundleMetaData =
-                        &(objectsDataProvider.GetExclusiveFeatureBundlesMetaData()[bundleIdx]);
-                    output->SplitEnsembleSpec = TSplitEnsembleSpec::ExclusiveFeatureBundle(*bundleMetaData);
+                    {
+                        const auto bundleIdx = splitEnsemble.ExclusiveFeaturesBundleRef.BundleIdx;
+                        const auto* bundleMetaData =
+                            &(objectsDataProvider.GetExclusiveFeatureBundlesMetaData()[bundleIdx]);
+                        output->SplitEnsembleSpec = TSplitEnsembleSpec::ExclusiveFeatureBundle(*bundleMetaData);
 
-                    computePairwiseStats(
-                        objectsDataProvider.GetExclusiveFeaturesBundle(bundleIdx),
-                        bundleMetaData);
+                        computePairwiseStats(
+                            objectsDataProvider.GetExclusiveFeaturesBundle(bundleIdx),
+                            bundleMetaData);
+                    }
+                    break;
+                case ESplitEnsembleType::FeaturesGroup:
+                    // FeaturesGroups are implemented only in leafwise scoring now
+                    Y_UNREACHABLE();
                     break;
             }
         },
@@ -814,7 +828,7 @@ void CalcStatsAndScores(
     int depth,
     bool useTreeLevelCaching,
     const TVector<int>& currTreeMonotonicConstraints,
-    const TVector<int>& monotonicConstraints,
+    const TMap<ui32, int>& monotonicConstraints,
     NPar::TLocalExecutor* localExecutor,
     TBucketStatsCache* statsFromPrevTree,
     TStats3D* stats3d,
@@ -834,7 +848,8 @@ void CalcStatsAndScores(
         splitEnsemble,
         *objectsDataProvider.GetQuantizedFeaturesInfo(),
         objectsDataProvider.GetPackedBinaryFeaturesSize(),
-        objectsDataProvider.GetExclusiveFeatureBundlesMetaData()
+        objectsDataProvider.GetExclusiveFeatureBundlesMetaData(),
+        objectsDataProvider.GetFeaturesGroupsMetaData()
     );
     const TStatsIndexer indexer(bucketCount);
     const int fullIndexBitCount = depth + GetValueBitCount(bucketCount - 1);
@@ -910,7 +925,8 @@ void CalcStatsAndScores(
         }
         pairwiseStats->SplitEnsembleSpec = TSplitEnsembleSpec(
             splitEnsemble,
-            objectsDataProvider.GetExclusiveFeatureBundlesMetaData()
+            objectsDataProvider.GetExclusiveFeatureBundlesMetaData(),
+            objectsDataProvider.GetFeaturesGroupsMetaData()
         );
 
         selectCalcStatsImpl(/*isCaching*/ std::false_type(), fold, /*splitStatsCount*/0, pairwiseStats);
@@ -945,7 +961,8 @@ void CalcStatsAndScores(
                 stats3d->MaxLeafCount = 1U << depth;
                 stats3d->SplitEnsembleSpec = TSplitEnsembleSpec(
                     splitEnsemble,
-                    objectsDataProvider.GetExclusiveFeatureBundlesMetaData()
+                    objectsDataProvider.GetExclusiveFeatureBundlesMetaData(),
+                    objectsDataProvider.GetFeaturesGroupsMetaData()
                 );
 
                 extOrInSplitStats = TBucketStatsRefOptionalHolder(stats3d->Stats);
@@ -989,7 +1006,8 @@ void CalcStatsAndScores(
                 stats3d->MaxLeafCount = 1U << depth;
                 stats3d->SplitEnsembleSpec = TSplitEnsembleSpec(
                     splitEnsemble,
-                    objectsDataProvider.GetExclusiveFeatureBundlesMetaData()
+                    objectsDataProvider.GetExclusiveFeatureBundlesMetaData(),
+                    objectsDataProvider.GetFeaturesGroupsMetaData()
                 );
             }
         }
@@ -997,7 +1015,8 @@ void CalcStatsAndScores(
             const int leafCount = 1 << depth;
             TSplitEnsembleSpec splitEnsembleSpec(
                 splitEnsemble,
-                objectsDataProvider.GetExclusiveFeatureBundlesMetaData()
+                objectsDataProvider.GetExclusiveFeatureBundlesMetaData(),
+                objectsDataProvider.GetFeaturesGroupsMetaData()
             );
             const int candidateSplitCount = CalcSplitsCount(
                 splitEnsembleSpec, indexer.BucketCount, oneHotMaxSize
@@ -1013,8 +1032,10 @@ void CalcStatsAndScores(
                     );
                     if (split.Type == ESplitType::FloatFeature) {
                         Y_ASSERT(split.FeatureIdx >= 0);
-                        candidateSplitMonotonicConstraints[splitIdx] =
-                            monotonicConstraints[split.FeatureIdx];
+                        if (monotonicConstraints.contains(split.FeatureIdx)) {
+                            candidateSplitMonotonicConstraints[splitIdx] =
+                                monotonicConstraints.at(split.FeatureIdx);
+                        }
                     }
                 }
             }
@@ -1053,18 +1074,7 @@ TVector<double> GetScores(
     const int leafCount = 1 << depth;
     const TStatsIndexer indexer(bucketCount);
 
-    THolder<IPointwiseScoreCalcer> scoreCalcer;
-    switch (fitParams.ObliviousTreeOptions->ScoreFunction) {
-        case EScoreFunction::Cosine:
-            scoreCalcer = MakeHolder<TCosineScoreCalcer>();
-            break;
-        case EScoreFunction::L2:
-            scoreCalcer = MakeHolder<TL2ScoreCalcer>();
-            break;
-        default:
-            CB_ENSURE(false, "Error: score function for CPU should be Cosine or L2");
-            break;
-    }
+    auto scoreCalcer = MakePointwiseScoreCalcer(fitParams.ObliviousTreeOptions->ScoreFunction);
     scoreCalcer->SetSplitsCount(CalcSplitsCount(stats3d.SplitEnsembleSpec, bucketCount, oneHotMaxSize));
 
     const double scaledL2Regularizer = l2Regularizer * (sumAllWeights / allDocCount);

@@ -27,18 +27,62 @@ ADDINCL(
     GLOBAL contrib/libs/openssl/include
 )
 
+IF (OS_LINUX)
+    IF (ARCH_ARM64)
+        SET(LINUX_ARM64 yes)
+    ELSEIF(ARCH_ARM7)
+        SET(LINUX_ARMV7 yes)
+    ELSEIF(ARCH_X86_64)
+        SET(LINUX_X86_64 yes)
+    ENDIF()
+ENDIF()
+
+IF (OS_IOS)
+    IF (ARCH_ARM64)
+        SET(IOS_ARM64 yes)
+    ELSEIF(ARCH_ARM7)
+        SET(IOS_ARMV7 yes)
+    ELSEIF(ARCH_X86_64)
+        SET(IOS_X86_64 yes)
+    ELSEIF(ARCH_I386)
+        SET(IOS_I386 yes)
+    ENDIF()
+ENDIF()
+
+IF (OS_ANDROID)
+    IF (ARCH_ARM64)
+        SET(ANDROID_ARM64 yes)
+    ELSEIF(ARCH_ARM7)
+        SET(ANDROID_ARMV7 yes)
+    ELSEIF(ARCH_X86_64)
+        SET(ANDROID_X86_64 yes)
+    ELSEIF(ARCH_I686)
+        SET(ANDROID_I686 yes)
+    ENDIF()
+ENDIF()
+
 CFLAGS(
     -DDSO_NONE
     -DECP_NISTZ256_ASM
-    -DKECCAK1600_ASM
     -DOPENSSL_BN_ASM_MONT
     -DOPENSSL_CPUID_OBJ
     -DPOLY1305_ASM
     -DSHA1_ASM
     -DSHA256_ASM
     -DSHA512_ASM
-    -DVPAES_ASM
 )
+
+IF (NOT IOS_I386 AND NOT ANDROID_I686)
+    CFLAGS(
+        -DKECCAK1600_ASM
+    )
+ENDIF()
+
+IF (NOT IOS_ARMV7 AND NOT ANDROID_ARMV7 AND NOT LINUX_ARMV7)
+    CFLAGS(
+        -DVPAES_ASM
+    )
+ENDIF()
 
 IF (NOT OS_WINDOWS)
     CFLAGS(
@@ -97,16 +141,23 @@ IF (ARCH_TYPE_32)
     CFLAGS(-DOPENSSL_NO_EC_NISTP_64_GCC_128)
 ENDIF()
 
+IF (ARCH_X86_64 AND NOT MSVC)
+    SET_APPEND(SFLAGS -mavx512bw -mavx512ifma -mavx512vl)
+ENDIF()
+
 IF (OS_WINDOWS AND ARCH_X86_64)
     LDFLAGS(
         ws2_32.lib
     )
 ENDIF()
 
+IF(OS_WINDOWS)
+    SET_COMPILE_OUTPUTS_MODIFIERS(NOREL)
+ENDIF()
+
 SRCS(
     aes/aes_cbc.c
     aes/aes_cfb.c
-    aes/aes_core.c
     aes/aes_ecb.c
     aes/aes_ige.c
     aes/aes_misc.c
@@ -185,7 +236,6 @@ SRCS(
     async/async_wait.c
     bf/bf_cfb64.c
     bf/bf_ecb.c
-    bf/bf_enc.c
     bf/bf_ofb64.c
     bf/bf_skey.c
     bio/b_addr.c
@@ -250,7 +300,6 @@ SRCS(
     camellia/cmll_cfb.c
     camellia/cmll_ctr.c
     camellia/cmll_ecb.c
-    camellia/cmll_misc.c
     camellia/cmll_ofb.c
     cast/c_cfb64.c
     cast/c_ecb.c
@@ -304,11 +353,9 @@ SRCS(
     des/cfb64ede.c
     des/cfb64enc.c
     des/cfb_enc.c
-    des/des_enc.c
     des/ecb3_enc.c
     des/ecb_enc.c
     des/fcrypt.c
-    des/fcrypt_b.c
     des/ofb64ede.c
     des/ofb64enc.c
     des/ofb_enc.c
@@ -390,28 +437,6 @@ SRCS(
     ec/ecp_oct.c
     ec/ecp_smpl.c
     ec/ecx_meth.c
-    engine/eng_all.c
-    engine/eng_cnf.c
-    engine/eng_ctrl.c
-    engine/eng_dyn.c
-    engine/eng_err.c
-    engine/eng_fat.c
-    engine/eng_init.c
-    engine/eng_lib.c
-    engine/eng_list.c
-    engine/eng_openssl.c
-    engine/eng_pkey.c
-    engine/eng_rdrand.c
-    engine/eng_table.c
-    engine/tb_asnmth.c
-    engine/tb_cipher.c
-    engine/tb_dh.c
-    engine/tb_digest.c
-    engine/tb_dsa.c
-    engine/tb_eckey.c
-    engine/tb_pkmeth.c
-    engine/tb_rand.c
-    engine/tb_rsa.c
     err/err.c
     err/err_all.c
     err/err_prn.c
@@ -733,6 +758,46 @@ SRCS(
     x509v3/v3err.c
 )
 
+IF (NOT IOS_ARM64 AND NOT IOS_ARMV7)
+    SRCS(
+        engine/eng_all.c
+        engine/eng_cnf.c
+        engine/eng_ctrl.c
+        engine/eng_dyn.c
+        engine/eng_err.c
+        engine/eng_fat.c
+        engine/eng_init.c
+        engine/eng_lib.c
+        engine/eng_list.c
+        engine/eng_openssl.c
+        engine/eng_pkey.c
+        engine/eng_rdrand.c
+        engine/eng_table.c
+        engine/tb_asnmth.c
+        engine/tb_cipher.c
+        engine/tb_dh.c
+        engine/tb_digest.c
+        engine/tb_dsa.c
+        engine/tb_eckey.c
+        engine/tb_pkmeth.c
+        engine/tb_rand.c
+        engine/tb_rsa.c
+    )
+ENDIF()
+IF (NOT IOS_ARMV7 AND NOT ANDROID_ARMV7 AND NOT LINUX_ARMV7)
+    SRCS(
+        aes/aes_core.c
+    )
+ENDIF()
+IF (NOT IOS_I386 AND NOT ANDROID_I686)
+    SRCS(
+        bf/bf_enc.c
+        camellia/cmll_misc.c
+        des/des_enc.c
+        des/fcrypt_b.c
+    )
+ENDIF()
+
 IF (OS_DARWIN AND ARCH_X86_64 OR OS_LINUX AND ARCH_X86_64 OR OS_WINDOWS AND ARCH_X86_64)
     SRCS(
         bn/rsaz_exp.c
@@ -784,6 +849,42 @@ IF (OS_DARWIN AND ARCH_X86_64)
     )
 ENDIF()
 
+IF (OS_LINUX AND ARCH_ARM7)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -DOPENSSL_BN_ASM_GF2m
+        -DAES_ASM
+        -DBSAES_ASM
+        -DGHASH_ASM
+    )
+    SRCS(
+        ../asm/android/arm/crypto/ec/ecp_nistz256-armv4.S
+        ../asm/android/arm/crypto/poly1305/poly1305-armv4.S
+        ../asm/android/arm/crypto/armv4cpuid.S
+        ../asm/android/arm/crypto/bn/armv4-mont.S
+        ../asm/android/arm/crypto/bn/armv4-gf2m.S
+        ../asm/android/arm/crypto/aes/aes-armv4.S
+        ../asm/android/arm/crypto/aes/bsaes-armv7.S
+        ../asm/android/arm/crypto/aes/aesv8-armx.S
+        ../asm/android/arm/crypto/sha/keccak1600-armv4.S
+        ../asm/android/arm/crypto/sha/sha256-armv4.S
+        ../asm/android/arm/crypto/sha/sha512-armv4.S
+        ../asm/android/arm/crypto/sha/sha1-armv4-large.S
+        ../asm/android/arm/crypto/chacha/chacha-armv4.S
+        ../asm/android/arm/crypto/modes/ghashv8-armx.S
+        ../asm/android/arm/crypto/modes/ghash-armv4.S
+        armcap.c
+        bn/bn_asm.c
+        camellia/camellia.c
+        camellia/cmll_cbc.c
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+        rc4/rc4_enc.c
+        rc4/rc4_skey.c
+        whrlpool/wp_block.c
+    )
+ENDIF()
+
 IF (OS_LINUX AND ARCH_AARCH64)
     SRCS(
         ../asm/aarch64/crypto/aes/aesv8-armx.S
@@ -798,8 +899,6 @@ IF (OS_LINUX AND ARCH_AARCH64)
         ../asm/aarch64/crypto/sha/sha1-armv8.S
         ../asm/aarch64/crypto/sha/sha256-armv8.S
         ../asm/aarch64/crypto/sha/sha512-armv8.S
-        aes/aes_cbc.c
-        aes/aes_core.c
         armcap.c
         camellia/camellia.c
         camellia/cmll_cbc.c
@@ -829,8 +928,6 @@ IF (OS_LINUX AND ARCH_PPC64LE)
         ../asm/ppc64le/crypto/sha/sha256p8-ppc.s
         ../asm/ppc64le/crypto/sha/sha512-ppc.s
         ../asm/ppc64le/crypto/sha/sha512p8-ppc.s
-        aes/aes_cbc.c
-        aes/aes_core.c
         ppccap.c
         camellia/camellia.c
         camellia/cmll_cbc.c
@@ -903,6 +1000,327 @@ IF (OS_WINDOWS AND ARCH_X86_64)
         ../asm/windows/crypto/sha/sha512-x86_64.asm
         ../asm/windows/crypto/whrlpool/wp-x86_64.asm
         ../asm/windows/crypto/x86_64cpuid.asm
+    )
+ENDIF()
+
+IF (OS_IOS AND ARCH_ARM64)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -D_REENTRANT
+    )
+    SRCS(
+        ../asm/ios/arm64/crypto/aes/aesv8-armx.S
+        ../asm/ios/arm64/crypto/aes/vpaes-armv8.S
+        ../asm/ios/arm64/crypto/arm64cpuid.S
+        ../asm/ios/arm64/crypto/bn/armv8-mont.S
+        ../asm/ios/arm64/crypto/chacha/chacha-armv8.S
+        ../asm/ios/arm64/crypto/ec/ecp_nistz256-armv8.S
+        ../asm/ios/arm64/crypto/modes/ghashv8-armx.S
+        ../asm/ios/arm64/crypto/poly1305/poly1305-armv8.S
+        ../asm/ios/arm64/crypto/sha/keccak1600-armv8.S
+        ../asm/ios/arm64/crypto/sha/sha1-armv8.S
+        ../asm/ios/arm64/crypto/sha/sha256-armv8.S
+        ../asm/ios/arm64/crypto/sha/sha512-armv8.S
+        armcap.c
+        bn/bn_asm.c
+        camellia/camellia.c
+        camellia/cmll_cbc.c
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+        rc4/rc4_enc.c
+        rc4/rc4_skey.c
+        whrlpool/wp_block.c
+    )
+ENDIF()
+
+IF (OS_IOS AND ARCH_ARM7)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -DOPENSSL_BN_ASM_GF2m
+        -DAES_ASM
+        -DBSAES_ASM
+        -DGHASH_ASM
+        -D_REENTRANT
+    )
+    SRCS(
+        ../asm/ios/armv7/crypto/modes/ghash-armv4.S
+        ../asm/ios/armv7/crypto/modes/ghashv8-armx.S
+        ../asm/ios/armv7/crypto/chacha/chacha-armv4.S
+        ../asm/ios/armv7/crypto/ec/ecp_nistz256-armv4.S
+        ../asm/ios/armv7/crypto/poly1305/poly1305-armv4.S
+        ../asm/ios/armv7/crypto/bn/armv4-gf2m.S
+        ../asm/ios/armv7/crypto/bn/armv4-mont.S
+        ../asm/ios/armv7/crypto/sha/sha512-armv4.S
+        ../asm/ios/armv7/crypto/sha/sha1-armv4-large.S
+        ../asm/ios/armv7/crypto/sha/sha256-armv4.S
+        ../asm/ios/armv7/crypto/sha/keccak1600-armv4.S
+        ../asm/ios/armv7/crypto/armv4cpuid.S
+        ../asm/ios/armv7/crypto/aes/aesv8-armx.S
+        ../asm/ios/armv7/crypto/aes/bsaes-armv7.S
+        ../asm/ios/armv7/crypto/aes/aes-armv4.S
+        armcap.c
+        bn/bn_asm.c
+        camellia/camellia.c
+        camellia/cmll_cbc.c
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+        rc4/rc4_enc.c
+        rc4/rc4_skey.c
+        whrlpool/wp_block.c
+    )
+ENDIF()
+
+IF (OS_IOS AND ARCH_X86_64)
+    CFLAGS(
+        -DL_ENDIAN
+        -DOPENSSL_PIC
+        -DOPENSSL_IA32_SSE2
+        -DOPENSSL_BN_ASM_MONT5
+        -DOPENSSL_BN_ASM_GF2m
+        -DRC4_ASM
+        -DMD5_ASM
+        -DGHASH_ASM
+        -DECP_NISTZ256_ASM
+        -DX25519_ASM
+        -D_REENTRANT
+    )
+    SRCS(
+        ../asm/ios/x86_64/crypto/md5/md5-x86_64.s
+        ../asm/ios/x86_64/crypto/rc4/rc4-md5-x86_64.s
+        ../asm/ios/x86_64/crypto/rc4/rc4-x86_64.s
+        ../asm/ios/x86_64/crypto/modes/ghash-x86_64.s
+        ../asm/ios/x86_64/crypto/modes/aesni-gcm-x86_64.s
+        ../asm/ios/x86_64/crypto/chacha/chacha-x86_64.s
+        ../asm/ios/x86_64/crypto/ec/ecp_nistz256-x86_64.s
+        ../asm/ios/x86_64/crypto/ec/x25519-x86_64.s
+        ../asm/ios/x86_64/crypto/x86_64cpuid.s
+        ../asm/ios/x86_64/crypto/poly1305/poly1305-x86_64.s
+        ../asm/ios/x86_64/crypto/bn/rsaz-x86_64.s
+        ../asm/ios/x86_64/crypto/bn/x86_64-mont.s
+        ../asm/ios/x86_64/crypto/bn/x86_64-gf2m.s
+        ../asm/ios/x86_64/crypto/bn/x86_64-mont5.s
+        ../asm/ios/x86_64/crypto/bn/rsaz-avx2.s
+        ../asm/ios/x86_64/crypto/sha/sha512-x86_64.s
+        ../asm/ios/x86_64/crypto/sha/sha256-x86_64.s
+        ../asm/ios/x86_64/crypto/sha/keccak1600-x86_64.s
+        ../asm/ios/x86_64/crypto/sha/sha1-x86_64.s
+        ../asm/ios/x86_64/crypto/sha/sha1-mb-x86_64.s
+        ../asm/ios/x86_64/crypto/sha/sha256-mb-x86_64.s
+        ../asm/ios/x86_64/crypto/camellia/cmll-x86_64.s
+        ../asm/ios/x86_64/crypto/whrlpool/wp-x86_64.s
+        ../asm/ios/x86_64/crypto/aes/vpaes-x86_64.s
+        ../asm/ios/x86_64/crypto/aes/aesni-sha1-x86_64.s
+        ../asm/ios/x86_64/crypto/aes/aesni-sha256-x86_64.s
+        ../asm/ios/x86_64/crypto/aes/aesni-x86_64.s
+        ../asm/ios/x86_64/crypto/aes/aesni-mb-x86_64.s
+        bn/asm/x86_64-gcc.c
+        bn/rsaz_exp.c
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+    )
+ENDIF()
+
+IF (OS_IOS AND ARCH_I386)
+    CFLAGS(
+        -DL_ENDIAN
+        -DOPENSSL_PIC
+        -DOPENSSL_BN_ASM_PART_WORDS
+        -DOPENSSL_IA32_SSE2
+        -DOPENSSL_BN_ASM_GF2m
+        -DRC4_ASM
+        -DMD5_ASM
+        -DRMD160_ASM
+        -DWHIRLPOOL_ASM
+        -DGHASH_ASM
+        -D_REENTRANT
+    )
+    SRCS(
+        ../asm/ios/i386/crypto/md5/md5-586.s
+        ../asm/ios/i386/crypto/rc4/rc4-586.s
+        ../asm/ios/i386/crypto/des/des-586.s
+        ../asm/ios/i386/crypto/des/crypt586.s
+        ../asm/ios/i386/crypto/modes/ghash-x86.s
+        ../asm/ios/i386/crypto/x86cpuid.s
+        ../asm/ios/i386/crypto/chacha/chacha-x86.s
+        ../asm/ios/i386/crypto/ec/ecp_nistz256-x86.s
+        ../asm/ios/i386/crypto/poly1305/poly1305-x86.s
+        ../asm/ios/i386/crypto/bf/bf-586.s
+        ../asm/ios/i386/crypto/bn/co-586.s
+        ../asm/ios/i386/crypto/bn/x86-mont.s
+        ../asm/ios/i386/crypto/bn/x86-gf2m.s
+        ../asm/ios/i386/crypto/bn/bn-586.s
+        ../asm/ios/i386/crypto/sha/sha512-586.s
+        ../asm/ios/i386/crypto/sha/sha1-586.s
+        ../asm/ios/i386/crypto/sha/sha256-586.s
+        ../asm/ios/i386/crypto/camellia/cmll-x86.s
+        ../asm/ios/i386/crypto/whrlpool/wp-mmx.s
+        ../asm/ios/i386/crypto/ripemd/rmd-586.s
+        ../asm/ios/i386/crypto/aes/vpaes-x86.s
+        ../asm/ios/i386/crypto/aes/aesni-x86.s
+        ../asm/ios/i386/engines/e_padlock-x86.s
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+        sha/keccak1600.c
+        whrlpool/wp_block.c
+    )
+ENDIF()
+
+IF (OS_ANDROID AND ARCH_X86_64)
+    CFLAGS(
+        -DOPENSSL_USE_NODELETE
+        -DOPENSSL_PIC
+        -DOPENSSL_IA32_SSE2
+        -DOPENSSL_BN_ASM_MONT5
+        -DOPENSSL_BN_ASM_GF2m
+        -DRC4_ASM
+        -DMD5_ASM
+        -DGHASH_ASM
+        -DX25519_ASM
+        -D__ANDROID_API__=21
+    )
+    SRCS(
+        ../asm/android/x86_64/crypto/ec/x25519-x86_64.s
+        ../asm/android/x86_64/crypto/ec/ecp_nistz256-x86_64.s
+        ../asm/android/x86_64/crypto/md5/md5-x86_64.s
+        ../asm/android/x86_64/crypto/rc4/rc4-x86_64.s
+        ../asm/android/x86_64/crypto/rc4/rc4-md5-x86_64.s
+        ../asm/android/x86_64/crypto/whrlpool/wp-x86_64.s
+        ../asm/android/x86_64/crypto/poly1305/poly1305-x86_64.s
+        ../asm/android/x86_64/crypto/x86_64cpuid.s
+        ../asm/android/x86_64/crypto/camellia/cmll-x86_64.s
+        ../asm/android/x86_64/crypto/bn/x86_64-mont5.s
+        ../asm/android/x86_64/crypto/bn/rsaz-avx2.s
+        ../asm/android/x86_64/crypto/bn/rsaz-x86_64.s
+        ../asm/android/x86_64/crypto/bn/x86_64-mont.s
+        ../asm/android/x86_64/crypto/bn/x86_64-gf2m.s
+        ../asm/android/x86_64/crypto/aes/aesni-sha256-x86_64.s
+        ../asm/android/x86_64/crypto/aes/aesni-mb-x86_64.s
+        ../asm/android/x86_64/crypto/aes/aesni-x86_64.s
+        ../asm/android/x86_64/crypto/aes/vpaes-x86_64.s
+        ../asm/android/x86_64/crypto/aes/aesni-sha1-x86_64.s
+        ../asm/android/x86_64/crypto/sha/sha256-x86_64.s
+        ../asm/android/x86_64/crypto/sha/sha1-mb-x86_64.s
+        ../asm/android/x86_64/crypto/sha/sha1-x86_64.s
+        ../asm/android/x86_64/crypto/sha/sha256-mb-x86_64.s
+        ../asm/android/x86_64/crypto/sha/sha512-x86_64.s
+        ../asm/android/x86_64/crypto/sha/keccak1600-x86_64.s
+        ../asm/android/x86_64/crypto/chacha/chacha-x86_64.s
+        ../asm/android/x86_64/crypto/modes/ghash-x86_64.s
+        ../asm/android/x86_64/crypto/modes/aesni-gcm-x86_64.s
+        bn/asm/x86_64-gcc.c
+        bn/rsaz_exp.c
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+    )
+ENDIF()
+
+IF (OS_ANDROID AND ARCH_I686)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -DOPENSSL_BN_ASM_PART_WORDS
+        -DOPENSSL_IA32_SSE2
+        -DOPENSSL_BN_ASM_GF2m
+        -DRC4_ASM
+        -DMD5_ASM
+        -DRMD160_ASM
+        -DWHIRLPOOL_ASM
+        -DGHASH_ASM
+        -D__ANDROID_API__=15
+    )
+    SRCS(
+        ../asm/android/i686/crypto/ec/ecp_nistz256-x86.s
+        ../asm/android/i686/crypto/bf/bf-586.s
+        ../asm/android/i686/crypto/md5/md5-586.s
+        ../asm/android/i686/crypto/rc4/rc4-586.s
+        ../asm/android/i686/crypto/whrlpool/wp-mmx.s
+        ../asm/android/i686/crypto/x86cpuid.s
+        ../asm/android/i686/crypto/des/crypt586.s
+        ../asm/android/i686/crypto/des/des-586.s
+        ../asm/android/i686/crypto/poly1305/poly1305-x86.s
+        ../asm/android/i686/crypto/ripemd/rmd-586.s
+        ../asm/android/i686/crypto/camellia/cmll-x86.s
+        ../asm/android/i686/crypto/bn/bn-586.s
+        ../asm/android/i686/crypto/bn/co-586.s
+        ../asm/android/i686/crypto/bn/x86-gf2m.s
+        ../asm/android/i686/crypto/bn/x86-mont.s
+        ../asm/android/i686/crypto/aes/aesni-x86.s
+        ../asm/android/i686/crypto/aes/vpaes-x86.s
+        ../asm/android/i686/crypto/sha/sha512-586.s
+        ../asm/android/i686/crypto/sha/sha256-586.s
+        ../asm/android/i686/crypto/sha/sha1-586.s
+        ../asm/android/i686/crypto/chacha/chacha-x86.s
+        ../asm/android/i686/crypto/modes/ghash-x86.s
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+        sha/keccak1600.c
+        whrlpool/wp_block.c
+    )
+ENDIF()
+
+IF (OS_ANDROID AND ARCH_ARM7)
+    CFLAGS(
+        -DOPENSSL_PIC
+        -DOPENSSL_BN_ASM_GF2m
+        -DAES_ASM
+        -DBSAES_ASM
+        -DGHASH_ASM
+        -D__ANDROID_API__=15
+    )
+    SRCS(
+        ../asm/android/arm/crypto/ec/ecp_nistz256-armv4.S
+        ../asm/android/arm/crypto/poly1305/poly1305-armv4.S
+        ../asm/android/arm/crypto/armv4cpuid.S
+        ../asm/android/arm/crypto/bn/armv4-mont.S
+        ../asm/android/arm/crypto/bn/armv4-gf2m.S
+        ../asm/android/arm/crypto/aes/aes-armv4.S
+        ../asm/android/arm/crypto/aes/bsaes-armv7.S
+        ../asm/android/arm/crypto/aes/aesv8-armx.S
+        ../asm/android/arm/crypto/sha/keccak1600-armv4.S
+        ../asm/android/arm/crypto/sha/sha256-armv4.S
+        ../asm/android/arm/crypto/sha/sha512-armv4.S
+        ../asm/android/arm/crypto/sha/sha1-armv4-large.S
+        ../asm/android/arm/crypto/chacha/chacha-armv4.S
+        ../asm/android/arm/crypto/modes/ghashv8-armx.S
+        ../asm/android/arm/crypto/modes/ghash-armv4.S
+        armcap.c
+        bn/bn_asm.c
+        camellia/camellia.c
+        camellia/cmll_cbc.c
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+        rc4/rc4_enc.c
+        rc4/rc4_skey.c
+        whrlpool/wp_block.c
+    )
+ENDIF()
+
+IF (OS_ANDROID AND ARCH_ARM64)
+    CFLAGS(
+       -DOPENSSL_PIC
+       -D__ANDROID_API__=21 
+    )
+    SRCS(
+        ../asm/android/arm64/crypto/ec/ecp_nistz256-armv8.S
+        ../asm/android/arm64/crypto/poly1305/poly1305-armv8.S
+        ../asm/android/arm64/crypto/bn/armv8-mont.S
+        ../asm/android/arm64/crypto/aes/vpaes-armv8.S
+        ../asm/android/arm64/crypto/aes/aesv8-armx.S
+        ../asm/android/arm64/crypto/sha/sha512-armv8.S
+        ../asm/android/arm64/crypto/sha/keccak1600-armv8.S
+        ../asm/android/arm64/crypto/sha/sha1-armv8.S
+        ../asm/android/arm64/crypto/sha/sha256-armv8.S
+        ../asm/android/arm64/crypto/arm64cpuid.S
+        ../asm/android/arm64/crypto/chacha/chacha-armv8.S
+        ../asm/android/arm64/crypto/modes/ghashv8-armx.S
+        armcap.c
+        bn/bn_asm.c
+        camellia/camellia.c
+        camellia/cmll_cbc.c
+        dso/dso_dlfcn.c
+        rand/rand_vms.c
+        rc4/rc4_enc.c
+        rc4/rc4_skey.c
+        whrlpool/wp_block.c
     )
 ENDIF()
 

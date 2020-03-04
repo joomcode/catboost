@@ -16,6 +16,10 @@
 - includes:
     - iconv.h:       contrib/libs/libiconv/iconv.h
 
+- source_filter: "^contrib/restricted/glib/glib/gconvert.c"
+  includes:
+    - iconv.h:       contrib/libs/libiconv/include/iconv.h
+
 - includes:
   - cudnn.h:         contrib/libs/nvidia/cudnn/cudnn.h
 
@@ -58,6 +62,17 @@
     - unistd.h:      contrib/libs/libunistring/unistd.h
     - wchar.h:       contrib/libs/libunistring/wchar.h
     - wctype.h:      contrib/libs/libunistring/wctype.h
+
+- source_filter: "^contrib/libs/gsasl"
+  includes:
+    - stdlib.h:      contrib/libs/gsasl/gl/stdlib.h
+    - stdio.h:       contrib/libs/gsasl/gl/stdio.h
+    - unistd.h:      contrib/libs/gsasl/gl/unistd.h
+    - string.h:      contrib/libs/gsasl/gl/string.h
+    - minmax.h:      contrib/libs/gsasl/gl/minmax.h
+    - sys/types.h:   contrib/libs/gsasl/gl/sys/types.h
+    - wchar.h:       contrib/libs/gsasl/gl/wchar.h
+    - alloca.h:      contrib/libs/gsasl/gl/alloca.h
 
 - source_filter: "^contrib/libs/libidn2/"
   includes:
@@ -113,10 +128,6 @@
   includes:
     - sys/queue.h:   contrib/libs/libevent/compat/sys/queue.h
 
-- source_filter: "^contrib/libs/(libmnl|libnetfilter_log)"
-  includes:
-    - linux/netlink.h: contrib/libs/libmnl/include/linux/netlink.h
-
 - source_filter: "^contrib/libs/musl"
   includes:
     - atomic.h:      contrib/libs/musl/src/internal/atomic.h
@@ -138,7 +149,6 @@
 
 - source_filter: "^contrib/libs/gdal"
   includes:
-    - io.h:          contrib/libs/gdal/ogr/ogrsf_frmts/cad/libopencad/dwg/io.h
     - iconv.h:       contrib/libs/libiconv/include/iconv.h
 
 - source_filter: "^contrib/libs/zeromq"
@@ -148,11 +158,12 @@
 
 - source_filter: "^contrib/libs/ffmpeg-3"
   includes:
+    - fontconfig/fontconfig.h
     - fribidi.h
     - stdatomic.h:   contrib/libs/ffmpeg-3.4.1/compat/atomics/win32/stdatomic.h
     - nppi.h:        contrib/libs/ffmpeg-3/libavfilter/vf_scale_npp.c
 
-- source_filter: "^contrib/libs/(gc-profiler|v8-profiler)"
+- source_filter: "^contrib/libs/v8-profiler"
   includes:
     - nan.h:         contrib/libs/node_nan/nan.h
 
@@ -234,10 +245,15 @@
 # unused legacy include in boost
 - source_filter: "^contrib/deprecated/boost"
   includes:
+    - atomic.h
     - fstream.h
+    - ../include/fenv.h
 
 # libc++ internal implementation details
 - source_filter: "^contrib/deprecated/boost/boost/asio/detail"
+  includes:
+  - __config
+- source_filter: "quasar/yandex_io/daemons/external_libs/(boost/include/boost|websocketpp/include)/asio/detail"
   includes:
   - __config
 
@@ -257,6 +273,14 @@
     - sasl/sasl.h
     - sasl/saslutil.h
 
+- source_filter: "^contrib/libs/apr"
+  includes:
+    - atomic.h
+
+- source_filter: "^contrib/libs/apr-util"
+  includes:
+    - iconv.h: contrib/libs/libiconv/include/iconv.h
+
 - source_filter: "^contrib/libs/(apr|httpd|llvm)"
   includes:
     - uuid.h
@@ -272,10 +296,6 @@
     - unicode/utf16.h
     - unicode/utypes.h
     - unicode/uversion.h
-
-- source_filter: "^contrib/deprecated/boost"
-  includes:
-    - ../include/fenv.h
 
 - source_filter: "^contrib/deprecated/glib"
   includes:
@@ -299,6 +319,7 @@
 
 - source_filter: "^contrib/libs/freetype"
   includes:
+    - hb-ot.h
     - hb-ft.h
     - hb.h
 
@@ -427,7 +448,6 @@
     - google/protobuf/descriptor.h
     - google/protobuf/descriptor.pb.h
     - gperftools/malloc_extension.h
-    - h3api.h
     - hdfs/hdfs.h
     - hs.h
     - hs/hs.h
@@ -475,3 +495,43 @@
     - vectorf128.h
     - vectormath_exp.h
     - vectormath_trig.h
+
+- source_filter: "^contrib/libs/libf2c"
+  includes:
+    - local.h
+
+- source_filter: "^contrib/libs/libpq"
+  includes:
+    - local.h
+
+- source_filter: "^contrib/libs/breakpad"
+  includes:
+    - stab.h
+
+- source_filter: "^contrib/tools/fluent-bit"
+  includes:
+    - backtrace.h: contrib/tools/fluent-bit/lib/libbacktrace-5a99ff7f/backtrace.h
+
+- source_filter: "^contrib/restricted/glib"
+  includes:
+    - gelf.h: contrib/restricted/libelf/include/libelf/gelf.h
+    - libelf.h: contrib/restricted/libelf/include/libelf/libelf.h
+
+- source_filter: "^contrib/restricted/libelf"
+  includes:
+    - byteswap.h: contrib/restricted/libelf/lib/byteswap.h
+    - gelf.h: contrib/restricted/libelf/lib/gelf.h
+    - libelf.h: contrib/restricted/libelf/lib/libelf.h
+    - libelf/libelf.h: contrib/restricted/libelf/include/libelf/libelf.h
+    - libelf/sys_elf.h: contrib/restricted/libelf/include/libelf/sys_elf.h
+    - nlist.h: contrib/restricted/libelf/lib/nlist.h
+    - sys_elf.h: contrib/restricted/libelf/lib/sys_elf.h
+
+- source_filter: "^contrib/libs/libbpf"
+  includes:
+    - gelf.h: contrib/restricted/libelf/include/libelf/gelf.h
+    - libelf.h: contrib/restricted/libelf/include/libelf/libelf.h
+
+- source_filter: "^contrib/libs/dpdk"
+  includes:
+    - process.h: contrib/libs/dpdk/drivers/bus/dpaa/include/process.h

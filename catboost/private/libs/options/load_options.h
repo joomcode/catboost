@@ -6,7 +6,10 @@
 #include <catboost/private/libs/data_util/line_data_reader.h>
 #include <catboost/private/libs/data_util/path_with_scheme.h>
 
+#include <catboost/libs/helpers/serialization.h>
+
 #include <library/binsaver/bin_saver.h>
+#include <library/json/json_value.h>
 
 #include <util/generic/string.h>
 #include <util/generic/vector.h>
@@ -38,23 +41,29 @@ namespace NCatboostOptions {
         NCB::TPathWithScheme GroupWeightsFilePath;
         NCB::TPathWithScheme TestGroupWeightsFilePath;
 
+        NCB::TPathWithScheme TimestampsFilePath;
+        NCB::TPathWithScheme TestTimestampsFilePath;
+
         NCB::TPathWithScheme BaselineFilePath;
         NCB::TPathWithScheme TestBaselineFilePath;
-        TVector<TString> ClassNames;
+        TVector<NJson::TJsonValue> ClassLabels;
 
         TVector<ui32> IgnoredFeatures;
         TString BordersFile;
+
+        NCB::TPathWithScheme FeatureNamesPath;
 
         TPoolLoadParams() = default;
 
         void Validate() const;
         void Validate(TMaybe<ETaskType> taskType) const;
+        void ValidateLearn() const;
 
         SAVELOAD(
             CvParams, ColumnarPoolFormatParams, LearnSetPath, TestSetPaths,
             PairsFilePath, TestPairsFilePath, GroupWeightsFilePath, TestGroupWeightsFilePath,
-            BaselineFilePath, TestBaselineFilePath, ClassNames, IgnoredFeatures,
-            BordersFile
+            TimestampsFilePath, TestTimestampsFilePath, BaselineFilePath, TestBaselineFilePath,
+            ClassLabels, IgnoredFeatures, BordersFile, FeatureNamesPath
         );
     };
 

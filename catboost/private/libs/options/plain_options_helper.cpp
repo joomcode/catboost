@@ -326,6 +326,9 @@ void NCatboostOptions::PlainJsonToOptions(
     CopyOption(plainOptions, "boost_from_average", &boostingOptionsRef, &seenKeys);
     CopyOption(plainOptions, "data_partition", &boostingOptionsRef, &seenKeys);
     CopyOption(plainOptions, "model_shrink_rate", &boostingOptionsRef, &seenKeys);
+    CopyOption(plainOptions, "model_shrink_mode", &boostingOptionsRef, &seenKeys);
+    CopyOption(plainOptions, "langevin", &boostingOptionsRef, &seenKeys);
+    CopyOption(plainOptions, "diffusion_temperature", &boostingOptionsRef, &seenKeys);
 
     auto& odConfig = boostingOptionsRef["od_config"];
     odConfig.SetType(NJson::JSON_MAP);
@@ -358,6 +361,7 @@ void NCatboostOptions::PlainJsonToOptions(
     CopyOption(plainOptions, "dev_max_ctr_complexity_for_borders_cache", &treeOptions, &seenKeys);
     CopyOption(plainOptions, "observations_to_bootstrap", &treeOptions, &seenKeys);
     CopyOption(plainOptions, "monotone_constraints", &treeOptions, &seenKeys);
+    CopyOption(plainOptions, "dev_leafwise_approxes", &treeOptions, &seenKeys);
 
     auto& bootstrapOptions = treeOptions["bootstrap"];
     bootstrapOptions.SetType(NJson::JSON_MAP);
@@ -423,6 +427,7 @@ void NCatboostOptions::PlainJsonToOptions(
     CopyOption(plainOptions, "dev_sparse_array_indexing", &dataProcessingOptions, &seenKeys);
     CopyOption(plainOptions, "gpu_cat_features_storage", &dataProcessingOptions, &seenKeys);
     CopyOption(plainOptions, "dev_leafwise_scoring", &dataProcessingOptions, &seenKeys);
+    CopyOption(plainOptions, "dev_group_features", &dataProcessingOptions, &seenKeys);
 
     auto& floatFeaturesBinarization = dataProcessingOptions["float_features_binarization"];
     floatFeaturesBinarization.SetType(NJson::JSON_MAP);
@@ -584,6 +589,15 @@ void NCatboostOptions::ConvertOptionsToPlainJson(
         CopyOption(boostingOptionsRef, "model_shrink_rate", &plainOptionsJson, &seenKeys);
         DeleteSeenOption(&optionsCopyBoosting, "model_shrink_rate");
 
+        CopyOption(boostingOptionsRef, "model_shrink_mode", &plainOptionsJson, &seenKeys);
+        DeleteSeenOption(&optionsCopyBoosting, "model_shrink_mode");
+
+        CopyOption(boostingOptionsRef, "langevin", &plainOptionsJson, &seenKeys);
+        DeleteSeenOption(&optionsCopyBoosting, "langevin");
+
+        CopyOption(boostingOptionsRef, "diffusion_temperature", &plainOptionsJson, &seenKeys);
+        DeleteSeenOption(&optionsCopyBoosting, "diffusion_temperature");
+
         if (boostingOptionsRef.Has("od_config")) {
             const auto& odConfig = boostingOptionsRef["od_config"];
             auto& optionsCopyOdConfig = optionsCopyBoosting["od_config"];
@@ -670,6 +684,9 @@ void NCatboostOptions::ConvertOptionsToPlainJson(
 
         CopyOption(treeOptions, "monotone_constraints", &plainOptionsJson, &seenKeys);
         DeleteSeenOption(&optionsCopyTree, "monotone_constraints");
+
+        CopyOption(treeOptions, "dev_leafwise_approxes", &plainOptionsJson, &seenKeys);
+        DeleteSeenOption(&optionsCopyTree, "dev_leafwise_approxes");
 
         // bootstrap
         if (treeOptions.Has("bootstrap")) {
@@ -806,6 +823,9 @@ void NCatboostOptions::ConvertOptionsToPlainJson(
         CopyOption(dataProcessingOptions, "dev_leafwise_scoring", &plainOptionsJson, &seenKeys);
         DeleteSeenOption(&optionsCopyDataProcessing, "dev_leafwise_scoring");
 
+        CopyOption(dataProcessingOptions, "dev_group_features", &plainOptionsJson, &seenKeys);
+        DeleteSeenOption(&optionsCopyDataProcessing, "dev_group_features");
+
         ConcatenatePerFloatFeatureQuantizationOptions(
             dataProcessingOptions,
             "per_float_feature_quantization",
@@ -935,8 +955,20 @@ void NCatboostOptions::CleanPlainJson(
         DeleteSeenOption(plainOptionsJsonEfficient, "simple_ctr");
     }
 
+    if ((*plainOptionsJsonEfficient)["boosting_type"].GetStringSafe() == ToString(EBoostingType::Plain)) {
+        DeleteSeenOption(plainOptionsJsonEfficient, "approx_on_full_history");
+        DeleteSeenOption(plainOptionsJsonEfficient, "fold_len_multiplier");
+        if (!hasCatFeatures) {
+            DeleteSeenOption(plainOptionsJsonEfficient, "permutation_count");
+            DeleteSeenOption(plainOptionsJsonEfficient, "fold_permutation_block");
+            DeleteSeenOption(plainOptionsJsonEfficient, "has_time");
+        }
+    }
+
     if (!hasTextFeatures) {
+        DeleteSeenOption(plainOptionsJsonEfficient, "tokenizers");
         DeleteSeenOption(plainOptionsJsonEfficient, "dictionaries");
+        DeleteSeenOption(plainOptionsJsonEfficient, "feature_calcers");
         DeleteSeenOption(plainOptionsJsonEfficient, "text_processing");
     }
     TVector<TStringBuf> keysToDelete;

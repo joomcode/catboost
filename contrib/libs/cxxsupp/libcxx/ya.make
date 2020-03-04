@@ -34,6 +34,7 @@ IF (OS_ANDROID)
 
 ELSEIF (OS_IOS)
     LDFLAGS(-lc++abi)
+	CFLAGS(-DLIBCXX_BUILDING_LIBCXXABI)
 ELSEIF (CLANG OR MUSL OR OS_DARWIN OR USE_LTO)
     DEFAULT(CXX_RT "libcxxrt")
     IF (MUSL)
@@ -113,6 +114,7 @@ SRCS(
     src/charconv.cpp
     src/chrono.cpp
     src/condition_variable.cpp
+    src/condition_variable_destructor.cpp
     src/debug.cpp
     src/exception.cpp
     src/functional.cpp
@@ -123,6 +125,7 @@ SRCS(
     src/locale.cpp
     src/memory.cpp
     src/mutex.cpp
+    src/mutex_destructor.cpp
     src/optional.cpp
     src/random.cpp
     src/regex.cpp

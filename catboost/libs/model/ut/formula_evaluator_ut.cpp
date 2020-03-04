@@ -74,8 +74,21 @@ Y_UNIT_TEST_SUITE(TObliviousTreeModel) {
     Y_UNIT_TEST(TestFlatCalcFloat) {
         auto model = SimpleFloatModel();
         CheckFlatCalcResult(model, xrange<double>(8), xrange<ui32>(8));
-        model.ObliviousTrees.GetMutable()->ConvertObliviousToAsymmetric();
+        model.ModelTrees.GetMutable()->ConvertObliviousToAsymmetric();
         CheckFlatCalcResult(model, xrange<double>(8), xrange<ui32>(8));
+    }
+
+    Y_UNIT_TEST(TestFlatCalcFloatWithScaleAndBias) {
+        auto model = SimpleFloatModel();
+        model.SetScaleAndBias({0.5, 0.125});
+        auto norm = model.GetScaleAndBias();
+        TVector<double> expectedPredicts;
+        for (int sampleId : xrange(8)) {
+            expectedPredicts.push_back(sampleId * norm.Scale + norm.Bias);
+        }
+        CheckFlatCalcResult(model, expectedPredicts, xrange<ui32>(8));
+        model.ModelTrees.GetMutable()->ConvertObliviousToAsymmetric();
+        CheckFlatCalcResult(model, expectedPredicts, xrange<ui32>(8));
     }
 
     Y_UNIT_TEST(TestTwoTrees) {
@@ -88,7 +101,7 @@ Y_UNIT_TEST_SUITE(TObliviousTreeModel) {
             expectedPredicts.push_back(11.0 * sampleId);
         }
         CheckFlatCalcResult(model, expectedPredicts, expectedLeafIndexes);
-        model.ObliviousTrees.GetMutable()->ConvertObliviousToAsymmetric();
+        model.ModelTrees.GetMutable()->ConvertObliviousToAsymmetric();
         CheckFlatCalcResult(model, expectedPredicts, expectedLeafIndexes);
     }
 
@@ -111,7 +124,7 @@ Y_UNIT_TEST_SUITE(TObliviousTreeModel) {
         }
         const auto features = GetFeatureRef(data);
         CheckFlatCalcResult(model, expectedPredicts, expectedLeafIndexes, features);
-        model.ObliviousTrees.GetMutable()->ConvertObliviousToAsymmetric();
+        model.ModelTrees.GetMutable()->ConvertObliviousToAsymmetric();
         CheckFlatCalcResult(model, expectedPredicts, expectedLeafIndexes, features);
     }
 
@@ -125,7 +138,7 @@ Y_UNIT_TEST_SUITE(TObliviousTreeModel) {
             03., 13., 23.,
         };
         CheckFlatCalcResult(model, expectedPredicts, xrange(4), features);
-        model.ObliviousTrees.GetMutable()->ConvertObliviousToAsymmetric();
+        model.ModelTrees.GetMutable()->ConvertObliviousToAsymmetric();
         CheckFlatCalcResult(model, expectedPredicts, xrange(4), features);
     }
 
@@ -181,28 +194,25 @@ Y_UNIT_TEST_SUITE(TObliviousTreeModel) {
     Y_UNIT_TEST(TestTextOnlyModel) {
         TVector<NCBTest::TTextFeature> features;
         TVector<NCBTest::TTokenizedTextFeature> tokenizedFeatures;
+        TVector<TDigitizer> digitizers;
         TVector<TTextFeatureCalcerPtr> calcers;
-        TVector<TDictionaryPtr> dictionaries;
-        TTokenizerPtr tokenizer;
-        TVector<TVector<ui32>> perFeatureDictionaries;
+        TVector<TVector<ui32>> perFeatureDigitizers;
         TVector<TVector<ui32>> perTokenizedFeatureCalcers;
 
         NCBTest::CreateTextDataForTest(
             &features,
             &tokenizedFeatures,
+            &digitizers,
             &calcers,
-            &dictionaries,
-            &tokenizer,
-            &perFeatureDictionaries,
+            &perFeatureDigitizers,
             &perTokenizedFeatureCalcers
         );
 
         auto textProcessingCollection = MakeIntrusive<TTextProcessingCollection>(
+            digitizers,
             calcers,
-            dictionaries,
-            perFeatureDictionaries,
-            perTokenizedFeatureCalcers,
-            tokenizer
+            perFeatureDigitizers,
+            perTokenizedFeatureCalcers
         );
 
         const ui32 docCount = features[0].size();
@@ -237,7 +247,7 @@ Y_UNIT_TEST_SUITE(TObliviousTreeModel) {
             numEstimatedFeatures
         );
 
-        model.ObliviousTrees.GetMutable()->ConvertObliviousToAsymmetric();
+        model.ModelTrees.GetMutable()->ConvertObliviousToAsymmetric();
 
         CheckCalcTextResult(
             model,

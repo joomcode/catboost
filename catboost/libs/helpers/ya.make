@@ -7,7 +7,6 @@ SRCS(
     borders_io.cpp
     checksum.cpp
     clear_array.cpp
-    compare.cpp
     compression.cpp
     connected_components.cpp
     cpu_random.cpp
@@ -34,10 +33,12 @@ SRCS(
     power_hash.cpp
     progress_helper.cpp
     permutation.cpp
+    quantile.cpp
     query_info_helper.cpp
     resource_constrained_executor.cpp
     resource_holder.cpp
     restorable_rng.cpp
+    sample.cpp
     serialization.cpp
     set.cpp
     short_vector_ops.cpp
@@ -58,6 +59,7 @@ PEERDIR(
     library/dbg_output
     library/digest/crc32c
     library/digest/md5
+    library/json
     library/malloc/api
     library/pop_count
     library/threading/local_executor

@@ -9,15 +9,18 @@ namespace NCB {
 
     ui32 GetApproxDimension(
         const NCatboostOptions::TCatBoostOptions& catBoostOptions,
-        const TLabelConverter& labelConverter) {
-
+        const TLabelConverter& labelConverter,
+        ui32 targetDimension
+    ) {
         const ELossFunction lossFunction = catBoostOptions.LossFunctionDescription.Get().GetLossFunction();
-        const bool isMulticlass = IsMultiClassOnly(lossFunction, catBoostOptions.MetricOptions);
-
-        if (isMulticlass) {
-            return (ui32)labelConverter.GetApproxDimension();
+        if (IsMultiRegressionObjective(lossFunction)) {
+            return targetDimension;
+        } else {
+            if (labelConverter.IsInitialized()) {
+                return (ui32)labelConverter.GetApproxDimension();
+            }
+            return ui32(1);
         }
-        return ui32(1);
     }
 
 }

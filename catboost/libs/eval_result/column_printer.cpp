@@ -2,6 +2,8 @@
 
 #include "eval_helpers.h"
 
+#include <catboost/private/libs/options/enum_helpers.h>
+#include <catboost/private/libs/options/loss_description.h>
 #include <util/generic/utility.h>
 #include <util/string/builder.h>
 
@@ -15,16 +17,28 @@ namespace NCB {
         const TVector<TVector<TVector<double>>>& rawValues,
         const EPredictionType predictionType,
         const TString& lossFunctionName,
+        ui32 targetDimension,
         const TExternalLabelsHelper& visibleLabelsHelper,
         TMaybe<std::pair<size_t, size_t>> evalParameters)
-        : VisibleLabelsHelper(visibleLabelsHelper) {
+        : PredictionType(predictionType)
+        ,VisibleLabelsHelper(visibleLabelsHelper) {
         int begin = 0;
+        const bool isMultiTarget = targetDimension > 1;
+        const bool callMakeExternalApprox
+            = VisibleLabelsHelper.IsInitialized()
+                && (VisibleLabelsHelper.GetExternalApproxDimension() > 1);
         for (const auto& raws : rawValues) {
-            CB_ENSURE(VisibleLabelsHelper.IsInitialized() == IsMulticlass(raws),
-                      "Inappropriate usage of visible label helper: it MUST be initialized ONLY for multiclass problem");
-            const auto& approx = VisibleLabelsHelper.IsInitialized() ? MakeExternalApprox(raws, VisibleLabelsHelper) : raws;
+            const auto& approx = callMakeExternalApprox ? MakeExternalApprox(raws, VisibleLabelsHelper) : raws;
             Approxes.push_back(PrepareEval(predictionType, lossFunctionName, approx, executor));
-            const auto& headers = CreatePredictionTypeHeader(approx.size(), predictionType, VisibleLabelsHelper, begin, evalParameters.Get());
+
+            const auto& headers = CreatePredictionTypeHeader(
+                approx.size(),
+                isMultiTarget,
+                predictionType,
+                VisibleLabelsHelper,
+                begin,
+                evalParameters.Get()
+            );
             Header.insert(Header.end(), headers.begin(), headers.end());
             if (evalParameters) {
                 begin += evalParameters->first;
@@ -34,7 +48,7 @@ namespace NCB {
 
     void TEvalPrinter::OutputValue(IOutputStream* outStream, size_t docIndex) {
         TString delimiter = "";
-        if (VisibleLabelsHelper.IsInitialized() && Approxes.back().ysize() == 1) { // class labels
+        if (PredictionType == EPredictionType::Class) {
             for (const auto& approxes : Approxes) {
                 for (const auto& approx : approxes) {
                     *outStream << delimiter
@@ -63,6 +77,7 @@ namespace NCB {
 
     TVector<TString> CreatePredictionTypeHeader(
         ui32 approxDimension,
+        bool isMultiTarget,
         EPredictionType predictionType,
         const TExternalLabelsHelper& visibleLabelsHelper,
         ui32 startTreeIndex,
@@ -75,7 +90,7 @@ namespace NCB {
             TStringBuilder str;
             str << predictionType;
             if (classCount > 1) {
-                str << ":Class=" << visibleLabelsHelper.GetVisibleClassNameFromClass(classId);
+                str << (isMultiTarget ?  ":Dim=" : ":Class=")  << visibleLabelsHelper.GetVisibleClassNameFromClass(classId);
             }
             if (evalParameters && (evalParameters->first != evalParameters->second)) {
                 str << ":TreesCount=[" << startTreeIndex << "," <<

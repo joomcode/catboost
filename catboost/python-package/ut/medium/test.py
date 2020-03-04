@@ -21,7 +21,9 @@ from catboost import (
     cv,
     sum_models,
     train,
-    _have_equal_features,)
+    _have_equal_features,
+    to_regressor,
+    to_classifier,)
 from catboost.eval.catboost_evaluation import CatboostEvaluation, EvalType
 from catboost.utils import eval_metric, create_cd, read_cd, get_roc_curve, select_threshold
 from catboost.utils import DataMetaInfo, TargetStats, compute_training_options
@@ -37,6 +39,7 @@ from catboost_pytest_lib import (
     DelayedTee,
     binary_path,
     data_file,
+    get_limited_precision_dsv_diff_tool,
     local_canonical_file,
     permute_dataset_columns,
     remove_time_from_json,
@@ -72,6 +75,7 @@ NAN_CD_FILE = data_file('adult_nan', 'train.cd')
 CLOUDNESS_TRAIN_FILE = data_file('cloudness_small', 'train_small')
 CLOUDNESS_TEST_FILE = data_file('cloudness_small', 'test_small')
 CLOUDNESS_CD_FILE = data_file('cloudness_small', 'train.cd')
+CLOUDNESS_ONLY_NUM_CD_FILE = data_file('cloudness_small', 'train_float.cd')
 
 QUERYWISE_TRAIN_FILE = data_file('querywise', 'train')
 QUERYWISE_TEST_FILE = data_file('querywise', 'test')
@@ -101,6 +105,12 @@ BLACK_FRIDAY_CD_FILE = data_file('black_friday', 'cd')
 HIGGS_TRAIN_FILE = data_file('higgs', 'train_small')
 HIGGS_TEST_FILE = data_file('higgs', 'test_small')
 HIGGS_CD_FILE = data_file('higgs', 'train.cd')
+
+ROTTEN_TOMATOES_TRAIN_FILE = data_file('rotten_tomatoes', 'train')
+ROTTEN_TOMATOES_TRAIN_SMALL_NO_QUOTES_FILE = data_file('rotten_tomatoes', 'train_small_no_quotes')
+ROTTEN_TOMATOES_TEST_FILE = data_file('rotten_tomatoes', 'test')
+ROTTEN_TOMATOES_CD_FILE = data_file('rotten_tomatoes', 'cd')
+ROTTEN_TOMATOES_CD_BINCLASS_FILE = data_file('rotten_tomatoes', 'cd_binclass')
 
 AIRLINES_ONEHOT_TRAIN_FILE = data_file('airlines_onehot_250', 'train_small')
 AIRLINES_ONEHOT_TEST_FILE = data_file('airlines_onehot_250', 'test_small')
@@ -255,6 +265,47 @@ def load_simple_dataset_as_lists(is_test):
 # Test cases begin here ########################################################
 
 
+@pytest.mark.parametrize('niter', [100, 500])
+def test_multiregression(niter, n=10):
+    xs = np.arange(n).reshape((-1, 1)).astype(np.float32)
+    ys = np.hstack([
+        (xs > 0.5 * n),
+        (xs < 0.5 * n)
+    ]).astype(np.float32)
+
+    model = CatBoostRegressor(loss_function='MultiRMSE', iterations=niter)
+    model.fit(xs, ys)
+    ys_pred = model.predict(xs)
+    model.score(xs, ys)
+
+    preds_path = test_output_path(PREDS_TXT_PATH)
+    np.savetxt(preds_path, np.array(ys_pred), fmt='%.8f')
+
+    assert ys_pred.shape == ys.shape
+    return local_canonical_file(preds_path)
+
+
+@pytest.mark.parametrize('niter', [1, 100, 500])
+def test_save_model_multiregression(niter):
+    train_file = data_file('multiregression', 'train')
+    cd_file = data_file('multiregression', 'train.cd')
+    output_model_path = test_output_path(OUTPUT_MODEL_PATH)
+
+    train_pool = Pool(train_file, column_description=cd_file)
+    test_pool = Pool(train_file, column_description=cd_file)
+
+    model = CatBoost(dict(loss_function='MultiRMSE', iterations=niter))
+    model.fit(train_pool)
+    model.save_model(output_model_path)
+
+    model2 = CatBoost()
+    model2.load_model(output_model_path)
+
+    pred1 = model.predict(test_pool)
+    pred2 = model2.predict(test_pool)
+    assert _check_data(pred1, pred2)
+
+
 def test_load_file():
     assert _check_shape(Pool(TRAIN_FILE, column_description=CD_FILE), 101, 17)
 
@@ -264,7 +315,17 @@ def test_load_list():
     assert _check_shape(Pool(features_data, labels, CAT_FEATURES), 101, 17)
 
 
-datasets_for_test_ndarray = ['adult', 'cloudness_small', 'higgs']
+datasets_for_test_ndarray = ['adult', 'cloudness_small', 'higgs', 'rotten_tomatoes']
+
+
+def get_only_features_names(columns_metadata):
+    column_names = columns_metadata['column_names']
+    non_feature_column_indices = set(columns_metadata['non_feature_column_indices'])
+    feature_names = []
+    for i, column_name in enumerate(column_names):
+        if i not in non_feature_column_indices:
+            feature_names.append(column_name)
+    return feature_names
 
 
 @pytest.mark.parametrize(
@@ -290,13 +351,25 @@ def test_load_ndarray_vs_load_from_file(dataset, order):
         cd_file = HIGGS_CD_FILE
         dtypes = [np.float32, np.float64, object]
         float_dtype_is_ok = True
+    elif dataset == 'rotten_tomatoes':  # mixed numeric, categorical and text features data
+        train_file = ROTTEN_TOMATOES_TRAIN_SMALL_NO_QUOTES_FILE
+        cd_file = ROTTEN_TOMATOES_CD_BINCLASS_FILE
+        dtypes = [object]
+        float_dtype_is_ok = False
 
     columns_metadata = read_cd(cd_file, data_file=train_file, canonize_column_types=True)
     target_column_idx = columns_metadata['column_type_to_indices']['Label'][0]
     cat_column_indices = columns_metadata['column_type_to_indices'].get('Categ', [])
-    n_features = len(cat_column_indices) + len(columns_metadata['column_type_to_indices'].get('Num', []))
+    text_column_indices = columns_metadata['column_type_to_indices'].get('Text', [])
+    n_features = (
+        + len(cat_column_indices)
+        + len(text_column_indices)
+        + len(columns_metadata['column_type_to_indices'].get('Num', []))
+    )
+    feature_names = get_only_features_names(columns_metadata)
 
     pool_from_file = Pool(train_file, column_description=cd_file)
+    pool_from_file.set_feature_names(feature_names)
 
     for dtype in dtypes:
         features_data = np.empty((n_objects, n_features), dtype=dtype, order=order)
@@ -310,18 +383,64 @@ def test_load_ndarray_vs_load_from_file(dataset, order):
                         labels[line_idx] = float(element)
                     else:
                         features_data[line_idx, feature_idx] = (
-                            element if (dtype is object) or (column_idx in cat_column_indices) else dtype(element)
+                            element
+                            if (dtype is object) or (column_idx in cat_column_indices) or (column_idx in text_column_indices)
+                            else dtype(element)
                         )
                         feature_idx += 1
 
         if (dtype in [np.float32, np.float64]) and (not float_dtype_is_ok):
             with pytest.raises(CatBoostError):
-                pool_from_ndarray = Pool(features_data, labels, cat_features=columns_metadata['cat_feature_indices'])
+                pool_from_ndarray = Pool(features_data, labels,
+                                         cat_features=columns_metadata['cat_feature_indices'],
+                                         text_features=columns_metadata['text_feature_indices'],
+                                         feature_names=feature_names)
         else:
-            pool_from_ndarray = Pool(features_data, labels, cat_features=columns_metadata['cat_feature_indices'])
+            pool_from_ndarray = Pool(features_data, labels,
+                                     cat_features=columns_metadata['cat_feature_indices'],
+                                     text_features=columns_metadata['text_feature_indices'],
+                                     feature_names=feature_names)
 
             assert _have_equal_features(pool_from_file, pool_from_ndarray)
             assert _check_data([float(label) for label in pool_from_file.get_label()], pool_from_ndarray.get_label())
+
+
+@pytest.mark.parametrize('order', ['C', 'F'], ids=['order=C', 'order=F'])
+def test_load_ndarray_vs_load_from_file_multitarget(order):
+    train_file = data_file('multiregression', 'train')
+    cd_file = data_file('multiregression', 'train.cd')
+    dtypes = [np.float32, np.float64]
+
+    n_objects = np.loadtxt(train_file, delimiter='\t').shape[0]
+    columns_metadata = read_cd(cd_file, data_file=train_file, canonize_column_types=True)
+    target_indices = columns_metadata['column_type_to_indices'].get('Label', [])
+    feature_indices = columns_metadata['column_type_to_indices'].get('Num', [])
+
+    pool_from_file = Pool(train_file, column_description=cd_file)
+
+    for dtype in dtypes:
+        features_data = np.empty((n_objects, len(feature_indices)), dtype=dtype, order=order)
+        labels = np.empty((n_objects, len(target_indices)), dtype=dtype, order=order)
+        with open(train_file) as train_input:
+            for line_idx, l in enumerate(train_input.readlines()):
+                elements = l[:-1].split('\t')
+                feature_idx = 0
+                target_idx = 0
+                for column_idx, element in enumerate(elements):
+                    if column_idx in target_indices:
+                        labels[line_idx, target_idx] = float(element)
+                        target_idx += 1
+                    else:
+                        features_data[line_idx, feature_idx] = dtype(element)
+                        feature_idx += 1
+
+        pool_from_ndarray = Pool(features_data, labels)
+        assert _have_equal_features(pool_from_file, pool_from_ndarray)
+        assert np.allclose(
+            [[float(elem) for elem in row] for row in pool_from_file.get_label()],
+            pool_from_ndarray.get_label(),
+            atol=0
+        )
 
 
 @pytest.mark.parametrize(
@@ -362,16 +481,17 @@ def test_fit_on_ndarray(features_dtype):
     return local_canonical_file(preds_path)
 
 
-@pytest.mark.parametrize('dataset', ['adult', 'adult_nan', 'querywise'])
+@pytest.mark.parametrize('dataset', ['adult', 'adult_nan', 'querywise', 'rotten_tomatoes'])
 def test_load_df_vs_load_from_file(dataset):
     train_file, cd_file, target_idx, group_id_idx, other_non_feature_columns = {
         'adult': (TRAIN_FILE, CD_FILE, TARGET_IDX, None, []),
         'adult_nan': (NAN_TRAIN_FILE, NAN_CD_FILE, TARGET_IDX, None, []),
-        'querywise': (QUERYWISE_TRAIN_FILE, QUERYWISE_CD_FILE, 2, 1, [0, 3, 4])
+        'querywise': (QUERYWISE_TRAIN_FILE, QUERYWISE_CD_FILE, 2, 1, [0, 3, 4]),
+        'rotten_tomatoes': (ROTTEN_TOMATOES_TRAIN_FILE, ROTTEN_TOMATOES_CD_BINCLASS_FILE, 11, None, [])
     }[dataset]
 
     pool1 = Pool(train_file, column_description=cd_file)
-    data = read_csv(train_file, header=None, delimiter='\t')
+    data = read_csv(train_file, header=None, delimiter='\t', na_filter=False)
 
     labels = data.iloc[:, target_idx]
     group_ids = None
@@ -385,12 +505,38 @@ def test_load_df_vs_load_from_file(dataset):
     )
 
     cat_features = pool1.get_cat_feature_indices()
+    text_features = pool1.get_text_feature_indices()
 
     pool1.set_feature_names(list(data.columns))
 
-    pool2 = Pool(data, labels, cat_features, group_id=group_ids)
+    pool2 = Pool(data, labels, cat_features=cat_features, text_features=text_features, group_id=group_ids)
     assert _have_equal_features(pool1, pool2)
     assert _check_data([float(label) for label in pool1.get_label()], pool2.get_label())
+
+
+def test_load_df_vs_load_from_file_multitarget():
+    train_file = data_file('multiregression', 'train')
+    cd_file = data_file('multiregression', 'train.cd')
+    target_idx = [0, 1]
+
+    pool1 = Pool(train_file, column_description=cd_file)
+    data = read_csv(train_file, header=None, delimiter='\t')
+
+    labels = data.iloc[:, target_idx]
+
+    data.drop(
+        target_idx,
+        axis=1,
+        inplace=True
+    )
+
+    cat_features = pool1.get_cat_feature_indices()
+
+    pool1.set_feature_names(list(data.columns))
+
+    pool2 = Pool(data, labels, cat_features, group_id=None)
+    assert _have_equal_features(pool1, pool2)
+    assert _check_data([[float(label) for label in sublabel] for sublabel in pool1.get_label()], pool2.get_label())
 
 
 def test_load_series():
@@ -402,7 +548,7 @@ def test_load_series():
     cat_features = pool.get_cat_feature_indices()
     pool2 = Pool(data, labels, cat_features)
     assert _have_equal_features(pool, pool2)
-    assert [int(label) for label in pool.get_label()] == pool2.get_label()
+    assert _check_data([int(label) for label in pool.get_label()], pool2.get_label())
 
 
 def test_pool_cat_features():
@@ -449,7 +595,33 @@ def test_load_dumps():
         f.write(text)
     pool2 = Pool('test_data_dumps')
     assert _check_data(pool1.get_features(), pool2.get_features())
-    assert pool1.get_label() == [int(label) for label in pool2.get_label()]
+    assert _check_data(pool1.get_label(), [int(label) for label in pool2.get_label()])
+
+
+@pytest.mark.parametrize(
+    'features_type',
+    ['numpy.ndarray', 'pandas.DataFrame'],
+    ids=['features_type=numpy.ndarray', 'features_type=pandas.DataFrame']
+)
+def test_pool_from_slices(features_type):
+    full_size = (100, 30)
+    subset_size = (20, 17)
+
+    prng = np.random.RandomState(seed=20191120)
+
+    for start_offsets in ((0, 0), (5, 3)):
+        full_features_data = np.round(prng.normal(size=full_size), decimals=3)
+        full_label = _generate_nontrivial_binary_target(full_size[0], prng=prng)
+
+        subset_features_data = full_features_data[start_offsets[0]:subset_size[0], start_offsets[1]:subset_size[1]]
+        subset_label = full_label[start_offsets[0]:subset_size[0]]
+
+        if features_type == 'numpy.ndarray':
+            pool = Pool(subset_features_data, subset_label)
+        else:
+            pool = Pool(DataFrame(subset_features_data), subset_label)
+        assert _check_data(pool.get_features(), subset_features_data)
+        assert _check_data([float(value) for value in pool.get_label()], subset_label)
 
 
 @pytest.mark.parametrize(
@@ -512,6 +684,46 @@ def test_equivalence_of_pools_from_pandas_dataframe_with_different_cat_features_
         pool_from_new_df = Pool(new_df, labels, cat_features=cat_features)
 
         assert _have_equal_features(pool_from_df, pool_from_new_df)
+
+
+def test_pool_with_external_feature_names():
+    for cd_has_feature_names in [False, True]:
+        if cd_has_feature_names:
+            cd_file = data_file('adult', 'train_with_id.cd')
+        else:
+            cd_file = data_file('adult', 'train.cd')
+        train_pool = Pool(
+            TRAIN_FILE,
+            column_description=cd_file,
+            feature_names=data_file('adult', 'feature_names')
+        )
+        model = CatBoostClassifier(iterations=2)
+        model.fit(train_pool)
+        if cd_has_feature_names:
+            model_cd_with_feature_names = model
+        else:
+            model_cd_without_feature_names = model
+
+    assert model_cd_with_feature_names == model_cd_without_feature_names
+    assert model.feature_names_ == [
+        'C0',
+        'C1',
+        'C2',
+        'F0',
+        'C3',
+        'F1',
+        'C4',
+        'F2',
+        'C5',
+        'C6',
+        'C7',
+        'C8',
+        'C9',
+        'F3',
+        'F4',
+        'F5',
+        'C10'
+    ]
 
 
 # feature_matrix is (doc_count x feature_count)
@@ -873,6 +1085,66 @@ def test_fit_from_empty_features_data(task_type):
         )
 
 
+def fit_from_df(params, learn_file, test_file, cd_file):
+    learn_df = read_csv(learn_file, header=None, sep='\t', na_filter=False)
+    test_df = read_csv(test_file, header=None, sep='\t', na_filter=False)
+    columns_metadata = read_cd(cd_file, data_file=learn_file)
+
+    target_column_idx = columns_metadata['column_type_to_indices']['Label'][0]
+    cat_feature_indices = columns_metadata['cat_feature_indices']
+    text_feature_indices = columns_metadata['text_feature_indices']
+
+    def get_split_on_features_and_label(df, label_idx):
+        y = df.loc[:, label_idx]
+        X = df.drop(label_idx, axis=1)
+        return X, y
+
+    X_train, y_train = get_split_on_features_and_label(learn_df, target_column_idx)
+    X_test, _ = get_split_on_features_and_label(test_df, target_column_idx)
+
+    model = CatBoost(params)
+    model.fit(X_train, y_train, cat_features=cat_feature_indices, text_features=text_feature_indices)
+
+    return model.predict(X_test)
+
+
+def fit_from_file(params, learn_file, test_file, cd_file):
+    learn_pool = Pool(learn_file, column_description=cd_file)
+    test_pool = Pool(test_file, column_description=cd_file)
+
+    model = CatBoost(params)
+    model.fit(learn_pool)
+
+    return model.predict(test_pool)
+
+
+def test_fit_with_texts(task_type):
+    if task_type == 'CPU':
+        return
+
+    params = {
+        'dictionaries': [
+            {'dictionary_id': 'UniGram', 'token_level_type': 'Letter', 'occurrence_lower_bound': '1'},
+            {'dictionary_id': 'BiGram', 'token_level_type': 'Letter', 'occurrence_lower_bound': '1', 'gram_order': '2'},
+            {'dictionary_id': 'Word', 'occurrence_lower_bound': '1'},
+        ],
+        'feature_calcers': ['NaiveBayes', 'BoW'],
+        'iterations': 100,
+        'loss_function': 'MultiClass',
+        'task_type': task_type,
+        'devices': '0'
+    }
+
+    learn = ROTTEN_TOMATOES_TRAIN_FILE
+    test = ROTTEN_TOMATOES_TEST_FILE
+    cd = ROTTEN_TOMATOES_CD_FILE
+
+    preds1 = fit_from_df(params, learn, test, cd)
+    preds2 = fit_from_file(params, learn, test, cd)
+
+    assert np.all(preds1 == preds2)
+
+
 def test_coreml_import_export(task_type):
     train_pool = Pool(QUERYWISE_TRAIN_FILE, column_description=QUERYWISE_CD_FILE)
     test_pool = Pool(QUERYWISE_TEST_FILE, column_description=QUERYWISE_CD_FILE)
@@ -900,12 +1172,13 @@ def test_coreml_import_export_one_hot_features(task_type):
     return compare_canonical_models(output_coreml_model_path)
 
 
-@pytest.mark.parametrize('pool', ['adult', 'higgs'])
-def test_convert_model_to_json(task_type, pool):
+@pytest.mark.parametrize('pool,parameters', [('adult', {}), ('adult', {'one_hot_max_size': 100}), ('higgs', {})])
+def test_convert_model_to_json(task_type, pool, parameters):
     train_pool = Pool(data_file(pool, 'train_small'), column_description=data_file(pool, 'train.cd'))
     test_pool = Pool(data_file(pool, 'test_small'), column_description=data_file(pool, 'train.cd'))
     converted_model_path = test_output_path("converted_model.bin")
-    model = CatBoost({'iterations': 20, 'task_type': task_type, 'devices': '0'})
+    parameters.update({'iterations': 20, 'task_type': task_type, 'devices': '0'})
+    model = CatBoost(parameters)
     model.fit(train_pool)
     output_model_path = test_output_path(OUTPUT_MODEL_PATH)
     output_json_model_path = test_output_path(OUTPUT_JSON_MODEL_PATH)
@@ -917,7 +1190,11 @@ def test_convert_model_to_json(task_type, pool):
     pred1 = model.predict(test_pool)
     pred2 = model2.predict(test_pool)
     assert _check_data(pred1, pred2)
-    subprocess.check_call((model_diff_tool, output_model_path, converted_model_path, '--diff-limit', '0.000001'))
+    subprocess.check_call((
+        model_diff_tool, output_model_path, converted_model_path,
+        '--diff-limit', '0.000001',
+        '--ignore-keys', '.*TargetBorderClassifierIdx',
+    ))
     return compare_canonical_models(converted_model_path)
 
 
@@ -955,7 +1232,7 @@ def test_cpp_export_with_cat_features(task_type):
     model = CatBoost({'iterations': 20, 'task_type': task_type, 'devices': '0'})
     model.fit(train_pool)
     output_cpp_model_path = test_output_path(OUTPUT_CPP_MODEL_PATH)
-    model.save_model(output_cpp_model_path, format="cpp")
+    model.save_model(output_cpp_model_path, format="cpp", pool=train_pool)
     return local_canonical_file(output_cpp_model_path)
 
 
@@ -1034,7 +1311,7 @@ def test_onnx_export(problem_type):
             'onnx_graph_name': 'CatBoostModel_for_%s' % problem_type
         }
     )
-    return compare_canonical_models(output_onnx_model_path)
+    return compare_canonical_models(output_onnx_model_path, diff_limit=1e-18)
 
 
 @pytest.mark.parametrize('problem_type', ['binclass', 'multiclass', 'regression'])
@@ -1195,7 +1472,7 @@ def test_no_cat_in_predict(task_type):
     test_features_data, _ = load_simple_dataset_as_lists(is_test=True)
     pred1 = model.predict(test_features_data)
     pred2 = model.predict(Pool(test_features_data, cat_features=CAT_FEATURES))
-    assert _check_data(pred1, pred2)
+    assert np.all(pred1 == pred2)
 
 
 def test_save_model(task_type):
@@ -1222,26 +1499,64 @@ def test_multiclass(task_type):
     new_classifier.load_model(output_model_path)
     pred = new_classifier.predict_proba(pool)
     preds_path = test_output_path(PREDS_PATH)
-    np.save(preds_path, np.array(pred))
+    np.save(preds_path, np.round(np.array(pred)), 9)
     return local_canonical_file(preds_path)
 
 
-def test_multiclass_classes_count_missed_classes(task_type):
+@pytest.mark.parametrize('missed_classes', [False, True], ids=['missed_classes=False', 'missed_classes=True'])
+def test_multiclass_classes_count(task_type, missed_classes):
+    object_count = 100
+    feature_count = 10
+    classes_count = 4
+    if missed_classes:
+        unique_labels = [1, 3]
+    else:
+        unique_labels = [0, 1, 2, 3]
+    expected_classes_attr = [i for i in range(4)]
+
     prng = np.random.RandomState(seed=0)
-    pool = Pool(prng.random_sample(size=(100, 10)), label=prng.choice([1, 3], size=100))
-    classifier = CatBoostClassifier(classes_count=4, iterations=2, loss_function='MultiClass', thread_count=8, task_type=task_type, devices='0')
+    pool = Pool(
+        prng.random_sample(size=(object_count, feature_count)),
+        label=prng.choice(unique_labels, size=object_count)
+    )
+
+    # returns pred probabilities
+    def check_classifier(classifier):
+        assert np.all(classifier.classes_ == expected_classes_attr)
+
+        pred_classes = classifier.predict(pool)
+        assert all([(pred_class in unique_labels) for pred_class in pred_classes])
+
+        pred_probabilities = classifier.predict_proba(pool)
+        assert pred_probabilities.shape == (object_count, classes_count)
+        return pred_probabilities
+
+    classifier = CatBoostClassifier(
+        classes_count=classes_count,
+        iterations=2,
+        loss_function='MultiClass',
+        thread_count=8,
+        task_type=task_type,
+        devices='0'
+    )
     classifier.fit(pool)
+
+    check_classifier(classifier)
+
     output_model_path = test_output_path(OUTPUT_MODEL_PATH)
     classifier.save_model(output_model_path)
+
     new_classifier = CatBoostClassifier()
     new_classifier.load_model(output_model_path)
-    pred = new_classifier.predict_proba(pool)
-    classes = new_classifier.predict(pool)
-    assert pred.shape == (100, 4)
-    assert np.array(classes).all() in [1, 3]
-    preds_path = test_output_path(PREDS_PATH)
-    np.save(preds_path, np.array(pred))
-    return local_canonical_file(preds_path)
+
+    pred_probabilities = check_classifier(new_classifier)
+
+    preds_path = test_output_path(PREDS_TXT_PATH)
+    np.savetxt(preds_path, np.array(pred_probabilities), delimiter='\t')
+    return [
+        local_canonical_file(preds_path, diff_tool=get_limited_precision_dsv_diff_tool(1e-6, False)),
+        compare_canonical_models(output_model_path, diff_limit=1.e-6)
+    ]
 
 
 @pytest.mark.parametrize('label_type', ['string', 'int'])
@@ -1439,7 +1754,7 @@ def test_ones_weight_equal_to_nonspecified_weight(task_type):
         model.fit(train_pool)
         predictions.append(model.predict(test_pool))
 
-    assert _check_data(predictions[0], predictions[1])
+    assert np.all(predictions[0] == predictions[1])
 
 
 def test_py_data_group_id(task_type):
@@ -1521,6 +1836,17 @@ def test_ntree_limit(task_type):
     preds_path = test_output_path(PREDS_PATH)
     np.save(preds_path, np.array(pred))
     return local_canonical_file(preds_path)
+
+
+def test_ntree_invalid_range():
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    test_pool = Pool(TEST_FILE, column_description=CD_FILE)
+    model = CatBoostClassifier(iterations=100, learning_rate=0.03)
+    model.fit(train_pool)
+    with pytest.raises(CatBoostError):
+        model.predict_proba(test_pool, ntree_end=10000000)
+        model.predict_proba(test_pool, ntree_start=10000000)
+        model.predict_proba(test_pool, ntree_start=20, ntree_end=10)
 
 
 def test_staged_predict(task_type):
@@ -1730,8 +2056,7 @@ def test_custom_eval():
     model2.fit(train_pool, eval_set=test_pool)
     pred2 = model2.predict(test_pool)
 
-    for p1, p2 in zip(pred1, pred2):
-        assert abs(p1 - p2) < EPS
+    assert np.all(pred1 == pred2)
 
 
 @fails_on_gpu(how='cuda/train_lib/train.cpp:283: Error: loss function is not supported for GPU learning Custom')
@@ -2499,24 +2824,23 @@ def test_feature_importance(task_type):
 
 @pytest.mark.parametrize('grow_policy', NONSYMMETRIC)
 def test_feature_importance_asymmetric_prediction_value_change(task_type, grow_policy):
-    if task_type == "CPU":
-        return
     pool = Pool(TRAIN_FILE, column_description=CD_FILE)
     pool_querywise = Pool(QUERYWISE_TRAIN_FILE, column_description=QUERYWISE_CD_FILE)
     fimp_npy_path = test_output_path(FIMP_NPY_PATH)
 
-    model = CatBoost(
-        {
-            "iterations": 5,
-            "learning_rate": 0.03,
-            "task_type": "GPU",
-            "devices": "0",
-            "loss_function": "QueryRMSE",
-            "grow_policy": grow_policy
-        }
-    )
+    params = {
+        "iterations": 5,
+        "learning_rate": 0.03,
+        "task_type": task_type,
+        "devices": "0",
+        "loss_function": "QueryRMSE",
+        "grow_policy": grow_policy
+    }
+    model = CatBoost(params)
     model.fit(pool_querywise)
     assert len(model.feature_importances_.shape) == 0
+    params["loss_function"] = "RMSE"
+    model = CatBoost(params)
     model.fit(pool)
     assert (model.get_feature_importance() == model.get_feature_importance(type=EFstrType.PredictionValuesChange)).all()
     np.save(fimp_npy_path, np.array(model.feature_importances_))
@@ -2559,8 +2883,11 @@ def test_shap_feature_importance(task_type):
     pool = Pool(TRAIN_FILE, column_description=CD_FILE)
     model = CatBoostClassifier(iterations=5, learning_rate=0.03, max_ctr_complexity=1, task_type=task_type, devices='0')
     model.fit(pool)
+    shaps = model.get_feature_importance(type=EFstrType.ShapValues, data=pool)
+    assert np.allclose(model.predict(pool, prediction_type='RawFormulaVal'), np.sum(shaps, axis=1))
+
     fimp_npy_path = test_output_path(FIMP_NPY_PATH)
-    np.save(fimp_npy_path, np.array(model.get_feature_importance(type=EFstrType.ShapValues, data=pool)))
+    np.save(fimp_npy_path, np.around(np.array(shaps), 9))
     return local_canonical_file(fimp_npy_path)
 
 
@@ -2569,7 +2896,27 @@ def test_shap_feature_importance_multiclass(task_type):
     model = CatBoostClassifier(iterations=5, learning_rate=0.03, task_type=task_type, devices='0', loss_function='MultiClass')
     model.fit(pool)
     fimp_npy_path = test_output_path(FIMP_NPY_PATH)
-    np.save(fimp_npy_path, np.array(model.get_feature_importance(type=EFstrType.ShapValues, data=pool)))
+    np.save(fimp_npy_path, np.around(np.array(model.get_feature_importance(type=EFstrType.ShapValues, data=pool)), 9))
+    return local_canonical_file(fimp_npy_path)
+
+
+def test_shap_feature_importance_ranking(task_type):
+    pool = Pool(QUERYWISE_TRAIN_FILE, column_description=QUERYWISE_CD_FILE, pairs=QUERYWISE_TRAIN_PAIRS_FILE)
+    model = CatBoost(
+        {
+            "iterations": 5,
+            "learning_rate": 0.03,
+            "task_type": task_type,
+            "devices": "0",
+            "loss_function": "PairLogit"
+        }
+    )
+    model.fit(pool)
+    shaps = model.get_feature_importance(type=EFstrType.ShapValues, data=pool)
+    assert np.allclose(model.predict(pool), np.sum(shaps, axis=1))
+
+    fimp_npy_path = test_output_path(FIMP_NPY_PATH)
+    np.save(fimp_npy_path, np.around(np.array(shaps), 9))
     return local_canonical_file(fimp_npy_path)
 
 
@@ -2586,6 +2933,18 @@ def test_shap_feature_importance_asymmetric_and_symmetric(task_type):
     model._convert_to_asymmetric_representation()
     shap_asymm = np.array(model.get_feature_importance(type=EFstrType.ShapValues, data=pool))
     assert np.all(shap_symm - shap_asymm < 1e-8)
+
+
+def test_shap_feature_importance_with_langevin():
+    pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    model = CatBoostClassifier(iterations=5, learning_rate=0.03, depth=10, langevin=True, diffusion_temperature=1000)
+    model.fit(pool)
+    shaps = model.get_feature_importance(type=EFstrType.ShapValues, data=pool)
+    assert np.allclose(model.predict(pool, prediction_type='RawFormulaVal'), np.sum(shaps, axis=1))
+
+    fimp_npy_path = test_output_path(FIMP_NPY_PATH)
+    np.save(fimp_npy_path, np.around(np.array(shaps), 9))
+    return local_canonical_file(fimp_npy_path)
 
 
 def test_loss_function_change_asymmetric_and_symmetric(task_type):
@@ -2605,8 +2964,6 @@ def test_loss_function_change_asymmetric_and_symmetric(task_type):
 
 @pytest.mark.parametrize('grow_policy', NONSYMMETRIC)
 def test_shap_feature_importance_asymmetric(task_type, grow_policy):
-    if task_type == 'CPU':
-        return
     pool = Pool(TRAIN_FILE, column_description=CD_FILE)
     model = CatBoostClassifier(
         iterations=5,
@@ -2623,8 +2980,6 @@ def test_shap_feature_importance_asymmetric(task_type, grow_policy):
 
 @pytest.mark.parametrize('grow_policy', NONSYMMETRIC)
 def test_loss_function_change_asymmetric(task_type, grow_policy):
-    if task_type == 'CPU':
-        return
     pool = Pool(TRAIN_FILE, column_description=CD_FILE)
     model = CatBoostClassifier(
         iterations=5,
@@ -3148,8 +3503,8 @@ def test_metric_period_redefinition(task_type):
     with LogStdout(open(tmpfile2, 'w')):
         model.fit(pool, metric_period=2)
 
-    assert(_count_lines(tmpfile1) == 4)
-    assert(_count_lines(tmpfile2) == 6)
+    assert(_count_lines(tmpfile1) == 5)
+    assert(_count_lines(tmpfile2) == 7)
 
 
 def test_verbose_redefinition(task_type):
@@ -3164,7 +3519,7 @@ def test_verbose_redefinition(task_type):
         model.fit(pool, verbose=True)
 
     assert(_count_lines(tmpfile1) == 0)
-    assert(_count_lines(tmpfile2) == 10)
+    assert(_count_lines(tmpfile2) == 11)
 
 
 class TestInvalidCustomLossAndMetric(object):
@@ -3298,7 +3653,7 @@ def test_silent():
         model.fit(pool, silent=True)
 
     assert(_count_lines(tmpfile1) == 0)
-    assert(_count_lines(tmpfile2) == 10)
+    assert(_count_lines(tmpfile2) == 11)
     assert(_count_lines(tmpfile3) == 0)
     assert(_count_lines(tmpfile4) == 0)
     assert(_count_lines(tmpfile5) == 0)
@@ -3536,7 +3891,7 @@ def test_shap_multiclass(task_type):
     assert pred.shape == (len(pred), classes_count)
     assert shap_values.shape == (len(pred), classes_count, features_count + 1)
     fimp_txt_path = test_output_path(FIMP_TXT_PATH)
-    np.savetxt(fimp_txt_path, shap_values.reshape(len(pred), -1))
+    np.savetxt(fimp_txt_path, shap_values.reshape(len(pred), -1), fmt='%.9f')
     shap_values = np.sum(shap_values, axis=2)
     for doc_id in range(len(pred)):
         shap_probas = np.exp(shap_values[doc_id]) / np.sum(np.exp(shap_values[doc_id]))
@@ -3549,11 +3904,29 @@ def test_loading_pool_with_numpy_int():
 
 
 def test_loading_pool_with_numpy_str():
-    assert _check_shape(Pool(np.array([['abc', '2'], ['1', '2']]), np.array([1, 3]), cat_features=[0]), object_count=2, features_count=2)
+    assert _check_shape(
+        Pool(
+            np.array([['abc', '2', 'the cat'], ['1', '2', 'on the road']]),
+            np.array([1, 3]),
+            cat_features=[0],
+            text_features=[2]
+        ),
+        object_count=2,
+        features_count=3
+    )
 
 
 def test_loading_pool_with_lists():
-    assert _check_shape(Pool([['abc', 2], ['1', 2]], [1, 3], cat_features=[0]), object_count=2, features_count=2)
+    assert _check_shape(
+        Pool(
+            [['abc', 2, 'the cat'], ['1', 2, 'on the road']],
+            [1, 3],
+            cat_features=[0],
+            text_features=[2]
+        ),
+        object_count=2,
+        features_count=3
+    )
 
 
 def test_pairs_generation(task_type):
@@ -3644,7 +4017,7 @@ def test_slice_pool():
     ]
     for rindex in rindexes:
         sliced_pool = pool.slice(rindex)
-        assert sliced_pool.get_label() == list(rindex)
+        assert _check_data(sliced_pool.get_label(), list(rindex))
 
 
 def test_fit_and_predict_on_sliced_pools(task_type):
@@ -3804,13 +4177,12 @@ def non_decreasing(sequence):
     return True
 
 
-# different iteration parameters needed to check less and more accurate models
 @pytest.mark.parametrize('iterations', [5, 20, 110], ids=['iterations=5', 'iterations=20', 'iterations=110'])
-def test_roc(task_type, iterations):
-    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
-    test_pool = Pool(TEST_FILE, column_description=CD_FILE)
+def do_test_roc(task_type, pool, iterations, additional_train_params={}):
+    train_pool = Pool(data_file(pool, 'train_small'), column_description=data_file(pool, 'train.cd'))
+    test_pool = Pool(data_file(pool, 'test_small'), column_description=data_file(pool, 'train.cd'))
 
-    model = CatBoostClassifier(loss_function='Logloss', iterations=iterations)
+    model = CatBoostClassifier(loss_function='Logloss', iterations=iterations, **additional_train_params)
     model.fit(train_pool)
 
     curve = get_roc_curve(model, test_pool, thread_count=4)
@@ -3853,6 +4225,20 @@ def test_roc(task_type, iterations):
         local_canonical_file(out_bounds)
     ]
 
+# different iteration parameters needed to check less and more accurate models
+@pytest.mark.parametrize('iterations', [5, 20, 110], ids=['iterations=5', 'iterations=20', 'iterations=110'])
+def test_roc(task_type, iterations):
+    return do_test_roc(task_type, pool='adult', iterations=iterations)
+
+
+def test_roc_with_target_border():
+    return do_test_roc(
+        task_type='CPU',
+        pool='adult_not_binarized',
+        iterations=20,
+        additional_train_params={'target_border': 0.4}
+    )
+
 
 def test_roc_cv(task_type):
     train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
@@ -3890,40 +4276,41 @@ def test_overfit_detector_with_resume_from_snapshot_and_metric_period(boosting_t
 
         # must be always run first without snapshot then with it to properly test assertions
         for with_resume_from_snapshot in [False, True]:
-            model = CatBoostClassifier(
-                use_best_model=False,
-                boosting_type=boosting_type,
-                thread_count=4,
-                learning_rate=0.2,
-                od_type=overfitting_detector_type,
-                metric_period=metric_period,
-                leaf_estimation_iterations=10,
-                max_ctr_complexity=4,
-            )
+            params = {
+                'use_best_model': False,
+                'boosting_type': boosting_type,
+                'thread_count': 4,
+                'learning_rate': 0.2,
+                'od_type': overfitting_detector_type,
+                'metric_period': metric_period,
+                'leaf_estimation_iterations': 10,
+                'max_ctr_complexity': 4
+            }
             if overfitting_detector_type == 'IncToDec':
-                model.set_params(od_wait=OD_WAIT, od_pval=0.5)
+                params['od_wait'] = OD_WAIT
+                params['od_pval'] = 0.5
             elif overfitting_detector_type == 'Iter':
-                model.set_params(od_wait=OD_WAIT)
+                params['od_wait'] = OD_WAIT
             if with_resume_from_snapshot:
-                model.set_params(
-                    save_snapshot=True,
-                    snapshot_file=test_output_path(
-                        'snapshot_with_metric_period={}_od_type={}'.format(
-                            metric_period, overfitting_detector_type
-                        )
+                params['save_snapshot'] = True
+                params['snapshot_file'] = test_output_path(
+                    'snapshot_with_metric_period={}_od_type={}'.format(
+                        metric_period, overfitting_detector_type
                     )
                 )
-                model.set_params(iterations=FIRST_ITERATIONS)
+                params['iterations'] = FIRST_ITERATIONS
+                small_model = CatBoostClassifier(**params)
                 with tempfile.TemporaryFile('w+') as stdout_part:
                     with DelayedTee(sys.stdout, stdout_part):
-                        model.fit(train_pool, eval_set=test_pool)
+                        small_model.fit(train_pool, eval_set=test_pool)
                     first_training_stdout_len = sum(1 for line in stdout_part)
                 # overfitting detector has not stopped learning yet
-                assert model.tree_count_ == FIRST_ITERATIONS
+                assert small_model.tree_count_ == FIRST_ITERATIONS
             else:
-                model.set_params(save_snapshot=False)
+                params['save_snapshot'] = False
 
-            model.set_params(iterations=FINAL_ITERATIONS)
+            params['iterations'] = FINAL_ITERATIONS
+            model = CatBoostClassifier(**params)
             with tempfile.TemporaryFile('w+') as stdout_part:
                 with DelayedTee(sys.stdout, stdout_part):
                     model.fit(train_pool, eval_set=test_pool)
@@ -4494,9 +4881,45 @@ def test_shrink():
     assert model.tree_count_ == 9
     pred1 = model.predict(test_pool)
     pred2 = model2.predict(test_pool)
-    assert _check_data(pred1, pred2)
+    assert np.all(pred1 == pred2)
     model.shrink(8, ntree_start=1)
     assert model.tree_count_ == 7
+
+
+def test_shrink_with_bias():
+    train_pool = Pool(QUERYWISE_TRAIN_FILE, column_description=QUERYWISE_CD_FILE_WITH_GROUP_ID)
+    args = {
+        'iterations': 30,
+        'loss_function': 'RMSE',
+        'use_best_model': False,
+        'learning_rate': 0.3
+    }
+    model = CatBoostRegressor(**args)
+    model.fit(train_pool)
+    scale, bias = model.get_scale_and_bias()
+    model.shrink(9)
+    assert (scale, bias) == model.get_scale_and_bias()
+    model.shrink(8, ntree_start=1)
+    assert (scale, 0) == model.get_scale_and_bias()
+
+
+def test_set_scale_and_bias():
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    test_pool = Pool(TEST_FILE, column_description=CD_FILE)
+    args = {
+        'iterations': 30,
+        'loss_function': 'Logloss',
+        'use_best_model': False,
+        'learning_rate': 0.3
+    }
+    model = CatBoostClassifier(**args)
+    model.fit(train_pool)
+    pred1 = model.predict(test_pool, prediction_type='RawFormulaVal')
+    assert (1., 0.) == model.get_scale_and_bias()
+    model.set_scale_and_bias(3.14, 15.)
+    assert (3.14, 15.) == model.get_scale_and_bias()
+    pred2 = model.predict(test_pool, prediction_type='RawFormulaVal')
+    assert np.all(abs(pred1 * 3.14 + 15 - pred2) < 1e-15)
 
 
 def test_get_metric_evals(task_type):
@@ -4567,21 +4990,104 @@ def test_best_iteration(task_type):
     assert str(model.best_iteration_) == best_iteration_from_log
 
 
-def test_model_merging():
-    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
-    test_pool = Pool(TEST_FILE, column_description=CD_FILE)
-    ITER_STEP = 5
-    MODEL_COUNT = 8
-    model = CatBoostClassifier(iterations=ITER_STEP * MODEL_COUNT)
+def assert_sum_models_equal_sliced_copies(train, test, cd):
+    train_pool = Pool(train, column_description=cd)
+    test_pool = Pool(test, column_description=cd)
+    iter_step = 10
+    model_count = 2
+    model = CatBoostClassifier(iterations=iter_step * model_count)
     model.fit(train_pool)
-    truncated_copies = [model.copy() for _ in range(MODEL_COUNT)]
-    for i, model_to_shrink in enumerate(truncated_copies):
-        model_to_shrink.shrink(ntree_start=i * ITER_STEP, ntree_end=(i + 1) * ITER_STEP)
-    weights = [1.0] * MODEL_COUNT
+
+    truncated_copies = [model.copy() for _ in range(model_count)]
+    for i, truncated_model in enumerate(truncated_copies):
+        truncated_model.shrink(ntree_start=i * iter_step, ntree_end=(i + 1) * iter_step)
+
+        pred_local_shrinked = truncated_model.predict(test_pool, prediction_type='RawFormulaVal')
+        pred_local = model.predict(
+            test_pool,
+            prediction_type='RawFormulaVal',
+            ntree_start=i * iter_step,
+            ntree_end=(i + 1) * iter_step)
+
+        assert np.all(pred_local_shrinked == pred_local)
+        assert np.all(model.classes_ == truncated_model.classes_)
+
+    weights = [1.0] * model_count
     merged_model = sum_models(truncated_copies, weights)
     pred = model.predict(test_pool, prediction_type='RawFormulaVal')
     merged_pred = merged_model.predict(test_pool, prediction_type='RawFormulaVal')
+
     assert np.all(pred == merged_pred)
+    assert np.all(model.classes_ == merged_model.classes_)
+
+
+def test_model_merging():
+    assert_sum_models_equal_sliced_copies(TRAIN_FILE, TEST_FILE, CD_FILE)
+    # multiclass
+    assert_sum_models_equal_sliced_copies(CLOUDNESS_TRAIN_FILE, CLOUDNESS_TEST_FILE, CLOUDNESS_ONLY_NUM_CD_FILE)
+
+
+def test_model_sum_labels():
+    n_samples = 100
+    n_features = 10
+
+    """
+        list of (expected_sum_classes, lists of (loss_function, class_names, label_set))
+        if expected_sum_classes is False it means sum should fail
+    """
+    params_list = [
+        (
+            False,
+            [
+                ('Logloss', ['0', '1'], [0, 1]),
+                ('Logloss', ['1', '0'], [0, 1]),
+                ('Logloss', ['0', '1'], [0, 1])
+            ]
+        ),
+        (False, [('Logloss', None, [0, 1]), ('Logloss', None, [1, 2])]),
+        (False, [('Logloss', None, [0, 1]), ('MultiClass', None, [1, 2])]),
+        (False, [('RMSE', None, [0.1, 0.2, 1.0]), ('MultiClass', None, [1, 2, 4])]),
+        (False, [('MultiClass', None, [0, 1, 2]), ('MultiClass', None, [1, 2, 3])]),
+        (
+            False,
+            [
+                ('MultiClass', None, ['class0', 'class1', 'class2']),
+                ('MultiClass', None, ['Class0', 'Class1', 'Class2', 'Class3'])
+            ]
+        ),
+        ([0, 1], [('Logloss', None, [0, 1]), ('Logloss', None, [0, 1]), ('Logloss', None, [0, 1])]),
+        (
+            ['class0', 'class1', 'class2'],
+            [
+                ('MultiClass', None, ['class0', 'class1', 'class2']),
+                ('MultiClass', None, ['class0', 'class1', 'class2'])
+            ]
+        ),
+        ([1, 2], [('RMSE', None, [0.1, 0.2, 1.0]), ('Logloss', None, [1, 2])]),
+        ([], [('RMSE', None, [0.1, 0.2, 1.0]), ('RMSE', None, [0.22, 0.7, 1.3, 1.7])]),
+    ]
+
+    for expected_classes, train_specs_list in params_list:
+        models = []
+        for loss_function, class_names, label_set in train_specs_list:
+            features, labels = generate_random_labeled_dataset(
+                n_samples=n_samples,
+                n_features=n_features,
+                labels=label_set
+            )
+            params = {'loss_function': loss_function, 'iterations': 5}
+            if class_names:
+                params['class_names'] = class_names
+            model = CatBoost(params)
+            model.fit(features, labels)
+            models.append(model)
+
+        if expected_classes is False:
+            with pytest.raises(CatBoostError):
+                sum_models(models)
+        else:
+            model_sum = sum_models(models)
+            assert np.all(model_sum.classes_ == expected_classes)
 
 
 def test_tree_depth_pairwise(task_type):
@@ -4676,9 +5182,9 @@ def test_output_border_file(task_type):
     pred2 = model2.predict(test_pool)
     pred3 = model3.predict(test_pool)
     pred4 = model4.predict(test_pool)
-    assert _check_data(pred1, pred2)
-    assert not _check_data(pred1, pred3)
-    assert not _check_data(pred1, pred4)
+    assert np.all(pred1 == pred2)
+    assert not np.all(pred1 == pred3)
+    assert not np.all(pred1 == pred4)
 
 
 def test_output_border_file_regressor(task_type):
@@ -4824,8 +5330,6 @@ def test_param_synonyms(task_type):
 
 @pytest.mark.parametrize('grow_policy', NONSYMMETRIC)
 def test_grow_policy_fails(task_type, grow_policy):
-    if task_type == 'CPU':
-        return
     train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
     test_pool = Pool(TEST_FILE, column_description=CD_FILE)
     args = {
@@ -4842,25 +5346,21 @@ def test_grow_policy_fails(task_type, grow_policy):
 
     model.fit(train_pool)
 
-    try:
+    with pytest.raises(CatBoostError):
         model.shrink(9)
+    with pytest.raises(CatBoostError):
         model.get_object_importance(test_pool, train_pool)
-        model.get_feature_importance()
-        model.get_feature_importance(type=EFstrType.Interaction)
-        model.get_feature_importance(type=EFstrType.ShapValues, data=train_pool)
 
-        model_output = test_output_path('model')
-        for format in ['AppleCoreML', 'json', 'cpp', 'python', 'onnx']:
+    model_output = test_output_path('model')
+    for format in ['AppleCoreML', 'cpp', 'python', 'onnx']:
+        with pytest.raises(CatBoostError):
             model.save_model(model_output, format=format)
+    with pytest.raises(CatBoostError):
         sum_models([model, model.copy()])
-    except:
-        pass
 
 
 @pytest.mark.parametrize('grow_policy', NONSYMMETRIC)
 def test_multiclass_grow_policy(task_type, grow_policy):
-    if task_type == 'CPU':
-        return
     pool = Pool(CLOUDNESS_TRAIN_FILE, column_description=CLOUDNESS_CD_FILE)
     # MultiClass
     classifier = CatBoostClassifier(
@@ -4877,39 +5377,40 @@ def test_multiclass_grow_policy(task_type, grow_policy):
     classifier.save_model(output_model_path)
     new_classifier = CatBoostClassifier()
     new_classifier.load_model(output_model_path)
-    pred = new_classifier.predict_proba(pool)
-    preds_path = test_output_path(PREDS_PATH)
-    np.save(preds_path, np.array(pred))
-    return local_canonical_file(preds_path)
+    pred1 = classifier.predict_proba(pool)
+    pred2 = new_classifier.predict_proba(pool)
+    assert np.array_equal(pred1, pred2)
+    learn_error_path = test_output_path("learn_error.txt")
+    np.savetxt(learn_error_path, np.array(classifier.evals_result_['learn']['MultiClass']), fmt='%.8f')
+    return local_canonical_file(learn_error_path)
 
 
 @pytest.mark.parametrize('grow_policy', NONSYMMETRIC)
 def test_grow_policy_restriction(task_type, grow_policy):
-    if task_type == 'CPU':
-        return
     pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    params = {
+        'iterations': 2,
+        'thread_count': 8,
+        'task_type': task_type,
+        'devices': '0',
+        'grow_policy': grow_policy
+    }
     is_failed = False
     try:
-        classifier = CatBoostClassifier(
-            iterations=2,
-            thread_count=8,
-            task_type=task_type,
-            devices='0',
-            grow_policy=grow_policy,
-            max_leaves=2 ** 16 + 1
-        )
+        if grow_policy == 'Lossguide':
+            params['max_leaves'] = 65537
+        else:
+            params['max_depth'] = 17
+        classifier = CatBoostClassifier(**params)
         classifier.fit(pool)
     except:
         is_failed = True
     assert is_failed
-    classifier = CatBoostClassifier(
-        iterations=2,
-        thread_count=8,
-        task_type=task_type,
-        devices='0',
-        grow_policy=grow_policy,
-        max_leaves=1023
-    )
+    if grow_policy == 'Lossguide':
+        params['max_leaves'] = 65536
+    else:
+        params['max_depth'] = 16
+    classifier = CatBoostClassifier(**params)
     classifier.fit(pool)
     pred = classifier.predict_proba(pool)
     preds_path = test_output_path(PREDS_PATH)
@@ -5014,7 +5515,7 @@ def test_metric_period_with_verbose_true():
     with LogStdout(open(tmpfile, 'w')):
         model.fit(pool, verbose=True)
 
-    assert(_count_lines(tmpfile) == 5)
+    assert(_count_lines(tmpfile) == 6)
 
 
 def test_eval_features_with_file_header():
@@ -5298,10 +5799,51 @@ def test_continue_learning_with_changing_params(problem_type, param_set):
     return canonical_files
 
 
-def test_continue_learning_with_changing_dataset():
-    train_df = read_csv(TRAIN_FILE, header=None, delimiter='\t')
-    train_labels = Series(train_df.iloc[:, TARGET_IDX])
-    train_df.drop([TARGET_IDX], axis=1, inplace=True)
+SAMPLES_AND_FEATURES_FOR_CONTINUATION = [
+    ('same', 'more'),
+    ('more', 'same'),
+    ('new', 'same'),
+    ('more', 'more'),
+    ('new', 'more'),
+]
+
+
+@pytest.mark.parametrize(
+    'samples,features',
+    SAMPLES_AND_FEATURES_FOR_CONTINUATION,
+    ids=[
+        'samples=%s,features=%s' % (samples, features)
+        for (samples, features) in SAMPLES_AND_FEATURES_FOR_CONTINUATION
+    ]
+)
+def test_continue_learning_with_changing_dataset(samples, features):
+    all_df = read_csv(TRAIN_FILE, header=None, delimiter='\t')
+    all_labels = Series(all_df.iloc[:, TARGET_IDX])
+    all_df.drop([TARGET_IDX], axis=1, inplace=True)
+    all_features_df = all_df
+
+    if samples == 'same':
+        features_df_1 = all_features_df.copy()
+        labels_1 = all_labels.copy()
+        features_df_2 = all_features_df
+        labels_2 = all_labels
+    elif samples == 'more':
+        features_df_1 = all_features_df.head(70).copy()
+        labels_1 = all_labels.head(70).copy()
+        features_df_2 = all_features_df
+        labels_2 = all_labels
+    elif samples == 'new':
+        features_df_1 = all_features_df.head(60).copy()
+        labels_1 = all_labels.head(60).copy()
+        features_df_2 = all_features_df.tail(len(all_features_df) - 60).copy()
+        labels_2 = all_labels.tail(len(all_features_df) - 60).copy()
+
+    if features == 'more':
+        features_df_1.drop(features_df_1.columns[-5:], axis=1, inplace=True)
+        cat_features_1 = filter(lambda i: i < len(features_df_1.columns), CAT_FEATURES)
+    else:
+        cat_features_1 = CAT_FEATURES
+    cat_features_2 = CAT_FEATURES
 
     train_params = {
         'task_type': 'CPU',  # TODO(akhropov): GPU support
@@ -5310,15 +5852,16 @@ def test_continue_learning_with_changing_dataset():
         'learning_rate': 0.3  # fixed, because automatic value depends on number of iterations
     }
 
-    def train_model(train_features_df, train_labels, iterations, init_model=None):
+    def train_model(train_features_df, train_labels, cat_features, iterations, init_model=None):
         local_params = train_params
         local_params['iterations'] = iterations
         model = CatBoost(local_params)
-        model.fit(X=train_features_df, y=train_labels, cat_features=CAT_FEATURES, init_model=init_model)
+        print ('cat_features', cat_features)
+        model.fit(X=train_features_df, y=train_labels, cat_features=cat_features, init_model=init_model)
         return model
 
-    model1 = train_model(train_df.head(70), train_labels.head(70), iterations=5)
-    model2 = train_model(train_df, train_labels, iterations=4, init_model=model1)
+    model1 = train_model(features_df_1, labels_1, cat_features_1, iterations=5)
+    model2 = train_model(features_df_2, labels_2, cat_features_2, iterations=4, init_model=model1)
 
     pred = model2.predict(Pool(TEST_FILE, column_description=CD_FILE))
     preds_path = test_output_path(PREDS_TXT_PATH)
@@ -5379,6 +5922,15 @@ class TestModelWithoutParams(object):
                 model.get_feature_importance(type=fstr_type, data=train_pool)
         else:
             model.get_feature_importance(type=fstr_type, data=train_pool)
+
+    def test_prediction_values_fstr_change_on_different_pools(self):
+        train_pool = Pool(QUERYWISE_TRAIN_FILE, column_description=QUERYWISE_CD_FILE)
+        test_pool = Pool(QUERYWISE_TEST_FILE, column_description=QUERYWISE_CD_FILE)
+        model = CatBoost(dict(iterations=16, loss_function='RMSE'))
+        model.fit(train_pool)
+        train_fstr = model.get_feature_importance(type='PredictionValuesChange', data=train_pool)
+        test_fstr = model.get_feature_importance(type='PredictionValuesChange', data=test_pool)
+        assert not np.array_equal(train_fstr, test_fstr)
 
     @pytest.fixture(params=['not-trained', 'collapsed'])
     def model_no_trees(self, request):
@@ -5545,6 +6097,12 @@ def test_pool_is_quantized():
 
     raw_pool = Pool(QUERYWISE_TRAIN_FILE, column_description=QUERYWISE_CD_FILE)
     assert not raw_pool.is_quantized()
+
+
+def test_quantized_pool_with_all_features_ignored():
+    quantized_pool = Pool(data=get_quantized_path(QUANTIZED_TRAIN_FILE), column_description=QUANTIZED_CD_FILE)
+    with pytest.raises(CatBoostError):
+        CatBoostClassifier(ignored_features=list(range(100))).fit(quantized_pool)
 
 
 def test_pool_quantize():
@@ -5911,29 +6469,75 @@ def test_training_and_prediction_equal_on_pandas_dense_and_sparse_input(task_typ
     assert _check_data(predictions_on_dense, predictions_model_on_sparse_on_sparse_pool)
 
 
+def test_sparse_input_with_categorical_features_with_default_value_present_only_in_eval():
+    cat_features = [1, 2]
+
+    """
+        1 x 2
+        x x 3
+        4 5 6
+        1 x 3
+    """
+    row = np.array([0, 0, 1, 2, 2, 2, 3, 3])
+    col = np.array([0, 2, 2, 0, 1, 2, 0, 2])
+    data = np.array([1, 2, 3, 4, 5, 6, 1, 3])
+    X_train = scipy.sparse.csr_matrix((data, (row, col)), shape=(4, 3))
+    y_train = np.array([0, 1, 1, 0])
+
+    """
+        3 4 2
+        x 1 6
+        5 x x
+        7 x 8
+        1 x 1
+    """
+    row = np.array([0, 0, 0, 1, 1, 2, 3, 3, 4, 4])
+    col = np.array([0, 1, 2, 1, 2, 0, 0, 2, 0, 2])
+    data = np.array([3, 4, 2, 1, 6, 5, 7, 8, 1, 1])
+    X_validation = scipy.sparse.csr_matrix((data, (row, col)), shape=(5, 3))
+    y_validation = np.array([1, 0, 0, 1, 0])
+
+    model = CatBoostClassifier(iterations=5)
+
+    model.fit(X_train, y_train, cat_features, eval_set=(X_validation, y_validation))
+
+    preds_path = test_output_path(PREDS_TXT_PATH)
+    np.savetxt(preds_path, model.predict(X_validation), fmt='%.8f')
+    return local_canonical_file(preds_path)
+
+
 @pytest.mark.parametrize('model_shrink_rate', [None, 0, 0.2])
-def test_param_array_monotonic_constrains(model_shrink_rate):
+def test_different_formats_of_monotone_constraints(model_shrink_rate):
     from catboost.datasets import monotonic2, set_cache_path
     set_cache_path(test_output_path())  # specify cache dir to fix potential data race while downloading dataset
     monotonic2_train, monotonic2_test = monotonic2()
-    train_pool = Pool(data=monotonic2_train.drop(columns=['Target']), label=monotonic2_train['Target'])
-    test_pool = Pool(data=monotonic2_test.drop(columns=['Target']), label=monotonic2_test['Target'])
+    X_train, y_train = monotonic2_train.drop(columns=['Target']), monotonic2_train['Target']
+    X_test, y_test = monotonic2_test.drop(columns=['Target']), monotonic2_test['Target']
+    feature_names = list(X_train.columns)
+    train_pool = Pool(data=X_train, label=y_train, feature_names=feature_names)
+    test_pool = Pool(data=X_test, label=y_test, feature_names=feature_names)
 
-    monotone_constraints_array = np.array([-1, 1, -1, 1])
-    monotone_constraints_list = [-1, 1, -1, 1]
+    monotone_constraints_array = np.array([-1, 1, 1, -1])
+    monotone_constraints_list = [-1, 1, 1, -1]
+    monotone_constraints_dict_1 = {0: -1, 1: 1, 2: 1, 3: -1}
+    monotone_constraints_dict_2 = {'MonotonicNeg0': -1, 'MonotonicPos0': 1, 'MonotonicPos1': 1, 'MonotonicNeg1': -1}
+    monotone_constraints_string_1 = "(-1,1,1,-1)"
+    monotone_constraints_string_2 = "0:-1,1:1,2:1,3:-1"
+    monotone_constraints_string_3 = "MonotonicNeg0:-1,MonotonicPos0:1,MonotonicPos1:1,MonotonicNeg1:-1"
 
     common_options = dict(iterations=50, model_shrink_rate=model_shrink_rate)
     model1 = CatBoostRegressor(monotone_constraints=monotone_constraints_array, **common_options)
-    model2 = CatBoostRegressor(monotone_constraints=monotone_constraints_list, **common_options)
-
     model1.fit(train_pool)
-    model2.fit(train_pool)
-
-    predections1 = model1.predict(test_pool)
-    predections2 = model2.predict(test_pool)
-
-    assert all(predections1 == predections2)
+    predictions1 = model1.predict(test_pool)
     assert abs(model1.evals_result_['learn']['RMSE'][-1] - model1.eval_metrics(train_pool, 'RMSE')['RMSE'][-1]) < 1e-9
+
+    for monotone_constraints in [monotone_constraints_list, monotone_constraints_dict_1,
+                                 monotone_constraints_dict_2, monotone_constraints_string_1,
+                                 monotone_constraints_string_2, monotone_constraints_string_3]:
+        model2 = CatBoostRegressor(monotone_constraints=monotone_constraints, **common_options)
+        model2.fit(train_pool)
+        predictions2 = model2.predict(test_pool)
+        assert all(predictions1 == predictions2)
 
 
 def test_same_values_with_different_types(task_type):
@@ -5996,7 +6600,7 @@ def test_multiclass_train_on_constant_data(task_type):
 
     model = clf.fit(features, labels)
 
-    assert model.classes_ == classes
+    assert np.all(model.classes_ == classes)
     model.predict(features)
 
 
@@ -6008,7 +6612,7 @@ def test_multiclass_train_on_constant_data(task_type):
 @pytest.mark.parametrize(
     'loss_function',
     ['Logloss', 'CrossEntropy'],
-    ids=['label_type=%s' % s for s in ['Logloss', 'CrossEntropy']]
+    ids=['loss_function=%s' % s for s in ['Logloss', 'CrossEntropy']]
 )
 def test_classes_attribute_binclass(label_type, loss_function):
     params = {'loss_function': loss_function, 'iterations': 2}
@@ -6019,7 +6623,6 @@ def test_classes_attribute_binclass(label_type, loss_function):
         unique_labels = [2, 5]
     elif label_type == 'string':
         unique_labels = ['class0', 'class1']
-        params['class_names'] = ['class0', 'class1']
     elif label_type == 'float':
         unique_labels = [0.0, 0.1, 0.2, 0.5, 1.0]
         if loss_function == 'Logloss':
@@ -6028,23 +6631,22 @@ def test_classes_attribute_binclass(label_type, loss_function):
     features, labels = generate_random_labeled_dataset(n_samples=20, n_features=5, labels=unique_labels)
 
     model = CatBoostClassifier(**params)
-    if (loss_function == 'CrossEntropy') and (label_type == 'nonconsecutive_integers'):
-        # out of [0.0, 1.0] bounds
+    if (loss_function == 'CrossEntropy') and (label_type in ['nonconsecutive_integers', 'string']):
+        # 'nonconsecutive_integers' because it is out of [0.0, 1.0] bounds
+        # 'string' because CrossEntropy requires numerical target
         with pytest.raises(CatBoostError):
             model.fit(features, labels)
     else:
         model.fit(features, labels)
 
         if label_type == 'consecutive_integers':
-            assert model.classes_ == ['0', '1']
+            assert np.all(model.classes_ == [0, 1])
         elif label_type == 'nonconsecutive_integers':
-            # if loss_function == 'Logloss' and label contains two unique numeric values CatBoost automatically
-            # calculates target_border as their average
-            assert sorted(model.classes_) == ['0', '1']
+            assert np.all(sorted(model.classes_) == [2, 5])
         elif label_type == 'string':
-            assert model.classes_ == ['class0', 'class1']
+            assert np.all(model.classes_ == ['class0', 'class1'])
         elif label_type == 'float':
-            assert model.classes_ == ['0', '1']
+            assert np.all(model.classes_ == [0, 1])
 
 
 @pytest.mark.parametrize(
@@ -6070,10 +6672,304 @@ def test_classes_attribute_multiclass(label_type):
     model.fit(features, labels)
 
     if label_type == 'consecutive_integers':
-        assert model.classes_ == ['0', '1', '2', '3']
+        assert np.all(model.classes_ == [0, 1, 2, 3])
     elif label_type == 'nonconsecutive_integers':
-        assert model.classes_ == ['2', '5', '9', '11']
+        assert np.all(model.classes_ == [2, 5, 9, 11])
     elif label_type == 'string':
-        assert sorted(model.classes_) == ['class0', 'class1', 'class2', 'class3']
+        assert np.all(sorted(model.classes_) == ['class0', 'class1', 'class2', 'class3'])
     elif label_type == 'float':
-        assert sorted(model.classes_) == ['0', '0.1', '0.2', '0.5', '1']
+        assert np.allclose(sorted(model.classes_), [0, 0.1, 0.2, 0.5, 1])
+
+
+def test_multiclass_non_positive_definite_from_github():
+    train = np.array([
+        [
+            0., 0., 0., 0., 0., 0., 0., 0., 0., 0.
+        ],
+        [
+            0.00473934, 0.05, 0., 0., 0., 0., 0., 0., 0., 0.
+        ],
+        [
+            0.04739336, 0.1, 0., 0., 0., 0.03191489, 0., 0., 0., 0.
+        ],
+        [
+            0., 0., 0., 0., 0.00298507, 0.09574468, 0.0195122, 0.01492537, 0.00787402, 0.
+        ],
+        [
+            0.0521327, 0.15, 0.00480769, 0.07692308, 0., 0., 0., 0., 0., 0.
+        ]
+    ])
+    cat_params = {
+        'iterations': 500,
+        'random_state': 42,
+        'loss_function': 'MultiClass',
+        'eval_metric': 'TotalF1',
+        'early_stopping_rounds': 30,
+        'thread_count': 16,
+        'l2_leaf_reg': 0
+    }
+    y_train = np.array([1, 2, 4, 2, 1])
+    cat_model = CatBoostClassifier(**cat_params)
+    cat_model.fit(X=np.array(train)[:5, :10], y=np.array(y_train)[:5], verbose=0)
+
+
+def test_snapshot_checksum(task_type):
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    test_pool = Pool(TEST_FILE, column_description=CD_FILE)
+
+    model = CatBoostClassifier(
+        task_type=task_type,
+        iterations=15,
+        save_snapshot=True,
+        snapshot_file='snapshot',
+    )
+    model.fit(train_pool, eval_set=test_pool)
+
+    model_next = CatBoostClassifier(
+        task_type=task_type,
+        iterations=30,
+        save_snapshot=True,
+        snapshot_file='snapshot',
+    )
+    model_next.fit(train_pool, eval_set=test_pool)
+
+    with pytest.raises(CatBoostError):
+        model_next.fit(test_pool, eval_set=train_pool)
+
+
+def test_bootstrap_defaults():
+    pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+
+    model = CatBoostClassifier(iterations=1)
+    model.fit(pool)
+    params = model.get_all_params()
+    assert params['bootstrap_type'] == 'MVS'
+    assert abs(params['subsample'] - 0.8) < EPS
+
+    model = CatBoostClassifier(iterations=1, bootstrap_type='Bernoulli')
+    model.fit(pool)
+    params = model.get_all_params()
+    assert params['bootstrap_type'] == 'Bernoulli'
+    assert abs(params['subsample'] - 0.66) < EPS
+
+    model = CatBoostClassifier(iterations=1, loss_function='MultiClass')
+    model.fit(pool)
+    params = model.get_all_params()
+    assert params['bootstrap_type'] == 'Bayesian'
+    assert 'subsample' not in params
+
+
+def test_monoforest_regression():
+    train_pool = Pool(HIGGS_TRAIN_FILE, column_description=HIGGS_CD_FILE)
+    model = CatBoostRegressor(loss_function='RMSE', iterations=10)
+    model.fit(train_pool)
+    from catboost.monoforest import to_polynom_string, plot_features_strength
+    poly = to_polynom_string(model)
+    assert poly, "Unexpected empty poly"
+    plot = plot_features_strength(model)
+    assert plot, "Unexpected empty plot"
+
+
+def test_text_processing_tokenizer():
+    from catboost.text_processing import Tokenizer
+    assert Tokenizer(lowercasing=True).tokenize('Aba caba') == ['aba', 'caba']
+
+
+def test_text_processing_dictionary():
+    from catboost.text_processing import Dictionary
+
+    dictionary = Dictionary(occurence_lower_bound=0).fit([
+        ['aba', 'caba'],
+        ['ala', 'caba'],
+        ['caba', 'aba']
+    ])
+
+    assert dictionary.size == 3
+    assert dictionary.get_top_tokens(2) == ['caba', 'aba']
+    assert dictionary.apply([['ala', 'caba'], ['aba']]) == [[2, 0], [1]]
+
+    dictionary_path = test_output_path('dictionary.tsv')
+    dictionary.save(dictionary_path)
+    return compare_canonical_models(dictionary_path)
+
+
+def test_log_proba():
+    # multiclass with softmax
+    pool = Pool(CLOUDNESS_TRAIN_FILE, column_description=CLOUDNESS_CD_FILE)
+    classifier = CatBoostClassifier(iterations=50, thread_count=8, devices='0')
+    classifier.fit(pool)
+    pred = classifier.predict(pool, prediction_type='Probability')
+    log_pred = classifier.predict(pool, prediction_type='LogProbability')
+    assert np.allclose(log_pred, np.log(pred))
+
+    # multiclass OneVsAll
+    pool = Pool(CLOUDNESS_TRAIN_FILE, column_description=CLOUDNESS_CD_FILE)
+    classifier = CatBoostClassifier(iterations=50, thread_count=8, loss_function='MultiClassOneVsAll', devices='0')
+    classifier.fit(pool)
+    pred = classifier.predict(pool, prediction_type='Probability')
+    log_pred = classifier.predict(pool, prediction_type='LogProbability')
+    assert np.allclose(log_pred, np.log(pred))
+
+    # binary classification
+    pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    classifier = CatBoostClassifier(iterations=2)
+    classifier.fit(pool)
+    pred = classifier.predict(pool, prediction_type='Probability')
+    log_pred_1 = classifier.predict(pool, prediction_type='LogProbability')
+    log_pred_2 = classifier.predict_log_proba(pool)
+    assert np.allclose(log_pred_1, np.log(pred))
+    assert np.allclose(log_pred_1, log_pred_2)
+
+
+def test_staged_log_proba():
+    # multiclass with softmax
+    pool = Pool(CLOUDNESS_TRAIN_FILE, column_description=CLOUDNESS_CD_FILE)
+    classifier = CatBoostClassifier(iterations=50, thread_count=8, devices='0')
+    classifier.fit(pool)
+    pred_it = classifier.staged_predict(pool, prediction_type='Probability')
+    log_pred_it = classifier.staged_predict(pool, prediction_type='LogProbability')
+    for pred, log_pred in zip(pred_it, log_pred_it):
+        assert np.allclose(log_pred, np.log(pred))
+
+    # multiclass OneVsAll
+    pool = Pool(CLOUDNESS_TRAIN_FILE, column_description=CLOUDNESS_CD_FILE)
+    classifier = CatBoostClassifier(iterations=50, thread_count=8, loss_function='MultiClassOneVsAll', devices='0')
+    classifier.fit(pool)
+    pred_it = classifier.staged_predict(pool, prediction_type='Probability')
+    log_pred_it = classifier.staged_predict(pool, prediction_type='LogProbability')
+    for pred, log_pred in zip(pred_it, log_pred_it):
+        assert np.allclose(log_pred, np.log(pred))
+
+    # binary classification
+    pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    classifier = CatBoostClassifier(iterations=2)
+    classifier.fit(pool)
+    pred_it = classifier.staged_predict(pool, prediction_type='Probability')
+    log_pred_it_1 = classifier.staged_predict(pool, prediction_type='LogProbability')
+    log_pred_it_2 = classifier.staged_predict_log_proba(pool)
+    for pred, log_pred_1, log_pred_2 in zip(pred_it, log_pred_it_1, log_pred_it_2):
+        assert np.allclose(log_pred_1, np.log(pred))
+        assert np.allclose(log_pred_1, log_pred_2)
+        assert np.allclose(log_pred_1, log_pred_2)
+
+
+def test_shap_assert():
+    model_path = test_output_path('model.json')
+    pool = Pool([[0, ], [1, ], ], [0, 1])
+    model = train(pool, {'iterations': 1, 'task_type': 'CPU', 'devices': '0'})
+    model.save_model(model_path, format='json')
+
+    json_model = json.load(open(model_path))
+    json_model['scale_and_bias'] = [1, 1]
+    json.dump(json_model, open(model_path, 'w'))
+    model = CatBoost().load_model(model_path, format='json')
+    shap_values = model.get_feature_importance(type='ShapValues', data=pool)
+    predictions = model.predict(pool)
+    assert(len(predictions) == len(shap_values))
+    for i, pred_idx in enumerate(range(len(predictions))):
+        assert(abs(sum(shap_values[pred_idx]) - predictions[pred_idx]) < 1e-9), (sum(shap_values[pred_idx]) - predictions[pred_idx])
+
+    json_model['oblivious_trees'] = [{
+        'leaf_values': [1, 2],
+        'leaf_weights': [1, 0],
+        'splits': [{'border': 0.5, 'float_feature_index': 1, 'split_index': 0, 'split_type': 'FloatFeature'}]
+    }]
+    json_model['features_info'] = {
+        'float_features': [{'borders': [0.5], 'feature_index': 0, 'flat_feature_index': 0, 'has_nans': False, 'nan_value_treatment': 'AsIs'}]
+    }
+
+    json.dump(json_model, open(model_path, 'w'))
+    model = CatBoost().load_model(model_path, format='json')
+    with pytest.raises(CatBoostError):
+        model.get_feature_importance(type='ShapValues', data=pool)
+
+
+@pytest.mark.parametrize('shrink_mode', ['Constant', 'Decreasing'])
+@pytest.mark.parametrize('shrink_rate', [0, 0.2])
+@pytest.mark.parametrize('diffusion', [0, 1000])
+def test_diffusion_temperature_with_shrink_mode(shrink_mode, shrink_rate, diffusion):
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    test_pool = Pool(TEST_FILE, column_description=CD_FILE)
+    params = {
+        'iterations': 50,
+        'learning_rate': 0.03,
+        'model_shrink_mode': shrink_mode,
+        'model_shrink_rate': shrink_rate,
+        'diffusion_temperature': diffusion
+    }
+    model = CatBoostClassifier(**params)
+    model.fit(train_pool)
+    pred = model.predict_proba(test_pool)
+    preds_path = test_output_path('predictions.tsv')
+    np.savetxt(preds_path, np.array(pred), fmt='%.15f', delimiter='\t')
+    return local_canonical_file(preds_path)
+
+
+def test_langevin_with_empty_leafs():
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    params = {
+        'iterations': 10,
+        'depth': 10,
+        'learning_rate': 0.03,
+        'langevin': True,
+        'diffusion_temperature': 1000
+    }
+    model = CatBoostClassifier(**params)
+    model.fit(train_pool)
+    for value, weight in zip(model.get_leaf_values(), model.get_leaf_weights()):
+        if weight == 0:
+            assert value == 0
+
+
+def test_to_classifier():
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    test_pool = Pool(TEST_FILE, column_description=CD_FILE)
+
+    models = []
+    for learning_rate in [.03, .05]:
+        models.append(CatBoostClassifier(iterations=2, learning_rate=learning_rate))
+        models[-1].fit(train_pool, eval_set=test_pool)
+
+    merged_model = sum_models(models)
+    prediction = merged_model.predict(test_pool, prediction_type='Probability')
+    assert type(merged_model) is CatBoost
+
+    merged_model = to_classifier(merged_model)
+
+    assert isinstance(merged_model, CatBoostClassifier)
+    assert _check_data(merged_model.predict_proba(test_pool), prediction)
+
+
+def test_to_classifier_wrong_type():
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    model = CatBoostRegressor(iterations=2, learning_rate=.05, objective='RMSE')
+    model.fit(train_pool)
+    with pytest.raises(CatBoostError):
+        to_classifier(model)
+
+
+def test_to_regressor():
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    test_pool = Pool(TEST_FILE, column_description=CD_FILE)
+
+    models = []
+    for learning_rate in [.03, .05]:
+        models.append(CatBoostRegressor(iterations=2, learning_rate=learning_rate))
+        models[-1].fit(train_pool, eval_set=test_pool)
+
+    merged_model = sum_models(models)
+    prediction = merged_model.predict(test_pool)
+    assert type(merged_model) is CatBoost
+
+    merged_model = to_regressor(merged_model)
+
+    assert isinstance(merged_model, CatBoostRegressor)
+    assert _check_data(merged_model.predict(test_pool), prediction)
+
+
+def test_to_regressor_wrong_type():
+    train_pool = Pool(TRAIN_FILE, column_description=CD_FILE)
+    model = CatBoostClassifier(iterations=2, learning_rate=.05, objective='Logloss')
+    model.fit(train_pool)
+    with pytest.raises(CatBoostError):
+        to_regressor(model)

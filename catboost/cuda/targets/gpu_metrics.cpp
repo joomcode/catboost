@@ -643,7 +643,7 @@ namespace NCatboostCuda {
             for (auto&& metric : createdObjectiveMetrics) {
                 const auto& useWeights = metric->GetUseWeights();
                 if (!useWeights.IsIgnored() && !useWeights.IsUserDefined()){
-                    metric->GetUseWeights() = true;
+                    metric->GetUseWeights().SetDefaultValue(true);
                 }
             }
         }
@@ -665,9 +665,9 @@ namespace NCatboostCuda {
             if (!haveEvalMetricFromUser) {
                 metrics.back()->GetUseWeights() = createdObjectiveMetrics.back()->GetUseWeights();
             } else if (ShouldConsiderWeightsByDefault(metrics.back())) {
-                metrics.back()->GetUseWeights() = true;
+                metrics.back()->GetUseWeights().SetDefaultValue(true);
                 CATBOOST_INFO_LOG << "Note: eval_metric is using sample weights by default. " <<
-                                  "Set MetricName:use_weights=False to calculate unweighted metric.";
+                                  "Set MetricName:use_weights=False to calculate unweighted metric." << Endl;
             }
         }
         usedDescriptions.insert(metrics.back()->GetCpuMetric().GetDescription());
@@ -703,9 +703,9 @@ namespace NCatboostCuda {
                 }
             }
             for (auto&& metric : createdCustomMetrics) {
-                const TString& description = metric->GetCpuMetric().GetDescription();
-                if (!usedDescriptions.contains(description)) {
-                    usedDescriptions.insert(description);
+                const TString& metricDescription = metric->GetCpuMetric().GetDescription();
+                if (!usedDescriptions.contains(metricDescription)) {
+                    usedDescriptions.insert(metricDescription);
                     metrics.push_back(std::move(metric));
                 }
             }

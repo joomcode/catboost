@@ -1,58 +1,55 @@
 #pragma once
 
-#include <catboost/private/libs/options/data_processing_options.h>
-#include <catboost/private/libs/options/enums.h>
-#include <catboost/private/libs/options/loss_description.h>
+#include <catboost/libs/data/target.h>
 
-#include <util/generic/array_ref.h>
-#include <util/generic/hash.h>
-#include <util/generic/hash_set.h>
+#include <catboost/private/libs/options/enums.h>
+
+#include <library/json/json_value.h>
+
+#include <util/generic/fwd.h>
 #include <util/generic/maybe.h>
-#include <util/generic/strbuf.h>
+#include <util/generic/ptr.h>
 #include <util/generic/string.h>
 #include <util/generic/vector.h>
+
+#include <util/system/types.h>
+
+
+namespace NPar {
+    class TLocalExecutor;
+}
 
 
 namespace NCB {
 
-    class TTargetConverter {
+    template <class T>
+    class ITypedSequence;
+
+    class ITargetConverter {
     public:
-        TTargetConverter(const bool isClassTarget,
-                         const bool isMultiClassTarget,
-                         const EConvertTargetPolicy readingPoolTargetPolicy,
-                         const TVector<TString>& inputClassNames,
-                         TVector<TString>* const outputClassNames);
+        virtual ~ITargetConverter() = default;
 
-        float ConvertLabel(const TStringBuf& label);
-        float ProcessLabel(const TString& label);
-
-        TVector<float> PostprocessLabels(TConstArrayRef<TString> labels);
-        void SetOutputClassNames() const;
-
-        EConvertTargetPolicy GetTargetPolicy() const;
-
-        const TVector<TString>& GetInputClassNames() const;
+        virtual TVector<float> Process(ERawTargetType targetType,
+                                       const TRawTarget& rawTarget,
+                                       NPar::TLocalExecutor* localExecutor) = 0;
 
         // call after all processing
-        ui32 GetClassCount() const;
-    private:
-        const bool IsClassTarget;
-        const bool IsMultiClassTarget;
-        const EConvertTargetPolicy TargetPolicy;
-        const TVector<TString>& InputClassNames;
-        TVector<TString>* const OutputClassNames;
-        THashMap<TString, int> LabelToClass; // used with targetPolicy = MakeClassNames/UseClassNames
-        THashSet<float> UniqueLabels; // used only if IsClassTarget
+        virtual ui32 GetClassCount() const = 0;
+
+        virtual TMaybe<TVector<NJson::TJsonValue>> GetClassLabels() {
+            return Nothing();
+        }
     };
 
+
     /*
-     *  if inputClassNames is nonempty, isMultiClass and classCountUnknown
-     *  are not used
+     *  only one of targetBorder, classCount or inputClassNames should be specified
      */
-    TTargetConverter MakeTargetConverter(bool isClass,
-                                         bool isMultiClass,
-                                         bool classCountUnknown,
-                                         const TVector<TString>& inputClassNames,
-                                         TVector<TString>* outputClassNames);
+    THolder<ITargetConverter> MakeTargetConverter(bool isRealTarget,
+                                                  bool isClass,
+                                                  bool isMultiClass,
+                                                  TMaybe<float> targetBorder,
+                                                  TMaybe<ui32> classCount,
+                                                  const TVector<NJson::TJsonValue>& inputClassNames);
 
 }

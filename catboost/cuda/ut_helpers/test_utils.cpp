@@ -9,6 +9,8 @@
 #include <catboost/libs/helpers/cpu_random.h>
 #include <util/stream/str.h>
 
+#include <util/folder/dirut.h>
+
 using namespace std;
 
 void GenerateTestPool(TBinarizedPool& pool,
@@ -145,7 +147,10 @@ void LoadTrainingData(NCB::TPathWithScheme poolPath,
         NCatboostOptions::TColumnarPoolFormatParams columnarPoolFormatParams;
         columnarPoolFormatParams.CdFilePath = cdFilePath;
 
-        dataProvider = NCB::ReadDataset(poolPath,
+        dataProvider = NCB::ReadDataset(ETaskType::GPU,
+                                        poolPath,
+                                        NCB::TPathWithScheme(),
+                                        NCB::TPathWithScheme(),
                                         NCB::TPathWithScheme(),
                                         NCB::TPathWithScheme(),
                                         NCB::TPathWithScheme(),
@@ -154,7 +159,7 @@ void LoadTrainingData(NCB::TPathWithScheme poolPath,
                                         NCB::EObjectsOrder::Ordered,
                                         16,
                                         true,
-                                        /*classNames*/ Nothing());
+                                        /*classLabels*/ Nothing());
     }
 
     NCatboostOptions::TCatBoostOptions catBoostOptions(ETaskType::GPU);
@@ -174,9 +179,9 @@ void LoadTrainingData(NCB::TPathWithScheme poolPath,
                                          true,
                                          "learn",
                                          Nothing(),
-                                         /*unloadCatFeaturePerfectHashFromRamIfPossible*/ true,
+                                         /*unloadCatFeaturePerfectHashFromRam*/ true,
                                          /*ensureConsecutiveFeaturesDataForCpu*/ false, // irrelevant for GPU
-                                         /*allowWriteFiles*/ true,
+                                         /*tmpDir*/ GetSystemTempDir(),
                                          nullptr,
                                          &catBoostOptions,
                                          &labelConverter,
@@ -191,5 +196,10 @@ void LoadTrainingData(NCB::TPathWithScheme poolPath,
         (*trainingData)->ObjectsData->GetQuantizedFeaturesInfo());
 
     NCB::TOnCpuGridBuilderFactory gridBuilderFactory;
-    (*featuresManager)->SetTargetBorders(NCB::TBordersBuilder(gridBuilderFactory, *(*trainingData)->TargetData->GetTarget())((*featuresManager)->GetTargetBinarizationDescription()));
+    (*featuresManager)->SetTargetBorders(
+        NCB::TBordersBuilder(
+            gridBuilderFactory,
+            *(*trainingData)->TargetData->GetOneDimensionalTarget()
+        )((*featuresManager)->GetTargetBinarizationDescription())
+    );
 }

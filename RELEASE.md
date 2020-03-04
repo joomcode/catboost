@@ -1,3 +1,128 @@
+# Release 0.22
+
+## New features:
+- The main feature of the release is the support of non symmetric trees for training on CPU.
+Using non symmetric trees might be useful if one-hot encoding is present, or data has little noise.
+To try non symmetric trees change [``grow_policy`` parameter](https://catboost.ai/docs/concepts/parameter-tuning.html#tree-growing-policy).
+Starting from this release non symmetric trees are supported for both CPU and GPU training.
+- The next big feature improves catboost text features support.
+Now tokenization is done during training, you don't have to do lowercasing, digit extraction and other tokenization on your own, catboost does it for you.
+- Auto learning-rate is now supported in CPU MultiClass mode.
+- CatBoost class supports ``to_regressor`` and ``to_classifier`` methods.
+
+The release also contains a list of bug fixes.
+
+# Release 0.21
+
+## New features:
+- The main feature of this release is the Stochastic Gradient Langevin Boosting (SGLB) mode that can improve quality of your models with non-convex loss functions. To use it specify ``langevin`` option and tune ``diffusion_temperature`` and ``model_shrink_rate``. See [the corresponding paper](https://arxiv.org/abs/2001.07248) for details.
+
+## Improvements:
+
+- Automatic learning rate is applied by default not only for ``Logloss`` objective, but also for ``RMSE`` (on CPU and GPU) and ``MultiClass`` (on GPU).
+- Class labels type information is stored in the model. Now estimators in python package return values of proper type in ``classes_`` attribute and for prediction functions with ``prediction_type=Class``. #305, #999, #1017.
+  Note: Class labels loaded from datasets in [CatBoost dsv format](https://catboost.ai/docs/concepts/input-data_values-file.html) always have string type now.
+
+## Bug fixes:
+- Fixed huge memory consumption for text features. #1107
+- Fixed crash on GPU on big datasets with groups (hundred million+ groups).
+- Fixed class labels consistency check and merging in model sums (now class names in binary classification are properly checked and added to the result as well)
+- Fix for confusion matrix (PR #1152), thanks to @dmsivkov.
+- Fixed shap values calculation when ``boost_from_average=True``. #1125
+- Fixed use-after-free in fstr PredictionValuesChange with specified dataset
+- Target border and class weights are now taken from model when necessary for feature strength, metrics evaluation, roc_curve, object importances and calc_feature_statistics calculations.
+- Fixed that L2 regularization was not applied for non symmetric trees for binary classification on GPU.
+- [R-package] Fixed the bug that ``catboost.get_feature_importance`` did not work after model is loaded #1064
+- [R-package] Fixed the bug that ``catboost.train`` did not work when called with the single dataset parameter. #1162 
+- Fixed L2 score calculation on CPU
+
+##Other:
+
+- Starting from this release Java applier is released simultaneously with other components and has the same version.
+
+##Compatibility:
+
+- Models trained with this release require applier from this release or later to work correctly.
+
+# Release 0.20.2
+
+## New features:
+- String class labels are now supported for binary classification
+- [CLI only] Timestamp column for the datasets can be provided in separate files.
+- [CLI only] Timesplit feature evaluation.
+- Process groups of any size in block processing.
+
+
+## Bug fixes:
+- ``classes_count`` and ``class_weight`` params can be now used with user-defined loss functions. #1119
+- Form correct metric descriptions on GPU if ``use_weights`` gets value by default. #1106
+- Correct ``model.classes_`` attribute for binary classification (proper labels instead of always ``0`` and ``1``). #984
+- Fix ``model.classes_`` attribute when classes_count parameter was specified.
+- Proper error message when categorical features specified for MultiRMSE training. #1112
+- Block processing: It is valid for all groups in a single block to have weights equal to 0
+- fix empty asymmetric tree index calculation. #1104
+
+# Release 0.20.1
+
+## New features:
+- Have `leaf_estimation_method=Exact` the default for MAPE loss
+- Add `CatBoostClassifier.predict_log_proba()`, PR #1095
+
+## Bug fixes:
+- Fix usability of read-only numpy arrays, #1101
+- Fix python3 compatibility for `get_feature_importance`, PR #1090
+- Fix loading model from snapshot for `boost_from_average` mode
+
+# Release 0.20
+
+New submodule for text processing!
+It contains two classes to help you make text features ready for training:
+- [Tokenizer](https://github.com/catboost/catboost/blob/afb8331a638de280ba2aee3831ac9df631e254a0/library/text_processing/tokenizer/tokenizer.pxi#L77) -- use this class to split text into tokens (automatic lowercase and punctuation removal)
+- [Dictionary](https://github.com/catboost/catboost/tree/master/library/text_processing/dictionary) -- with this class you create a dictionary which maps tokens to numeric identifiers. You then use these identifiers as new features.
+
+## New features:
+- Enabled `boost_from_average` for `MAPE` loss function
+
+## Bug fixes:
+- Fixed `Pool` creation from `pandas.DataFrame` with discontinuous columns, #1079
+- Fixed `standalone_evaluator`, PR #1083
+
+## Speedups:
+- Huge speedup of preprocessing in python-package for datasets with many samples (>10 mln)
+
+# Release 0.19.1
+
+## New features:
+- With this release we support `Text` features for *classification on GPU*. To specify text columns use `text_features` parameter. Achieve better quality by using text information of your dataset. See more in [Learning CatBoost with text features](https://github.com/catboost/tutorials/blob/master/text_features/text_features_in_catboost.ipynb)
+- `MultiRMSE` loss function is now available on CPU. Labels for the multi regression mode should be specified in separate `Label` columns
+- MonoForest framework for model analysis, based on our NeurIPS 2019 [paper](https://papers.nips.cc/paper/9530-monoforest-framework-for-tree-ensemble-analysis). Learn more in [MonoForest tutorial](https://github.com/catboost/tutorials/tree/master/model_analysis/monoforest_tutorial.ipynb)
+- `boost_from_average` is now `True` by default for `Quantile` and `MAE` loss functions, which improves the resulting quality
+
+## Speedups:
+- Huge reduction of preprocessing time for datasets loaded from files and for datasets with many samples (> 10 million), which was a bottleneck for GPU training
+- 3x speedup for small datasets
+
+
+# Release 0.18.1
+
+## New features:
+- Now `datasets.msrank()` returns _full_ msrank dataset. Previously, it returned the first 10k samples.
+We have added `msrank_10k()` dataset implementing the past behaviour.
+
+## Bug fixes:
+- `get_object_importance()` now respects parameter `top_size`, #1045 by @ibuda
+
+# Release 0.18
+
+- The main feature of the release is huge speedup on small datasets. We now use MVS sampling for CPU regression and binary classification training by default, together with `Plain` boosting scheme for both small and large datasets. This change not only gives the huge speedup but also provides quality improvement!
+- The `boost_from_average` parameter is available in `CatBoostClassifier` and `CatBoostRegressor`
+- We have added new formats for describing monotonic constraints. For example, `"(1,0,0,-1)"` or `"0:1,3:-1"` or `"FeatureName0:1,FeatureName3:-1"` are all valid specifications. With Python and `params-file` json, lists and dictionaries can also be used
+
+## Bugs fixed:
+- Error in `Multiclass` classifier training, #1040
+- Unhandled exception when saving quantized pool, #1021
+- Python 3.7: `RuntimeError` raised in `StagedPredictIterator`, #848
+
 # Release 0.17.5
 
 ## Bugs fixed:

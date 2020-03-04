@@ -23,6 +23,7 @@ PEERDIR(
     catboost/private/libs/target
     catboost/libs/train_lib
     library/grid_creator
+    library/threading/local_executor
     library/json
     library/logger
 )
@@ -34,10 +35,10 @@ IF(HAVE_CUDA)
     )
 ENDIF()
 
-IF (NOT OS_WINDOWS)
-    ALLOCATOR(LF)
-ELSE()
+IF (ARCH_AARCH64 OR OS_WINDOWS)
     ALLOCATOR(J)
+ELSE()
+    ALLOCATOR(LF)
 ENDIF()
 
 INCLUDE(${ARCADIA_ROOT}/catboost/cuda/cuda_lib/default_nvcc_flags.make.inc)

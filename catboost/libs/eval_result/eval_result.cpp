@@ -88,7 +88,7 @@ namespace NCB {
             if (TryFromString<EColumn>(ToCanonicalColumnName(name), columnType)) {
                 switch (columnType) {
                     case (EColumn::Label):
-                        CB_ENSURE(pool.MetaInfo.HasTarget > 0, "bad output column name " << name << " (No target/label info in pool)");
+                        CB_ENSURE(pool.MetaInfo.TargetCount > 0, "bad output column name " << name << " (No target/label info in pool)");
                         break;
                     case (EColumn::Baseline):
                         CB_ENSURE(pool.MetaInfo.BaselineCount > 0, "bad output column name " << name << " (No baseline info in pool)");
@@ -178,13 +178,38 @@ namespace NCB {
             EPredictionType type;
             if (TryFromString<EPredictionType>(outputColumn, type)) {
                 columnPrinter.push_back(MakeHolder<TEvalPrinter>(executor, evalResult.GetRawValuesConstRef(), type, lossFunctionName,
-                                                                 visibleLabelsHelper, evalParameters));
+                                                                 pool.RawTargetData.GetTargetDimension(), visibleLabelsHelper, evalParameters));
                 continue;
             }
             EColumn outputType;
             if (TryFromString<EColumn>(ToCanonicalColumnName(outputColumn), outputType)) {
                 if (outputType == EColumn::Label) {
-                    columnPrinter.push_back(MakeHolder<TArrayPrinter<TString>>(*pool.RawTargetData.GetTarget(), outputColumn));
+                    const auto target = pool.RawTargetData.GetTarget().GetRef();
+                    const auto targetDim = target.size();
+                    for (auto targetIdx : xrange(targetDim)) {
+                        TStringBuilder header;
+                        header << outputColumn;
+                        if (targetDim > 1) {
+                            header << ":Dim=" << targetIdx;
+                        }
+                        if (const ITypedSequencePtr<float>* typedSequence
+                                = GetIf<ITypedSequencePtr<float>>(&(target[targetIdx])))
+                        {
+                            columnPrinter.push_back(
+                                MakeHolder<TArrayPrinter<float>>(
+                                    ToVector(**typedSequence),
+                                    header
+                                )
+                            );
+                        } else {
+                            columnPrinter.push_back(
+                                MakeHolder<TArrayPrinter<TString>>(
+                                    Get<TVector<TString>>(target[targetIdx]),
+                                    header
+                                )
+                            );
+                        }
+                    }
                     continue;
                 }
                 if (outputType == EColumn::SampleId) {

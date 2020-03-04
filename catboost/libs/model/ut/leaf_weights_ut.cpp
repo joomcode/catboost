@@ -28,7 +28,8 @@ static TDataProviderPtr SmallFloatPool(EWeightsMode addWeights, ETargetDimMode m
     return CreateDataProvider(
         [&] (IRawFeaturesOrderDataVisitor* visitor) {
             TDataMetaInfo metaInfo;
-            metaInfo.HasTarget = true;
+            metaInfo.TargetType = multiclass ? ERawTargetType::String : ERawTargetType::Float;
+            metaInfo.TargetCount = 1;
             metaInfo.HasWeights = addWeights;
             metaInfo.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(
                 (ui32)3,
@@ -54,7 +55,9 @@ static TDataProviderPtr SmallFloatPool(EWeightsMode addWeights, ETargetDimMode m
             if (multiclass) {
                 visitor->AddTarget(TVector<TString>{"1", "0", "2"});
             } else {
-                visitor->AddTarget(TVector<float>{1.0f, 0.0f, 0.2f});
+                visitor->AddTarget(
+                    MakeIntrusive<TTypeCastArrayHolder<float, float>>(TVector<float>{1.0f, 0.0f, 0.2f})
+                );
             }
             if (addWeights) {
                 visitor->AddWeights({1.0f, 2.0f, 0.5f});
@@ -104,7 +107,7 @@ static TFullModel SaveLoadCoreML(const TFullModel& trainedModel) {
 }
 
 static void CheckWeights(const TWeights<float>& docWeights, const TFullModel& model) {
-    if (model.ObliviousTrees->LeafWeights.empty()) {
+    if (model.ModelTrees->GetLeafWeights().empty()) {
         return;
     }
 
@@ -113,10 +116,10 @@ static void CheckWeights(const TWeights<float>& docWeights, const TFullModel& mo
         trueWeightSum += docWeights[i];
     }
 
-    const auto& weights = model.ObliviousTrees->LeafWeights;
-    const auto& treeSizes = model.ObliviousTrees->TreeSizes;
-    const int approxDimension = model.ObliviousTrees->ApproxDimension;
-    auto leafOffsetPtr = model.ObliviousTrees->GetFirstLeafOffsets();
+    const auto weights = model.ModelTrees->GetLeafWeights();
+    const auto treeSizes = model.ModelTrees->GetTreeSizes();
+    const int approxDimension = model.ModelTrees->GetDimensionsCount();
+    auto leafOffsetPtr = model.ModelTrees->GetFirstLeafOffsets();
     for (size_t treeIdx = 0; treeIdx < model.GetTreeCount(); ++treeIdx) {
         double weightSumInTree = 0;
         const size_t offset = leafOffsetPtr[treeIdx] / approxDimension;
@@ -131,7 +134,7 @@ static void RunTestWithParams(EWeightsMode addWeights, ETargetDimMode multiclass
     TDataProviderPtr floatPool = SmallFloatPool(addWeights, multiclass);
     TFullModel trainedModel = TrainModelOnPool(floatPool, multiclass);
     if (clearWeightsInModel) {
-        trainedModel.ObliviousTrees.GetMutable()->LeafWeights.clear();
+        trainedModel.ModelTrees.GetMutable()->ClearLeafWeights();
     }
     TFullModel deserializedModel;
     if (exportToCBM) {
@@ -142,7 +145,7 @@ static void RunTestWithParams(EWeightsMode addWeights, ETargetDimMode multiclass
     if (exportToCBM) {
         CheckWeights(floatPool->RawTargetData.GetWeights(), deserializedModel);
     } else {
-        UNIT_ASSERT(deserializedModel.ObliviousTrees->LeafWeights.empty());
+        UNIT_ASSERT(deserializedModel.ModelTrees->GetLeafWeights().empty());
     }
 }
 

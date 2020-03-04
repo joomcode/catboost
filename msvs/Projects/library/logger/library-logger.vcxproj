@@ -63,7 +63,7 @@
       <RemoveUnreferencedCodeData Condition="'$(Configuration)|$(Platform)'=='Debug|x64'"/>
       <WarningLevel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Level4</WarningLevel>
       <RemoveUnreferencedCodeData Condition="'$(Configuration)|$(Platform)'=='Release|x64'"/>
-      <AdditionalIncludeDirectories>;$(SolutionDir)$(Configuration);$(SolutionDir)..;$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include;$(SolutionDir)../contrib/libs/double-conversion/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>;$(SolutionDir)$(Configuration);$(SolutionDir)..;$(SolutionDir)../contrib/libs/cxxsupp/libcxx/include;$(SolutionDir)../contrib/libs/zlib/include;$(SolutionDir)../contrib/libs/double-conversion/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -87,6 +87,7 @@
     <ClCompile Include="$(SolutionDir)$(Configuration)\library\logger\priority.h_serialized.cpp"/>
     <ClCompile Include="$(SolutionDir)..\library\logger\rotating_file.cpp"/>
     <ClCompile Include="$(SolutionDir)..\library\logger\stream.cpp"/>
+    <ClCompile Include="$(SolutionDir)..\library\logger\sync_page_cache_file.cpp"/>
     <ClCompile Include="$(SolutionDir)..\library\logger\system.cpp"/>
     <ClCompile Include="$(SolutionDir)..\library\logger\thread.cpp"/>
     <CustomBuild Include="$(SolutionDir)..\library\logger\priority.h">
@@ -126,6 +127,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="$(SolutionDir)..\library\logger\record.h"/>
     <ClInclude Include="$(SolutionDir)..\library\logger\rotating_file.h"/>
     <ClInclude Include="$(SolutionDir)..\library\logger\stream.h"/>
+    <ClInclude Include="$(SolutionDir)..\library\logger\sync_page_cache_file.h"/>
     <ClInclude Include="$(SolutionDir)..\library\logger\system.h"/>
     <ClInclude Include="$(SolutionDir)..\library\logger\thread.h"/>
   </ItemGroup>
