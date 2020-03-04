@@ -22,5 +22,7 @@ C GetDimensionsCount
 C CheckModelMetadataHasKey
 C GetModelInfoValueSize
 C GetModelInfoValue
-C GetModelNumericFeatures
-C GetModelCategoricalFeatures
+C GetModelNumericFeatureNames
+C GetModelNumericFeaturePositions
+C GetModelCategoricalFeatureNames
+C GetModelCategoricalFeaturePositions
