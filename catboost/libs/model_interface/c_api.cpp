@@ -232,19 +232,19 @@ CATBOOST_API const char* GetModelInfoValue(ModelCalcerHandle* modelHandle, const
     return FULL_MODEL_PTR(modelHandle)->ModelInfo.at(key).c_str();
 }
 
-EXPORT char* GetModelNumericFeatureNames(ModelCalcerHandle* modelHandle, char* buffer, size_t size) {
+CATBOOST_API char* GetModelNumericFeatureNames(ModelCalcerHandle* modelHandle, char* buffer, size_t size) {
     return getAllFeatureNames(FULL_MODEL_PTR(modelHandle)->ModelTrees->GetFloatFeatures(), buffer, size);
 }
 
-EXPORT char* GetModelCategoricalFeatureNames(ModelCalcerHandle* modelHandle, char* buffer, size_t size) {
+CATBOOST_API char* GetModelCategoricalFeatureNames(ModelCalcerHandle* modelHandle, char* buffer, size_t size) {
     return getAllFeatureNames(FULL_MODEL_PTR(modelHandle)->ModelTrees->GetCatFeatures(), buffer, size);
 }
 
-EXPORT size_t GetModelNumericFeaturePositions(ModelCalcerHandle* modelHandle, int* buffer, size_t size) {
+CATBOOST_API size_t GetModelNumericFeaturePositions(ModelCalcerHandle* modelHandle, int* buffer, size_t size) {
     return getAllFeaturePositions(FULL_MODEL_PTR(modelHandle)->ModelTrees->GetFloatFeatures(), buffer, size);
 }
 
-EXPORT size_t GetModelCategoricalFeaturePositions(ModelCalcerHandle* modelHandle, int* buffer, size_t size) {
+CATBOOST_API size_t GetModelCategoricalFeaturePositions(ModelCalcerHandle* modelHandle, int* buffer, size_t size) {
     return getAllFeaturePositions(FULL_MODEL_PTR(modelHandle)->ModelTrees->GetCatFeatures(), buffer, size);
 }
 
