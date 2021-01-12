@@ -115,24 +115,24 @@ void Out<std::u32string_view>(IOutputStream& o, const std::u32string_view& p) {
 }
 
 template <>
-void Out<TFixedString<char>>(IOutputStream& o, const TFixedString<char>& p) {
-    o.Write(p.Start, p.Length);
+void Out<TStringBuf>(IOutputStream& o, const TStringBuf& p) {
+    o.Write(p.data(), p.length());
 }
 
 template <>
-void Out<TFixedString<wchar16>>(IOutputStream& o, const TFixedString<wchar16>& p) {
-    WriteString(o, p.Start, p.Length);
+void Out<TWtringBuf>(IOutputStream& o, const TWtringBuf& p) {
+    WriteString(o, p.data(), p.length());
 }
 
 template <>
-void Out<TFixedString<wchar32>>(IOutputStream& o, const TFixedString<wchar32>& p) {
-    WriteString(o, p.Start, p.Length);
+void Out<TUtf32StringBuf>(IOutputStream& o, const TUtf32StringBuf& p) {
+    WriteString(o, p.data(), p.length());
 }
 
 template <>
 void Out<const wchar16*>(IOutputStream& o, const wchar16* w) {
     if (w) {
-        WriteString(o, w, TCharTraits<wchar16>::GetLength(w));
+        WriteString(o, w, std::char_traits<wchar16>::length(w));
     } else {
         o.Write("(null)");
     }
@@ -141,7 +141,7 @@ void Out<const wchar16*>(IOutputStream& o, const wchar16* w) {
 template <>
 void Out<const wchar32*>(IOutputStream& o, const wchar32* w) {
     if (w) {
-        WriteString(o, w, TCharTraits<wchar32>::GetLength(w));
+        WriteString(o, w, std::char_traits<wchar32>::length(w));
     } else {
         o.Write("(null)");
     }
@@ -201,6 +201,7 @@ DEF_CONV_NUM(float, 512)
 DEF_CONV_NUM(double, 512)
 DEF_CONV_NUM(long double, 512)
 
+#ifndef TSTRING_IS_STD_STRING
 template <>
 void Out<TBasicCharRef<TString>>(IOutputStream& o, const TBasicCharRef<TString>& c) {
     o << static_cast<char>(c);
@@ -215,6 +216,7 @@ template <>
 void Out<TBasicCharRef<TUtf32String>>(IOutputStream& o, const TBasicCharRef<TUtf32String>& c) {
     o << static_cast<wchar32>(c);
 }
+#endif
 
 template <>
 void Out<const void*>(IOutputStream& o, const void* t) {
@@ -230,7 +232,7 @@ using TNullPtr = decltype(nullptr);
 
 template <>
 void Out<TNullPtr>(IOutputStream& o, TTypeTraits<TNullPtr>::TFuncParam) {
-    o << AsStringBuf("nullptr");
+    o << TStringBuf("nullptr");
 }
 
 #if defined(_android_)

@@ -1,8 +1,8 @@
 #include "logging.h"
 
-#include <library/logger/filter.h>
-#include <library/logger/global/rty_formater.h>
-#include <library/logger/log.h>
+#include <library/cpp/logger/filter.h>
+#include <library/cpp/logger/global/rty_formater.h>
+#include <library/cpp/logger/log.h>
 
 
 #include <util/system/mem_info.h>
@@ -33,7 +33,7 @@ private:
 };
 
 void SetCustomLoggingFunction(TCustomLoggingFunction lowPriorityFunc, TCustomLoggingFunction highPriorityFunc) {
-    TCatBoostLogSettings::GetRef().Log.ResetBackend(new TCustomFuncLogger(lowPriorityFunc), new TCustomFuncLogger(highPriorityFunc));
+    TCatBoostLogSettings::GetRef().Log.ResetBackend(MakeHolder<TCustomFuncLogger>(lowPriorityFunc), MakeHolder<TCustomFuncLogger>(highPriorityFunc));
 }
 
 void RestoreOriginalLogger() {

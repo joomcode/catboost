@@ -11,7 +11,7 @@
 #include <catboost/private/libs/options/load_options.h>
 
 void InitializeMaster(const NCatboostOptions::TSystemOptions& systemOptions);
-void FinalizeMaster(TLearnContext* ctx);
+void FinalizeMaster(const NCatboostOptions::TSystemOptions& systemOptions);
 void SetTrainDataFromQuantizedPool(
     const NCatboostOptions::TPoolLoadParams& poolLoadOptions,
     const NCatboostOptions::TCatBoostOptions& catBoostOptions,
@@ -20,9 +20,9 @@ void SetTrainDataFromQuantizedPool(
     TRestorableFastRng64* rand
 );
 void SetTrainDataFromMaster(
-    NCB::TTrainingForCPUDataProviderPtr trainData,
+    const NCB::TTrainingDataProviders& trainData,
     ui64 cpuUsedRamLimit,
-    NPar::TLocalExecutor* localExecutor);
+    NPar::ILocalExecutor* localExecutor);
 void MapBuildPlainFold(TLearnContext* ctx);
 void MapRestoreApproxFromTreeStruct(TLearnContext* ctx);
 void MapTensorSearchStart(TLearnContext* ctx);
@@ -35,11 +35,11 @@ void MapCalcScore(
     TLearnContext* ctx);
 void MapRemoteCalcScore(
     double scoreStDev,
-    TCandidatesContext* candidatesContext,
+    TVector<TCandidatesContext>* candidatesContext,
     TLearnContext* ctx);
 void MapRemotePairwiseCalcScore(
     double scoreStDev,
-    TCandidatesContext* candidatesContext,
+    TVector<TCandidatesContext>* candidatesContext,
     TLearnContext* ctx);
 void MapSetIndices(const TSplit& bestSplit, TLearnContext* ctx);
 int MapGetRedundantSplitIdx(TLearnContext* ctx);
@@ -65,7 +65,7 @@ TVector<typename TMapper::TOutput> ApplyMapper(
 void MapSetApproxesSimple(
     const IDerCalcer& error,
     const TVariant<TSplitTree, TNonSymmetricTreeStructure>& splitTree,
-    TConstArrayRef<NCB::TTrainingForCPUDataProviderPtr> testData,
+    const NCB::TTrainingDataProviders data, // only test part is used
     TVector<TVector<double>>* averageLeafValues,
     TVector<double>* sumLeafWeights,
     TLearnContext* ctx);
@@ -73,7 +73,7 @@ void MapSetApproxesSimple(
 void MapSetApproxesMulti(
     const IDerCalcer& error,
     const TVariant<TSplitTree, TNonSymmetricTreeStructure>& splitTree,
-    TConstArrayRef<NCB::TTrainingForCPUDataProviderPtr> testData,
+    const NCB::TTrainingDataProviders data, // only test part is used
     TVector<TVector<double>>* averageLeafValues,
     TVector<double>* sumLeafWeights,
     TLearnContext* ctx);

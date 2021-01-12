@@ -257,8 +257,10 @@ Y_HIDDEN void _YandexAbort();
  * }
  * @endcode
  */
-#if defined(__GNUC__) || defined(_MSC_VER)
-#define Y_UNREACHABLE() Y_ASSUME(0)
+#if defined(__GNUC__)
+#define Y_UNREACHABLE() __builtin_unreachable()
+#elif defined (_MSC_VER)
+#define Y_UNREACHABLE() __assume(false)
 #else
 #define Y_UNREACHABLE() _YandexAbort()
 #endif
@@ -543,7 +545,8 @@ Y_HIDDEN void _YandexAbort();
 #define Y_PRAGMA_NO_DEPRECATED
 #endif
 
-#if defined(__clang__) || defined(__GNUC__)
+// Memory sanitizer sometimes doesn't correctly set parameter shadow of constant functions.
+#if (defined(__clang__) || defined(__GNUC__)) && !defined(_msan_enabled_)
 /**
  * @def Y_CONST_FUNCTION
    methods and functions, marked with this method are promised to:

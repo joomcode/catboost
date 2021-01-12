@@ -13,9 +13,9 @@ static void UpdateAvrgApprox(
     ui32 learnSampleCount,
     const TVector<TIndexType>& indices,
     const TVector<TVector<double>>& treeDelta,
-    TConstArrayRef<TTrainingForCPUDataProviderPtr> testData, // can be empty
+    TConstArrayRef<TTrainingDataProviderPtr> testData, // can be empty
     TLearnProgress* learnProgress,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     Y_ASSERT(learnProgress->AveragingFold.BodyTailArr.ysize() == 1);
     const TVector<size_t>& testOffsets = CalcTestOffsets(learnSampleCount, testData);
@@ -76,9 +76,9 @@ void UpdateAvrgApprox(
     ui32 learnSampleCount,
     const TVector<TIndexType>& indices,
     const TVector<TVector<double>>& treeDelta,
-    TConstArrayRef<TTrainingForCPUDataProviderPtr> testData, // can be empty
+    TConstArrayRef<TTrainingDataProviderPtr> testData, // can be empty
     TLearnProgress* learnProgress,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     if (storeExpApprox) {
         ::UpdateAvrgApprox<true>(learnSampleCount, indices, treeDelta, testData, learnProgress, localExecutor);

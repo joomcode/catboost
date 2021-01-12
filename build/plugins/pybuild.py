@@ -2,7 +2,7 @@ import os
 import collections
 
 import ymake
-from _common import stripext, rootrel_arc_src, tobuilddir, listid, resolve_to_ymake_path, generate_chunks
+from _common import stripext, rootrel_arc_src, tobuilddir, listid, resolve_to_ymake_path, generate_chunks, pathid
 
 
 def is_arc_src(src, unit):
@@ -12,12 +12,16 @@ def is_arc_src(src, unit):
         unit.resolve_arc_path(src).startswith('$S/')
     )
 
-
 def to_build_root(path, unit):
     if is_arc_src(path, unit):
         return '${ARCADIA_BUILD_ROOT}/' + rootrel_arc_src(path, unit)
     return path
 
+def uniq_suffix(path, unit):
+    upath = unit.path()
+    if '/' not in path:
+        return ''
+    return '.{}'.format(pathid(path)[:4])
 
 def pb2_arg(suf, path, mod, unit):
     return '{path}__int__{suf}={mod}{modsuf}'.format(
@@ -108,15 +112,9 @@ def add_python_lint_checks(unit, py_ver, files):
                 resolved_files.append(resolved)
         return resolved_files
 
-    resolved_files = []
     if files and unit.get('LINT_LEVEL_VALUE') != "none":
         resolved_files = get_resolved_files()
-        unit.onadd_check(["PEP8_{}".format(py_ver)] + resolved_files)
-        unit.onadd_check(["PYFLAKES_{}".format(py_ver)] + resolved_files)
-
-    flake8_cfg = unit.get('FLAKE8_CONFIG') or 'build/config/tests/flake8_default.conf'
-    if files and flake8_cfg != 'none':
-        resolved_files = resolved_files or get_resolved_files()
+        flake8_cfg = 'build/config/tests/flake8.conf'
         unit.onadd_check(["flake8.py{}".format(py_ver), flake8_cfg] + resolved_files)
 
 
@@ -389,11 +387,12 @@ def onpy_srcs(unit, *args):
                     res += ['DEST', dest, path]
                 if with_pyc:
                     root_rel_path = rootrel_arc_src(path, unit)
-                    unit.on_py3_compile_bytecode([root_rel_path + '-', path])
-                    res += ['DEST', dest + '.yapyc3', path + '.yapyc3']
+                    dst = path + uniq_suffix(path, unit)
+                    unit.on_py3_compile_bytecode([root_rel_path + '-', path, dst])
+                    res += ['DEST', dest + '.yapyc3', dst + '.yapyc3']
 
             unit.onresource_files(res)
-            add_python_lint_checks(unit, 3, [path for path, mod in pys])
+            add_python_lint_checks(unit, 3, [path for path, mod in pys] + unit.get(['_PY_EXTRA_LINT_FILES_VALUE']).split())
         else:
             for path, mod in pys:
                 root_rel_path = rootrel_arc_src(path, unit)
@@ -405,12 +404,12 @@ def onpy_srcs(unit, *args):
                     ]
                 if with_pyc:
                     src = unit.resolve_arc_path(path) or path
-                    dst = tobuilddir(src) + '.yapyc'
-                    unit.on_py_compile_bytecode([root_rel_path + '-', src])
-                    res += [dst, '/py_code/' + mod]
+                    dst = path + uniq_suffix(path, unit)
+                    unit.on_py_compile_bytecode([root_rel_path + '-', src, dst])
+                    res += [dst + '.yapyc', '/py_code/' + mod]
 
             unit.onresource(res)
-            add_python_lint_checks(unit, 2, [path for path, mod in pys])
+            add_python_lint_checks(unit, 2, [path for path, mod in pys] + unit.get(['_PY_EXTRA_LINT_FILES_VALUE']).split())
 
     if protos:
         if not upath.startswith('contrib/libs/protobuf/python/google_lib'):
@@ -492,7 +491,7 @@ def py_register(unit, func, py3):
 
 def onpy_register(unit, *args):
     """
-    @usage: PY_REGISTER([package.]module_name[=module_name])
+    @usage: PY_REGISTER([package.]module_name)
 
     Python knows about which built-ins can be imported, due to their registration in the Assembly or at the start of the interpreter.
     All modules from the sources listed in PY_SRCS() are registered automatically.
@@ -553,3 +552,28 @@ def onpy_constructor(unit, arg):
     else:
         arg[arg.index(':')] = '='
     unit.onresource(['-', 'py/constructors/{}'.format(arg)])
+
+def onpy_enums_serialization(unit, *args):
+    ns = ''
+    args = iter(args)
+    for arg in args:
+        # Namespace directives.
+        if arg == 'NAMESPACE':
+            ns = next(args)
+        else:
+            unit.on_py_enum_serialization_to_json(arg)
+            unit.on_py_enum_serialization_to_py(arg)
+            filename = arg.rsplit('.', 1)[0] + '.py'
+            if len(ns) != 0:
+                onpy_srcs(unit, 'NAMESPACE', ns, filename)
+            else:
+                onpy_srcs(unit, filename)
+
+def oncpp_enums_serialization(unit, *args):
+    args = iter(args)
+    for arg in args:
+        # Namespace directives.
+        if arg == 'NAMESPACE':
+            next(args)
+        else:
+            unit.ongenerate_enum_serialization_with_header(arg)

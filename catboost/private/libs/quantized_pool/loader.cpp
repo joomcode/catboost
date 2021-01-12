@@ -14,6 +14,7 @@
 #include <catboost/libs/logging/logging.h>
 #include <catboost/private/libs/quantization_schema/serialization.h>
 
+#include <util/generic/algorithm.h>
 #include <util/generic/cast.h>
 #include <util/generic/deque.h>
 #include <util/generic/mapfindptr.h>
@@ -277,6 +278,9 @@ void NCB::TCBQuantizedDataLoader::AddChunk(
         } case EColumn::SubgroupId: {
             visitor->AddSubgroupIdPart(GetDatasetOffset(chunk), TUnalignedArrayBuf<ui32>(quants));
             break;
+        } case EColumn::Timestamp: {
+            visitor->AddTimestampPart(GetDatasetOffset(chunk), TUnalignedArrayBuf<ui64>(quants));
+            break;
         } case EColumn::Categ: {
             CB_ENSURE(flatFeatureIdx != nullptr, "Feature not found in index");
             AddQuantizedCatFeatureChunk(chunk, *flatFeatureIdx, visitor);
@@ -286,9 +290,8 @@ void NCB::TCBQuantizedDataLoader::AddChunk(
             // Are skipped in a caller
         case EColumn::Auxiliary:
         case EColumn::Text:
+        case EColumn::NumVector:
             // Should not be present in quantized pool
-        case EColumn::Timestamp:
-            // Not supported by quantized pools right now
         case EColumn::Sparse:
             // Not supported by CatBoost at all
         case EColumn::Prediction: {
@@ -343,7 +346,8 @@ void NCB::TCBQuantizedDataLoader::Do(IQuantizedFeaturesDataVisitor* visitor) {
         ObjectCount,
         ObjectsOrder,
         {},
-        QuantizationSchemaFromProto(QuantizedPool.QuantizationSchema));
+        QuantizationSchemaFromProto(QuantizedPool.QuantizationSchema),
+        /*wholeColumns*/ false);
 
     const auto columnIdxToTargetIdx = GetColumnIndexToTargetIndexMap(QuantizedPool);
     const auto columnIdxToFlatIdx = GetColumnIndexToFlatIndexMap(QuantizedPool);
@@ -376,11 +380,11 @@ void NCB::TCBQuantizedDataLoader::Do(IQuantizedFeaturesDataVisitor* visitor) {
         }
 
         CB_ENSURE(
-            columnType == EColumn::Num || columnType == EColumn::Baseline ||
-            columnType == EColumn::Label || columnType == EColumn::Categ ||
-            columnType == EColumn::Weight || columnType == EColumn::GroupWeight ||
-            columnType == EColumn::GroupId || columnType == EColumn::SubgroupId,
-            "Expected Num, Baseline, Label, Categ, Weight, GroupWeight, GroupId, or Subgroupid; got "
+            EqualToOneOf(columnType, EColumn::Num, EColumn::Baseline,
+            EColumn::Label, EColumn::Categ, EColumn::Weight,
+            EColumn::GroupWeight, EColumn::GroupId, EColumn::SubgroupId,
+            EColumn::Timestamp),
+            "Expected Num, Baseline, Label, Categ, Weight, GroupWeight, GroupId, Subgroupid, or Timestamp; got "
             LabeledOutput(columnType, columnIdx));
         if (!DatasetSubset.HasFeatures) {
             CB_ENSURE(columnType != EColumn::Num && columnType != EColumn::Categ, "CollectChunks collected a feature chunk despite HasFeatures = false");
@@ -400,7 +404,7 @@ void NCB::TCBQuantizedDataLoader::Do(IQuantizedFeaturesDataVisitor* visitor) {
 
     QuantizedPool = TQuantizedPool(); // release memory
     SetGroupWeights(GroupWeightsPath, ObjectCount, DatasetSubset, visitor);
-    SetPairs(PairsPath, ObjectCount, DatasetSubset, visitor);
+    SetPairs(PairsPath, DatasetSubset, visitor->GetGroupIds(), visitor);
     SetBaseline(BaselinePath, ObjectCount, DatasetSubset, NCB::ClassLabelsToStrings(DataMetaInfo.ClassLabels), visitor);
     SetTimestamps(TimestampsPath, ObjectCount, DatasetSubset, visitor);
     visitor->Finish();

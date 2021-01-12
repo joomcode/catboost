@@ -9,7 +9,7 @@
 
 #include <util/system/compiler.h>
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 
 using namespace NCB;
@@ -23,7 +23,7 @@ inline void ReadAndProceedPoolInBlocks(
     const TPathWithScheme& cdFilePath,
     ui32 blockSize,
     TConsumer&& poolConsumer,
-    NPar::TLocalExecutor* localExecutor) {
+    NPar::ILocalExecutor* localExecutor) {
 
     const auto loadSubset = TDatasetSubset::MakeColumns();
     auto datasetLoader = GetProcessor<IDatasetLoader>(

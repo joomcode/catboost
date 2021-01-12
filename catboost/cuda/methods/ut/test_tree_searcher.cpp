@@ -1,5 +1,5 @@
 #include <catboost/cuda/ut_helpers/test_utils.h>
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 #include <catboost/cuda/cuda_lib/cuda_buffer_helpers/all_reduce.h>
 #include <catboost/cuda/data/binarizations_manager.h>
@@ -9,6 +9,7 @@
 #include <catboost/cuda/methods/histograms_helper.h>
 #include <catboost/cuda/methods/oblivious_tree_structure_searcher.h>
 #include <catboost/cuda/methods/pointwise_scores_calcer.h>
+#include <catboost/cuda/methods/update_feature_weights.h>
 
 #include <catboost/libs/helpers/cpu_random.h>
 #include <catboost/libs/helpers/math_utils.h>
@@ -311,7 +312,7 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
                                           const TCudaBuffer<ui32, typename TLayout::TSamplesMapping>& indices,
                                           ui32 depth,
                                           ui32 foldCount) {
-        for (auto policy : NCatboostCuda::GetAllGroupingPolicies()) {
+        for (auto policy : GetEnumAllValues<NCatboostCuda::EFeaturesGroupingPolicy>()) {
             if (calcer.HasHelperForPolicy(policy)) {
                 auto& scoreHelper = calcer.GetHelperForPolicy(policy);
                 auto histogram = scoreHelper.ReadHistograms();
@@ -334,6 +335,7 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
 
         const ui32 foldCount = 28;
         const ui32 maxDepth = 10;
+        const float modelSizeReg = 0.5f;
         TVector<ui32> foldSizes;
         ui32 totalSize = 0;
 
@@ -392,7 +394,7 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
 
         THolder<TScoresCalcerOnCompressedDataSet<>> featuresScoreCalcer;
         if (dataSet.HasFeatures()) {
-            featuresScoreCalcer = new TScoresCalcerOnCompressedDataSet<>(dataSet.GetFeatures(),
+            featuresScoreCalcer = MakeHolder<TScoresCalcerOnCompressedDataSet<>>(dataSet.GetFeatures(),
                                                                          treeConfig,
                                                                          foldCount,
                                                                          true);
@@ -400,13 +402,15 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
 
         THolder<TScoresCalcerOnCompressedDataSet<>> simpleCtrScoreCalcer;
         if (dataSet.HasPermutationDependentFeatures()) {
-            simpleCtrScoreCalcer = new TScoresCalcerOnCompressedDataSet<>(dataSet.GetPermutationFeatures(),
+            simpleCtrScoreCalcer = MakeHolder<TScoresCalcerOnCompressedDataSet<>>(dataSet.GetPermutationFeatures(),
                                                                           treeConfig,
                                                                           foldCount,
                                                                           true);
         }
 
         TObliviousTreeStructure result;
+
+        TMirrorBuffer<float> featureWeights;
 
         for (ui32 depth = 0; depth < maxDepth; ++depth) {
             //warning: don't change order of commands. current pipeline ensures maximum stream-parallelism until read
@@ -443,6 +447,9 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
             }
             manager.WaitComplete();
             auto currentParts = TSubsetsHelper<NCudaLib::TMirrorMapping>::CurrentPartsView(subsets);
+
+            UpdateFeatureWeightsForBestSplits(featuresManager, modelSizeReg, featureWeights);
+
             if (featuresScoreCalcer) {
                 CheckResultsForCompressedDataSet(dataSet.GetFeatures(),
                                                  *featuresScoreCalcer,
@@ -467,10 +474,10 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
 
             {
                 if (featuresScoreCalcer) {
-                    featuresScoreCalcer->ComputeOptimalSplit(partitionStats);
+                    featuresScoreCalcer->ComputeOptimalSplit(partitionStats, featureWeights);
                 }
                 if (simpleCtrScoreCalcer) {
-                    simpleCtrScoreCalcer->ComputeOptimalSplit(partitionStats);
+                    simpleCtrScoreCalcer->ComputeOptimalSplit(partitionStats, featureWeights);
                 }
             }
 
@@ -485,6 +492,10 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
                 bestSplit.SplitType = featuresManager.IsCat(localIdx) ? EBinSplitType::TakeBin : EBinSplitType::TakeGreater;
 
                 treeUpdater.AddSplit(bestSplit);
+
+                if (featuresManager.IsCtr(bestSplit.FeatureId)) {
+                    featuresManager.AddUsedCtr(bestSplit.FeatureId);
+                }
 
                 TSubsetsHelper<NCudaLib::TMirrorMapping>::Split(target,
                                                                 docBins,
@@ -504,6 +515,7 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
         indices.Reset(dataSet.GetSamplesMapping());
         MakeSequence(indices);
 
+        float modelSizeReg = 0.5;
         const ui32 maxDepth = 10;
         TVector<ui32> foldSizes;
 
@@ -539,20 +551,22 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
         THolder<TScoreCalcer> simpleCtrScoreCalcer;
 
         if (dataSet.HasFeatures()) {
-            featuresScoreCalcer = new TScoreCalcer(dataSet.GetFeatures(),
+            featuresScoreCalcer = MakeHolder<TScoreCalcer>(dataSet.GetFeatures(),
                                                    treeConfig,
                                                    1,
                                                    true);
         }
 
         if (dataSet.HasPermutationDependentFeatures()) {
-            simpleCtrScoreCalcer = new TScoreCalcer(dataSet.GetPermutationFeatures(),
+            simpleCtrScoreCalcer = MakeHolder<TScoreCalcer>(dataSet.GetPermutationFeatures(),
                                                     treeConfig,
                                                     1,
                                                     true);
         }
 
         TObliviousTreeStructure result;
+
+        TMirrorBuffer<float> featureWeights;
 
         for (ui32 depth = 0; depth < maxDepth; ++depth) {
             //warning: don't change order of commands. current pipeline ensures maximum stream-parallelism until read
@@ -587,6 +601,9 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
             TMirrorBuffer<TPartitionStatistics> reducedPartsStats;
             NCudaLib::AllReduceThroughMaster(subsets.PartitionStats, reducedPartsStats);
 
+
+            UpdateFeatureWeightsForBestSplits(featuresManager, modelSizeReg, featureWeights);
+
             if (featuresScoreCalcer) {
                 CheckResultsForCompressedDataSet(dataSet.GetFeatures(),
                                                  *featuresScoreCalcer,
@@ -611,10 +628,10 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
 
             {
                 if (featuresScoreCalcer) {
-                    featuresScoreCalcer->ComputeOptimalSplit(reducedPartsStats);
+                    featuresScoreCalcer->ComputeOptimalSplit(reducedPartsStats, featureWeights);
                 }
                 if (simpleCtrScoreCalcer) {
-                    simpleCtrScoreCalcer->ComputeOptimalSplit(reducedPartsStats);
+                    simpleCtrScoreCalcer->ComputeOptimalSplit(reducedPartsStats, featureWeights);
                 }
             }
 
@@ -625,6 +642,11 @@ Y_UNIT_TEST_SUITE(TPointwiseHistogramTest) {
                 bestSplit.FeatureId = featureIds[localIdx];
                 bestSplit.BinIdx = featuresManager.GetBinCount(bestSplit.FeatureId) / 2;
                 bestSplit.SplitType = featuresManager.IsCat(localIdx) ? EBinSplitType::TakeBin : EBinSplitType::TakeGreater;
+            }
+            {
+                if (featuresManager.IsCtr(bestSplit.FeatureId)) {
+                    featuresManager.AddUsedCtr(bestSplit.FeatureId);
+                }
             }
             {
                 TSubsetsHelper<NCudaLib::TStripeMapping>::Split(target,

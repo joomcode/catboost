@@ -4,21 +4,45 @@
 
 #include <catboost/libs/helpers/exception.h>
 
-#include <library/object_factory/object_factory.h>
+#include <library/cpp/object_factory/object_factory.h>
 
 #include <util/generic/maybe.h>
 #include <util/generic/string.h>
 
 #include <util/stream/file.h>
-
+#include <util/string/escape.h>
 
 
 namespace NCB {
 
     struct TDsvFormatOptions {
-        bool HasHeader = false;
-        char Delimiter = '\t';
-        bool IgnoreCsvQuoting = false;
+    public:
+        bool HasHeader;
+        char Delimiter;
+        char NumVectorDelimiter;
+        bool IgnoreCsvQuoting;
+
+    public:
+        explicit TDsvFormatOptions(
+            bool hasHeader = false,
+            char delimiter = '\t',
+            char numVectorDelimiter = ';',
+            bool ignoreCsvQuoting = false
+        )
+            : HasHeader(hasHeader)
+            , Delimiter(delimiter)
+            , NumVectorDelimiter(numVectorDelimiter)
+            , IgnoreCsvQuoting(ignoreCsvQuoting)
+        {
+            CB_ENSURE(
+                delimiter != numVectorDelimiter,
+                "Field delimiter (" << EscapeC(Delimiter) << ") is the same as num vector delimiter ("
+                << EscapeC(NumVectorDelimiter) << ')'
+            );
+        }
+
+        SAVELOAD(HasHeader, Delimiter, NumVectorDelimiter, IgnoreCsvQuoting);
+        Y_SAVELOAD_DEFINE(HasHeader, Delimiter, NumVectorDelimiter, IgnoreCsvQuoting);
     };
 
     struct TLineDataReaderArgs {
@@ -43,6 +67,8 @@ namespace NCB {
         */
         virtual bool ReadLine(TString* line) = 0;
 
+        virtual bool ReadLine(TString*, TString*) = 0;
+
         virtual ~ILineDataReader() = default;
     };
 
@@ -50,7 +76,7 @@ namespace NCB {
         NObjectFactory::TParametrizedObjectFactory<ILineDataReader, TString, TLineDataReaderArgs>;
 
     THolder<ILineDataReader> GetLineDataReader(const TPathWithScheme& pathWithScheme,
-                                               const TDsvFormatOptions& format = {});
+                                               const TDsvFormatOptions& format = TDsvFormatOptions());
 
 
     int CountLines(const TString& poolFile);
@@ -89,6 +115,10 @@ namespace NCB {
                 GetHeader();
             }
             return IFStream.ReadLine(*line) != 0;
+        }
+
+        bool ReadLine(TString*, TString*) override {
+            Y_UNREACHABLE();
         }
 
     private:

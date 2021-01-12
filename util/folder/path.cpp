@@ -3,10 +3,10 @@
 #include "pathsplit.h"
 
 #include <util/generic/yexception.h>
+#include <util/string/cast.h>
 #include <util/system/compiler.h>
 #include <util/system/file.h>
 #include <util/system/fs.h>
-#include <util/system/platform.h>
 
 struct TFsPath::TSplit: public TAtomicRefCount<TSplit>, public TPathSplit {
     inline TSplit(const TStringBuf path)
@@ -17,7 +17,7 @@ struct TFsPath::TSplit: public TAtomicRefCount<TSplit>, public TPathSplit {
 
 void TFsPath::CheckDefined() const {
     if (!IsDefined()) {
-        ythrow TIoException() << AsStringBuf("must be defined");
+        ythrow TIoException() << TStringBuf("must be defined");
     }
 }
 

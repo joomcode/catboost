@@ -3,6 +3,7 @@
 #include "feature_index.h"
 #include "meta_info.h"
 #include "objects.h"
+#include "pairs.h"
 #include "unaligned_mem.h"
 #include "util.h"
 
@@ -44,7 +45,7 @@ namespace NCB {
         // separate method because they can be loaded from a separate data source
         virtual void SetBaseline(TVector<TVector<float>>&& baseline) = 0;
 
-        virtual void SetPairs(TVector<TPair>&& pairs) = 0;
+        virtual void SetPairs(TRawPairsData&& pairs) = 0;
 
         virtual void SetTimestamps(TVector<ui64>&& timestamps) = 0;
 
@@ -52,7 +53,7 @@ namespace NCB {
         void SetPairs(TConstArrayRef<TPair> pairs) {
             TVector<TPair> pairsCopy;
             Assign(pairs, &pairsCopy);
-            SetPairs(std::move(pairsCopy));
+            SetPairs(TRawPairsData(std::move(pairsCopy)));
         }
 
         /* needed for checking groupWeights consistency while loading from separate file
@@ -103,6 +104,10 @@ namespace NCB {
         // for sparse float features default value is always assumed to be 0.0f
 
         virtual ui32 GetCatFeatureValue(ui32 flatFeatureIdx, TStringBuf feature) = 0;
+        // localObjectIdx may be used as hint for sampling
+        virtual ui32 GetCatFeatureValue(ui32 /* localObjectIdx */, ui32 flatFeatureIdx, TStringBuf feature) {
+            return GetCatFeatureValue(flatFeatureIdx, feature);
+        }
         virtual void AddCatFeature(ui32 localObjectIdx, ui32 flatFeatureIdx, TStringBuf feature) = 0;
         virtual void AddAllCatFeatures(ui32 localObjectIdx, TConstArrayRef<ui32> features) = 0;
         virtual void AddAllCatFeatures(
@@ -119,6 +124,12 @@ namespace NCB {
         virtual void AddAllTextFeatures(
             ui32 localObjectIdx,
             TConstPolymorphicValuesSparseArray<TString, ui32> features
+        ) = 0;
+
+        virtual void AddEmbeddingFeature(
+            ui32 localObjectIdx,
+            ui32 flatFeatureIdx,
+            TMaybeOwningConstArrayHolder<float> feature
         ) = 0;
 
         // TRawTargetData
@@ -187,6 +198,12 @@ namespace NCB {
             TConstPolymorphicValuesSparseArray<TString, ui32> features
         ) = 0;
 
+        virtual void AddEmbeddingFeature(
+            ui32 flatFeatureIdx,
+            ITypedSequencePtr<TMaybeOwningConstArrayHolder<float>> features
+        ) = 0;
+
+
         // TRawTargetData
 
         virtual void AddTarget(TConstArrayRef<TString> value) = 0;
@@ -221,7 +238,8 @@ namespace NCB {
             // keep necessary resources for data to be available (memory mapping for a file for example)
             TVector<TIntrusivePtr<IResourceHolder>> resourceHolders,
 
-            const NCB::TPoolQuantizationSchema& poolQuantizationSchema
+            const NCB::TPoolQuantizationSchema& poolQuantizationSchema,
+            bool wholeColumns // data passed to Add* functions will contain whole columns, not part
         ) = 0;
 
         // TCommonObjectsData

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <library/binsaver/bin_saver.h>
+#include <library/cpp/binsaver/bin_saver.h>
 
 #include <util/ysaveload.h>
 #include <util/generic/string.h>
@@ -19,11 +19,21 @@ enum class EColumn {
     Timestamp,
     Sparse,
     Prediction,
-    Text
+    Text,
+    NumVector
 };
 
 inline bool IsFactorColumn(EColumn column) {
-    return column == EColumn::Num || column == EColumn::Categ || column == EColumn::Sparse || column == EColumn::Text;
+    switch (column) {
+        case EColumn::Num:
+        case EColumn::Categ:
+        case EColumn::Sparse:
+        case EColumn::Text:
+        case EColumn::NumVector:
+            return true;
+        default:
+            return false;
+    }
 }
 
 inline bool CanBeOutputByColumnType(EColumn column) {

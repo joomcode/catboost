@@ -15,7 +15,7 @@
 #include <util/random/shuffle.h>
 #include <util/system/info.h>
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 #include <util/stream/output.h>
 
@@ -31,7 +31,7 @@ static TTObjectsDataProvider GetMaybeSubsetDataProvider(
     TTObjectsDataProvider&& objectsDataProvider,
     TMaybe<TArraySubsetIndexing<ui32>> subsetForGetSubset,
     TMaybe<EObjectsOrder> objectsOrderForGetSubset,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     if (subsetForGetSubset.Defined()) {
         TObjectsGroupingSubset objectsGroupingSubset = GetSubset(
@@ -251,7 +251,7 @@ Y_UNIT_TEST_SUITE(TRawObjectsData) {
         const TVector<THashMap<ui32, TString>>& catFeaturesHashToString,
         const TCommonObjectsData& commonData,
         std::pair<bool, bool> useFeatureTypes,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     ) {
         TRawObjectsData data;
         ui32 featureId = 0;
@@ -275,7 +275,7 @@ Y_UNIT_TEST_SUITE(TRawObjectsData) {
             }
         }
 
-        TFeaturesLayout featuresLayout(featureId, catFeatureIndices, {}, {});
+        TFeaturesLayout featuresLayout(featureId, catFeatureIndices, {}, {}, {});
         commonDataCopy.FeaturesLayout = MakeIntrusive<TFeaturesLayout>(featuresLayout);
 
         return TRawObjectsDataProvider(
@@ -474,7 +474,7 @@ Y_UNIT_TEST_SUITE(TRawObjectsData) {
                 }
             }
 
-            TFeaturesLayout featuresLayout(featureCount, catFeatureIndices, {}, {});
+            TFeaturesLayout featuresLayout(featureCount, catFeatureIndices, {}, {}, {});
 
 #define COMPARE_DATA_PROVIDER_FIELD(FIELD) \
             UNIT_ASSERT(Equal(objectsDataProvider.Get##FIELD(), expectedCommonData.FIELD));
@@ -801,6 +801,7 @@ Y_UNIT_TEST_SUITE(TQuantizedObjectsData) {
                     ),
                     catFeatureIndices,
                     {},
+                    {},
                     {}
                 );
 
@@ -910,39 +911,22 @@ Y_UNIT_TEST_SUITE(TQuantizedObjectsData) {
                 NPar::TLocalExecutor localExecutor;
                 localExecutor.RunAdditionalThreads(2);
 
-                THolder<TQuantizedObjectsDataProvider> objectsDataProvider;
+                THolder<TQuantizedForCPUObjectsDataProvider> objectsDataProvider;
 
-                if (taskType == ETaskType::CPU) {
-                    objectsDataProvider = MakeHolder<TQuantizedForCPUObjectsDataProvider>(
-                        GetMaybeSubsetDataProvider(
-                            TQuantizedForCPUObjectsDataProvider(
-                                Nothing(),
-                                std::move(commonDataCopy),
-                                std::move(data),
-                                false,
-                                &localExecutor
-                            ),
-                            subsetForGetSubset,
-                            objectsOrderForGetSubset,
+                objectsDataProvider = MakeHolder<TQuantizedForCPUObjectsDataProvider>(
+                    GetMaybeSubsetDataProvider(
+                        TQuantizedForCPUObjectsDataProvider(
+                            Nothing(),
+                            std::move(commonDataCopy),
+                            std::move(data),
+                            false,
                             &localExecutor
-                        )
-                    );
-                } else {
-                    objectsDataProvider = MakeHolder<TQuantizedObjectsDataProvider>(
-                        GetMaybeSubsetDataProvider(
-                            TQuantizedObjectsDataProvider(
-                                Nothing(),
-                                std::move(commonDataCopy),
-                                std::move(data.Data),
-                                false,
-                                &localExecutor
-                            ),
-                            subsetForGetSubset,
-                            objectsOrderForGetSubset,
-                            &localExecutor
-                        )
-                    );
-                }
+                        ),
+                        subsetForGetSubset,
+                        objectsOrderForGetSubset,
+                        &localExecutor
+                    )
+                );
 
                 UNIT_ASSERT_EQUAL(
                     *objectsDataProvider->GetObjectsGrouping(),
@@ -952,18 +936,18 @@ Y_UNIT_TEST_SUITE(TQuantizedObjectsData) {
                 if (useFeatureTypes.first) {
                     for (auto i : xrange(subsetFloatFeatures.size())) {
                         UNIT_ASSERT_EQUAL(
-                            (TConstArrayRef<ui8>)subsetFloatFeatures[i],
-                            *((*objectsDataProvider->GetFloatFeature(i))->ExtractValues(
+                            subsetFloatFeatures[i],
+                            (*objectsDataProvider->GetFloatFeature(i))->ExtractValues<ui8>(
                                 &localExecutor
-                            ))
+                            )
                         );
                     }
                 }
                 if (useFeatureTypes.second) {
                     for (auto i : xrange(subsetCatFeatures.size())) {
                         UNIT_ASSERT_EQUAL(
-                            (TConstArrayRef<ui32>)subsetCatFeatures[i],
-                            *((*objectsDataProvider->GetCatFeature(i))->ExtractValues(&localExecutor))
+                            subsetCatFeatures[i],
+                            (*objectsDataProvider->GetCatFeature(i))->ExtractValues<ui32>(&localExecutor)
                         );
                     }
                 }
@@ -975,8 +959,8 @@ Y_UNIT_TEST_SUITE(TQuantizedObjectsData) {
                         for (auto i : xrange(subsetFloatFeatures.size())) {
                             UNIT_ASSERT(
                                 Equal<ui8>(
-                                    *((**quantizedForCPUObjectsDataProvider.GetNonPackedFloatFeature(i))
-                                        .ExtractValues(&localExecutor)),
+                                    (**quantizedForCPUObjectsDataProvider.GetNonPackedFloatFeature(i))
+                                        .ExtractValues<ui8>(&localExecutor),
                                     subsetFloatFeatures[i]
                                 )
                             );
@@ -987,8 +971,8 @@ Y_UNIT_TEST_SUITE(TQuantizedObjectsData) {
                         for (auto i : xrange(subsetCatFeatures.size())) {
                             UNIT_ASSERT(
                                 Equal<ui32>(
-                                    *((**quantizedForCPUObjectsDataProvider.GetNonPackedCatFeature(i))
-                                        .ExtractValues(&localExecutor)),
+                                    (**quantizedForCPUObjectsDataProvider.GetNonPackedCatFeature(i))
+                                        .ExtractValues<ui32>(&localExecutor),
                                     subsetCatFeatures[i]
                                 )
                             );

@@ -4,14 +4,14 @@
 #include <catboost/private/libs/options/text_processing_options.h>
 #include <catboost/private/libs/text_features/ut/lib/text_features_data.h>
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 #include <util/generic/xrange.h>
 
 using namespace NCB;
 using namespace NCatboostOptions;
 
 
-static void CreateEstimators(
+static void CreateTextEstimators(
     const TTextDigitizers& textDigitizers,
     TVector<NCBTest::TTokenizedTextFeature>&& tokenizedFeatures,
     TVector<ui32>&& target,
@@ -40,11 +40,9 @@ static void CreateEstimators(
             tokenizedFeatureId
         };
 
-        TEmbeddingPtr embeddingPtr;
         {
-            TVector<TFeatureEstimatorPtr> offlineEstimators = CreateEstimators(
+            TVector<TFeatureEstimatorPtr> offlineEstimators = CreateTextEstimators(
                 MakeConstArrayRef(tokenizedFeatureDescription.FeatureEstimators.Get()),
-                embeddingPtr,
                 learnTexts,
                 MakeArrayRef(testTexts)
             );
@@ -54,9 +52,8 @@ static void CreateEstimators(
             }
         }
         {
-            TVector<TOnlineFeatureEstimatorPtr> onlineEstimators = CreateEstimators(
+            TVector<TOnlineFeatureEstimatorPtr> onlineEstimators = CreateTextEstimators(
                 MakeConstArrayRef(tokenizedFeatureDescription.FeatureEstimators.Get()),
-                embeddingPtr,
                 textTarget,
                 learnTexts,
                 MakeArrayRef(testTexts)
@@ -94,7 +91,7 @@ static void CreateDataForTest(
     TRuntimeTextOptions runtimeTextOptions{xrange(textFeatures->size()), textProcessingOptions};
     const auto& tokenizedFeatureDescriptions = runtimeTextOptions.GetTokenizedFeatureDescriptions();
 
-    CreateEstimators(
+    CreateTextEstimators(
         *textDigitizers,
         std::move(tokenizedFeatures),
         std::move(target),
@@ -112,7 +109,8 @@ static void CreateDataForTest(
                     TEstimatedFeature{
                         SafeIntegerCast<int>((*estimators)->GetEstimatorSourceFeatureIdx(guid).TextFeatureId),
                         guid,
-                        SafeIntegerCast<int>(localId)
+                        SafeIntegerCast<int>(localId),
+                        FeatureTypeToEstimatedSourceFeatureType((*estimators)->GetEstimatorSourceType(guid))
                     }
                 );
             }
@@ -179,12 +177,12 @@ static void AssertEqualCollections(
     TVector<float> result = ApplyCollection(actualCollection, textFeatures);
 
     if (partEstimatedFeatures.Defined()) {
-        TGuid lastGuid = partEstimatedFeatures->at(0).CalcerId;
+        TGuid lastGuid = partEstimatedFeatures->at(0).ModelEstimatedFeature.CalcerId;
         ui32 localId = 0;
         for (ui32 i: xrange(partEstimatedFeatures->size())) {
-            TEstimatedFeature& feature = partEstimatedFeatures->at(i);
+            TModelEstimatedFeature& feature = partEstimatedFeatures->at(i).ModelEstimatedFeature;
             const TGuid calcerId = feature.CalcerId;
-            const ui32 originalLocalId = feature.LocalIndex;
+            const ui32 originalLocalId = feature.LocalId;
             if (calcerId != lastGuid) {
                 lastGuid = calcerId;
                 localId = 0;
@@ -210,6 +208,7 @@ Y_UNIT_TEST_SUITE(TextCollectionBuilderTest) {
     Y_UNIT_TEST(DifferentCreationTest) {
         TVector<NCBTest::TTextFeature> textFeatures;
         TTextProcessingCollection fromTrainTextProcessingCollection;
+        TEmbeddingProcessingCollection embeddingProcessingCollection;
 
         {
             TFeatureEstimatorsPtr estimators;
@@ -226,11 +225,12 @@ Y_UNIT_TEST_SUITE(TextCollectionBuilderTest) {
 
             TVector<TEstimatedFeature> reorderedEstimatedFeatures;
 
-            CreateTextProcessingCollection(
+            CreateProcessingCollections(
                 *estimators,
                 textDigitizers,
                 estimatedFeatures,
                 &fromTrainTextProcessingCollection,
+                &embeddingProcessingCollection,
                 &reorderedEstimatedFeatures,
                 &localExecutor
             );
@@ -261,14 +261,16 @@ Y_UNIT_TEST_SUITE(TextCollectionBuilderTest) {
         );
 
         TTextProcessingCollection textProcessingCollection;
+        TEmbeddingProcessingCollection embeddingProcessingCollection;
 
         {
             TVector<TEstimatedFeature> textCollectionEstimatedFeatures;
-            CreateTextProcessingCollection(
+            CreateProcessingCollections(
                 *estimators,
                 textDigitizers,
                 fullEstimatedFeatures,
                 &textProcessingCollection,
+                &embeddingProcessingCollection,
                 &textCollectionEstimatedFeatures,
                 &localExecutor
             );
@@ -293,11 +295,12 @@ Y_UNIT_TEST_SUITE(TextCollectionBuilderTest) {
 
                 {
                     TVector<TEstimatedFeature> reorderedEstimatedFeatures;
-                    CreateTextProcessingCollection(
+                    CreateProcessingCollections(
                         *estimators,
                         textDigitizers,
                         partEstimatedFeatures,
                         &partialTextCollection,
+                        &embeddingProcessingCollection,
                         &reorderedEstimatedFeatures,
                         &localExecutor
                     );

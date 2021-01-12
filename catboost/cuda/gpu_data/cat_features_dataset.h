@@ -7,7 +7,7 @@
 
 #include <catboost/libs/data/data_provider.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/noncopyable.h>
 
@@ -98,7 +98,7 @@ namespace NCatboostCuda {
         TCompressedCatFeatureDataSetBuilder(const NCB::TTrainingDataProvider& dataProvider,
                                             TBinarizedFeaturesManager& featuresManager,
                                             TCompressedCatFeatureDataSet& dataSet,
-                                            NPar::TLocalExecutor* localExecutor)
+                                            NPar::ILocalExecutor* localExecutor)
             : DevCount(GetDeviceCount())
             , DataSet(dataSet)
             , DataProvider(dataProvider)
@@ -129,7 +129,7 @@ namespace NCatboostCuda {
         const NCB::TTrainingDataProvider& DataProvider;
         const TBinarizedFeaturesManager& FeaturesManager;
 
-        NPar::TLocalExecutor* LocalExecutor;
+        NPar::ILocalExecutor* LocalExecutor;
     };
 
     template <class TValue>

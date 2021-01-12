@@ -13,6 +13,7 @@
 #include <util/network/socket.h>
 #include <util/stream/pipe.h>
 #include <util/stream/str.h>
+#include <util/string/cast.h>
 #include <util/system/info.h>
 
 #include <errno.h>
@@ -58,7 +59,7 @@ namespace {
 #if defined(_unix_)
     void SetUserGroups(const passwd* pw) {
         int ngroups = 1;
-        THolder<gid_t, TFree> groups = static_cast<gid_t*>(malloc(ngroups * sizeof(gid_t)));
+        THolder<gid_t, TFree> groups = THolder<gid_t, TFree>(static_cast<gid_t*>(malloc(ngroups * sizeof(gid_t))));
         if (getgrouplist(pw->pw_name, pw->pw_gid, reinterpret_cast<TGetGroupListGid*>(groups.Get()), &ngroups) == -1) {
             groups.Reset(static_cast<gid_t*>(malloc(ngroups * sizeof(gid_t))));
             if (getgrouplist(pw->pw_name, pw->pw_gid, reinterpret_cast<TGetGroupListGid*>(groups.Get()), &ngroups) == -1) {
@@ -167,9 +168,10 @@ public:
         return doneBytes;
     }
 
-    static void Pipe(TRealPipeHandle& reader, TRealPipeHandle& writer) {
+    static void Pipe(TRealPipeHandle& reader, TRealPipeHandle& writer, EOpenMode mode) {
+        (void)mode;
         REALPIPEHANDLE fds[2];
-        if (!CreatePipe(&fds[0], &fds[1], nullptr, 0))
+        if (!CreatePipe(&fds[0], &fds[1], nullptr /* handles are not inherited */, 0))
             ythrow TFileError() << "failed to create a pipe";
         TRealPipeHandle(fds[0]).Swap(reader);
         TRealPipeHandle(fds[1]).Swap(writer);
@@ -247,8 +249,9 @@ private:
             if (ErrorPipeFd[1].IsOpen()) {
                 ErrorPipeFd[1].Close();
             }
-            if (InputPipeFd[1].IsOpen())
+            if (InputPipeFd[1].IsOpen()) {
                 InputPipeFd[0].Close();
+            }
         }
         void ReleaseParents() {
             InputPipeFd[1].Release();
@@ -724,20 +727,20 @@ void TShellCommand::TImpl::OnFork(TPipes& pipes, sigset_t oldmask, char* const* 
 #endif
 
 void TShellCommand::TImpl::Run() {
-    Y_ENSURE(AtomicGet(ExecutionStatus) != SHELL_RUNNING, AsStringBuf("Process is already running"));
+    Y_ENSURE(AtomicGet(ExecutionStatus) != SHELL_RUNNING, TStringBuf("Process is already running"));
     // Prepare I/O streams
     CollectedOutput.clear();
     CollectedError.clear();
     TPipes pipes;
 
     if (!InheritOutput) {
-        TRealPipeHandle::Pipe(pipes.OutputPipeFd[0], pipes.OutputPipeFd[1]);
+        TRealPipeHandle::Pipe(pipes.OutputPipeFd[0], pipes.OutputPipeFd[1], CloseOnExec);
     }
     if (!InheritError) {
-        TRealPipeHandle::Pipe(pipes.ErrorPipeFd[0], pipes.ErrorPipeFd[1]);
+        TRealPipeHandle::Pipe(pipes.ErrorPipeFd[0], pipes.ErrorPipeFd[1], CloseOnExec);
     }
     if (InputMode != TShellCommandOptions::HANDLE_INHERIT) {
-        TRealPipeHandle::Pipe(pipes.InputPipeFd[0], pipes.InputPipeFd[1]);
+        TRealPipeHandle::Pipe(pipes.InputPipeFd[0], pipes.InputPipeFd[1], CloseOnExec);
     }
 
     AtomicSet(ExecutionStatus, SHELL_RUNNING);

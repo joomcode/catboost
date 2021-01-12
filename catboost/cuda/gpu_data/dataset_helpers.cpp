@@ -10,7 +10,7 @@ THolder<NCatboostCuda::TCtrTargets<NCudaLib::TMirrorMapping>> NCatboostCuda::Bui
                                        test ? MakeMaybe(*test->TargetData->GetOneDimensionalTarget()) : Nothing());
 
     THolder<TCtrTargets<NCudaLib::TMirrorMapping>> ctrsTargetPtr;
-    ctrsTargetPtr = new TCtrTargets<NCudaLib::TMirrorMapping>;
+    ctrsTargetPtr = MakeHolder<TCtrTargets<NCudaLib::TMirrorMapping>>();
     auto& ctrsTarget = *ctrsTargetPtr;
     ctrsTarget.BinarizedTarget = BuildBinarizedTarget(featuresManager,
                                                       joinedTarget);
@@ -126,6 +126,10 @@ TVector<ui32> NCatboostCuda::GetLearnFeatureIds(NCatboostCuda::TBinarizedFeature
 
     auto estimatedFeatures = featuresManager.GetEstimatedFeatureIds();
     featureIdsSet.insert(estimatedFeatures.begin(), estimatedFeatures.end());
+
+    auto featureBundleIds = featuresManager.GetExclusiveFeatureBundleIds();
+    featureIdsSet.insert(featureBundleIds.begin(), featureBundleIds.end());
+
     return TVector<ui32>(featureIdsSet.begin(), featureIdsSet.end());
 }
 

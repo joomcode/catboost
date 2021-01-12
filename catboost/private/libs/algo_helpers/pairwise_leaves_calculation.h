@@ -3,12 +3,12 @@
 #include <catboost/private/libs/data_types/query.h>
 #include <catboost/private/libs/options/restrictions.h>
 
-#include <library/containers/2d_array/2d_array.h>
+#include <library/cpp/containers/2d_array/2d_array.h>
 
 #include <util/generic/fwd.h>
 
 namespace NPar {
-    class TLocalExecutor;
+    class ILocalExecutor;
 }
 
 
@@ -24,6 +24,6 @@ TArray2D<double> ComputePairwiseWeightSums(
     int leafCount,
     int querycount,
     const TVector<TIndexType>& indices,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 );
 

@@ -8,11 +8,14 @@
 #include "split.h"
 #include "yetirank_helpers.h"
 
+#include <catboost/libs/data/data_provider.h>
+#include <catboost/libs/data/objects_grouping.h>
 #include <catboost/libs/data/exclusive_feature_bundling.h>
+#include <catboost/libs/data/objects.h>
 #include <catboost/libs/data/packed_binary_features.h>
 #include <catboost/private/libs/options/enums.h>
 
-#include <library/binsaver/bin_saver.h>
+#include <library/cpp/binsaver/bin_saver.h>
 
 #include <util/generic/array_ref.h>
 #include <util/generic/maybe.h>
@@ -20,18 +23,15 @@
 
 
 class TCalcScoreFold;
+class TFold;
 struct TRestorableFastRng64;
 
 namespace NCatboostOptions {
     class TCatBoostOptions;
 }
 
-namespace NCB {
-    class TQuantizedForCPUObjectsDataProvider;
-}
-
 namespace NPar {
-    class TLocalExecutor;
+    class ILocalExecutor;
 }
 
 
@@ -39,16 +39,17 @@ struct TCandidateInfo {
     TSplitEnsemble SplitEnsemble;
     TRandomScore BestScore;
     int BestBinId = -1;
-    bool ShouldDropAfterScoreCalc = false;
 
 public:
-    SAVELOAD(SplitEnsemble, BestScore, BestBinId, ShouldDropAfterScoreCalc);
+    SAVELOAD(SplitEnsemble, BestScore, BestBinId);
 
     TSplit GetBestSplit(
-        const NCB::TQuantizedForCPUObjectsDataProvider& objectsData,
+        const NCB::TTrainingDataProviders& data,
+        const TFold& fold,
         ui32 oneHotMaxSize
     ) const;
 
+    // objectsData must be from the corresponding source data for this split
     TSplit GetSplit(
         int binId,
         const NCB::TQuantizedForCPUObjectsDataProvider& objectsData,
@@ -58,8 +59,9 @@ public:
 
 struct TCandidatesInfoList {
     TCandidatesInfoList() = default;
-    explicit TCandidatesInfoList(const TCandidateInfo& oneCandidate) {
-        Candidates.emplace_back(oneCandidate);
+    explicit TCandidatesInfoList(TCandidateInfo&& oneCandidate)
+    : Candidates{std::move(oneCandidate)}
+    {
     }
 
     SAVELOAD(Candidates, ShouldDropCtrAfterCalc);
@@ -75,6 +77,8 @@ public:
 using TCandidateList = TVector<TCandidatesInfoList>;
 
 struct TCandidatesContext {
+    NCB::TQuantizedObjectsDataProviderPtr LearnData;
+
     ui32 OneHotMaxSize; // needed to select for which categorical features in bundles to calc stats
     TConstArrayRef<NCB::TExclusiveFeaturesBundle> BundlesMetaData;
     TConstArrayRef<NCB::TFeaturesGroup> FeaturesGroupsMetaData;
@@ -88,11 +92,12 @@ struct TCandidatesContext {
 
 void Bootstrap(
     const NCatboostOptions::TCatBoostOptions& params,
+    bool hasOfflineEstimatedFeatures,
     const TVector<TIndexType>& indices,
     const TVector<TVector<TVector<double>>>& leafValues,
     TFold* fold,
     TCalcScoreFold* sampledDocs,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     TRestorableFastRng64* rand,
     bool shouldSortByLeaf = false,
     ui32 leavesCount = 0
@@ -109,7 +114,7 @@ void CalcWeightedDerivatives(
     const NCatboostOptions::TCatBoostOptions& params,
     ui64 randomSeed,
     TFold* takenFold,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 );
 
 void SetBestScore(

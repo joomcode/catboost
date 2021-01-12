@@ -10,7 +10,7 @@ SRCS(
 )
 
 PEERDIR(
-    library/unittest
+    library/cpp/testing/unittest
 
     catboost/libs/cat_feature
     catboost/libs/data

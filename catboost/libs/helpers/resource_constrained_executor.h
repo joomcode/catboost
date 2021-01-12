@@ -1,6 +1,6 @@
 #pragma once
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/map.h>
 #include <util/system/types.h>
@@ -43,7 +43,7 @@ namespace NCB {
             const TString& resourceName,
             TResourceUnit resourceQuota,
             bool lenientMode,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         );
 
         // waits until all tasks are finished
@@ -56,8 +56,12 @@ namespace NCB {
          */
         void ExecTasks();
 
+        NPar::ILocalExecutor* GetExecutorPtr() {
+            return &LocalExecutor;
+        }
+
     private:
-        NPar::TLocalExecutor& LocalExecutor;
+        NPar::ILocalExecutor& LocalExecutor;
         TString ResourceName;
         const TResourceUnit ResourceQuota;
         TQueue Queue;

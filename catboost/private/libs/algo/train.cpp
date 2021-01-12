@@ -34,7 +34,7 @@ TErrorTracker BuildErrorTracker(
 }
 
 static void UpdateLearningFold(
-    const NCB::TTrainingForCPUDataProviders& data,
+    const NCB::TTrainingDataProviders& data,
     const IDerCalcer& error,
     const TVariant<TSplitTree, TNonSymmetricTreeStructure>& bestTree,
     ui64 randomSeed,
@@ -74,7 +74,7 @@ static void ScaleAllApproxes(
     const double approxMultiplier,
     const bool storeExpApprox,
     TLearnProgress* learnProgress,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     TVector<TVector<TVector<double>>*> allApproxes;
     for (auto& fold : learnProgress->Folds) {
@@ -93,25 +93,9 @@ static void ScaleAllApproxes(
         *localExecutor,
         0,
         allApproxes.size(),
-        [approxMultiplier, storeExpApprox, learnApproxesCount, localExecutor, learnProgress, &allApproxes](int index) {
+        [approxMultiplier, storeExpApprox, learnApproxesCount, localExecutor, &allApproxes](int index) {
             const bool isLearnApprox = (index < learnApproxesCount);
-            if (learnProgress->StartingApprox) {
-                CB_ENSURE(!storeExpApprox);
-                const double addend = (1 - approxMultiplier) * (*learnProgress->StartingApprox);
-                UpdateApprox(
-                    [approxMultiplier, addend](
-                        TConstArrayRef<double> /* delta */,
-                        TArrayRef<double> approx,
-                        size_t idx)
-                    {
-                        approx[idx] = addend + approx[idx] * approxMultiplier;
-                    },
-                    *allApproxes[index], // stub deltas
-                    allApproxes[index],
-                    localExecutor
-                );
-            }
-            if (storeExpApprox && isLearnApprox) {
+            if (isLearnApprox && storeExpApprox) {
                 UpdateApprox(
                     [approxMultiplier](TConstArrayRef<double> /* delta */, TArrayRef<double> approx, size_t idx) {
                         approx[idx] = ApplyLearningRate<true>(approx[idx], approxMultiplier);
@@ -135,7 +119,7 @@ static void ScaleAllApproxes(
 }
 
 void CalcApproxesLeafwise(
-    const NCB::TTrainingForCPUDataProviders& data,
+    const NCB::TTrainingDataProviders& data,
     const IDerCalcer& error,
     const TVariant<TSplitTree, TNonSymmetricTreeStructure>& tree,
     TLearnContext* ctx,
@@ -145,8 +129,8 @@ void CalcApproxesLeafwise(
     *indices = BuildIndices(
         ctx->LearnProgress->AveragingFold,
         tree,
-        data.Learn,
-        data.Test,
+        data,
+        EBuildIndicesDataParts::All,
         ctx->LocalExecutor
     );
     auto statistics = BuildSubset(
@@ -185,7 +169,7 @@ void CalcApproxesLeafwise(
 
 }
 
-void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnContext* ctx) {
+void TrainOneIteration(const NCB::TTrainingDataProviders& data, TLearnContext* ctx) {
     const auto error = BuildError(ctx->Params, ctx->ObjectiveDescriptor);
     ctx->LearnProgress->HessianType = error->GetHessianType();
     TProfileInfo& profile = ctx->Profile;
@@ -210,6 +194,11 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
                 ctx->LearnProgress.Get(),
                 ctx->LocalExecutor
             );
+            if (ctx->LearnProgress->StartingApprox.Defined()) {
+                for (auto& approx : *ctx->LearnProgress->StartingApprox) {
+                    approx = approx * modelShrinkage;
+                }
+            }
             ctx->LearnProgress->ModelShrinkHistory.push_back(modelShrinkage);
         } else {
             ctx->LearnProgress->ModelShrinkHistory.push_back(1.0);
@@ -268,10 +257,10 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
             allFolds.push_back(&ctx->LearnProgress->AveragingFold);
 
             struct TLocalJobData {
-                const NCB::TTrainingForCPUDataProviders* data;
+                const NCB::TTrainingDataProviders* data;
                 TProjection Projection;
                 TFold* Fold;
-                TOnlineCTR* Ctr;
+                TOwnedOnlineCtr* Ctr;
 
             public:
                 void DoTask(TLearnContext* ctx) {
@@ -287,9 +276,10 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
                     continue;
                 }
                 for (auto* foldPtr : allFolds) {
-                    if (!foldPtr->GetCtrs(proj).contains(proj) || foldPtr->GetCtr(proj).Feature.empty()) {
+                    auto* ownedCtrs = foldPtr->GetOwnedCtrs(proj);
+                    if (ownedCtrs && ownedCtrs->Data[proj].Feature.empty()) {
                         parallelJobsData.emplace_back(
-                            TLocalJobData{ &data, proj, foldPtr, &foldPtr->GetCtrRef(proj) }
+                            TLocalJobData{ &data, proj, foldPtr, ownedCtrs}
                         );
                     }
                 }
@@ -301,7 +291,7 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
                     parallelJobsData[taskId].DoTask(ctx);
                 },
                 0,
-                parallelJobsData.size(),
+                SafeIntegerCast<int>(parallelJobsData.size()),
                 NPar::TLocalExecutor::WAIT_COMPLETE
             );
         }
@@ -371,7 +361,8 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
                 leafCount,
                 indices,
                 learnPermutationRef,
-                GetWeights(*data.Learn->TargetData)
+                GetWeights(*data.Learn->TargetData),
+                ctx->LocalExecutor
             );
             NormalizeLeafValues(
                 UsesPairsForCalculation(ctx->Params.LossFunctionDescription->GetLossFunction()),
@@ -393,11 +384,11 @@ void TrainOneIteration(const NCB::TTrainingForCPUDataProviders& data, TLearnCont
             const bool isMultiRegression = dynamic_cast<const TMultiDerCalcer*>(error.Get()) != nullptr;
 
             if (isMultiRegression) {
-                MapSetApproxesMulti(*error, bestTree, data.Test, &treeValues, &sumLeafWeights, ctx);
+                MapSetApproxesMulti(*error, bestTree, data, &treeValues, &sumLeafWeights, ctx);
             } else if (ctx->LearnProgress->ApproxDimension == 1) {
-                MapSetApproxesSimple(*error, bestTree, data.Test, &treeValues, &sumLeafWeights, ctx);
+                MapSetApproxesSimple(*error, bestTree, data, &treeValues, &sumLeafWeights, ctx);
             } else {
-                MapSetApproxesMulti(*error, bestTree, data.Test, &treeValues, &sumLeafWeights, ctx);
+                MapSetApproxesMulti(*error, bestTree, data, &treeValues, &sumLeafWeights, ctx);
             }
         }
 

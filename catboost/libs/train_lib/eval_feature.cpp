@@ -10,6 +10,8 @@
 #include <catboost/private/libs/algo/helpers.h>
 #include <catboost/private/libs/algo/preprocess.h>
 #include <catboost/private/libs/algo/train.h>
+#include <catboost/libs/data/features_layout_helpers.h>
+#include <catboost/libs/data/feature_names_converter.h>
 #include <catboost/libs/fstr/output_fstr.h>
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/parallel_tasks.h>
@@ -31,6 +33,7 @@
 
 #include <util/generic/algorithm.h>
 #include <util/generic/array_ref.h>
+#include <util/generic/hash_set.h>
 #include <util/generic/scope.h>
 #include <util/generic/xrange.h>
 #include <util/generic/ymath.h>
@@ -139,6 +142,40 @@ void TFeatureEvaluationSummary::AppendFeatureSetMetrics(
         const double bestMetric = metricValuesOnFold[bestIteration][metricIdx];
         featureSetBestMetrics[metricIdx].push_back(bestMetric);
     }
+}
+
+
+NJson::TJsonValue TFeatureEvaluationSummary::CalcProcessorsSummary() const {
+    const auto& history = ProcessorsUsage;
+    CB_ENSURE_INTERNAL(!history.empty(), "Need some processors usage info");
+    THashMap<TString, float> totalTime; // [processor name]
+    THashMap<TString, ui32> totalIterations; // [processor name]
+    ui32 previousIteration = history[0].Iteration;
+    for (const auto& event : history) {
+        const auto time = event.Time;
+        const auto iteration = event.Iteration;
+        const auto& processors = event.Processors;
+        CB_ENSURE_INTERNAL(processors.IsArray(), "Processors should be json array");
+        const auto& processorsArray = processors.GetArray();
+        for (auto& processor : processorsArray) {
+            const auto& processorString = processor.GetString();
+            totalTime[processorString] += time;
+            if (previousIteration >= iteration) {
+                totalIterations[processorString] += iteration; // first snapshot in this training
+            } else {
+                totalIterations[processorString] += (iteration - previousIteration);
+            }
+        }
+        previousIteration = iteration;
+    }
+    NJson::TJsonValue summary;
+    auto& timeJson = summary.InsertValue("time", NJson::TJsonMap());
+    auto& iterationsJson = summary.InsertValue("iterations", NJson::TJsonMap());
+    for (const auto& [processor, time] : totalTime) {
+        timeJson.InsertValue(processor, NJson::TJsonValue{time});
+        iterationsJson.InsertValue(processor, NJson::TJsonValue{totalIterations.at(processor)});
+    }
+    return summary;
 }
 
 
@@ -338,7 +375,7 @@ static void CreateFoldData(
     const TVector<NCB::TArraySubsetIndexing<ui32>>& testSubsets,
     TVector<TTrainingDataProviders>* foldsData,
     TVector<TTrainingDataProviders>* testFoldsData,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     CB_ENSURE_INTERNAL(trainSubsets.size() == testSubsets.size(), "Number of train and test subsets do not match");
     const NCB::EObjectsOrder objectsOrder = NCB::EObjectsOrder::Ordered;
@@ -395,7 +432,7 @@ static void PrepareTimeSplitFolds(
     ui64 cpuUsedRamLimit,
     TVector<TTrainingDataProviders>* foldsData,
     TVector<TTrainingDataProviders>* testFoldsData,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     CB_ENSURE(srcData->ObjectsData->GetGroupIds(), "Timesplit feature evaluation requires dataset with groups");
     CB_ENSURE(srcData->ObjectsData->GetTimestamp(), "Timesplit feature evaluation requires dataset with timestamps");
@@ -459,7 +496,7 @@ static void PrepareFolds(
     ui64 cpuUsedRamLimit,
     TVector<TTrainingDataProviders>* foldsData,
     TVector<TTrainingDataProviders>* testFoldsData,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     const int foldCount = cvParams.Initialized() ? cvParams.FoldCount : featureEvalOptions.FoldCount.Get();
     CB_ENSURE(foldCount > 0, "Fold count must be positive integer");
@@ -481,10 +518,15 @@ static void PrepareFolds(
         const ui32 offsetInRange = featureEvalOptions.Offset;
         CB_ENSURE_INTERNAL(offsetInRange + foldCount <= testSubsets.size(), "Dataset permutation logic failed");
     }
-    // group subsets, maybe trivial
-    TVector<NCB::TArraySubsetIndexing<ui32>> trainSubsets
-        = CalcTrainSubsets(testSubsets, objectsGrouping.GetGroupCount());
+    const ui32 offsetInRange = !cvParams.Initialized() ? featureEvalOptions.Offset : 0;
 
+    TVector<NCB::TArraySubsetIndexing<ui32>> trainSubsets
+        = CalcTrainSubsetsRange(testSubsets, objectsGrouping.GetGroupCount(), TIndexRange<ui32>(offsetInRange, offsetInRange + foldCount));
+
+    if (!cvParams.Initialized()) {
+        TakeMiddleElements(offsetInRange, foldCount, &trainSubsets);
+        TakeMiddleElements(offsetInRange, foldCount, &testSubsets);
+    }
     testSubsets.swap(trainSubsets);
 
     CB_ENSURE(foldsData->empty(), "Need empty vector of folds data");
@@ -496,11 +538,6 @@ static void PrepareFolds(
         testFoldsData = foldsData;
     }
 
-    if (!cvParams.Initialized()) {
-        const ui32 offsetInRange = featureEvalOptions.Offset;
-        TakeMiddleElements(offsetInRange, foldCount, &trainSubsets);
-        TakeMiddleElements(offsetInRange, foldCount, &testSubsets);
-    }
     CreateFoldData(
         srcData,
         cpuUsedRamLimit,
@@ -518,28 +555,7 @@ enum class ETrainingKind {
 };
 
 
-template <typename TObjectsDataProvider> // TQuantizedForCPUObjectsDataProvider or TQuantizedObjectsDataProvider
-TIntrusivePtr<TTrainingDataProvider> MakeFeatureSubsetDataProvider(
-    const TVector<ui32>& ignoredFeatures,
-    NCB::TTrainingDataProviderPtr trainingDataProvider
-) {
-    TIntrusivePtr<TObjectsDataProvider> newObjects = dynamic_cast<TObjectsDataProvider*>(
-        trainingDataProvider->ObjectsData->GetFeaturesSubset(ignoredFeatures, &NPar::LocalExecutor()).Get());
-    CB_ENSURE(
-        newObjects,
-        "Objects data provider must be TQuantizedForCPUObjectsDataProvider or TQuantizedObjectsDataProvider");
-    TDataMetaInfo newMetaInfo = trainingDataProvider->MetaInfo;
-    newMetaInfo.FeaturesLayout = newObjects->GetFeaturesLayout();
-    return MakeIntrusive<TTrainingDataProvider>(
-        TDataMetaInfo(newMetaInfo),
-        trainingDataProvider->ObjectsGrouping,
-        newObjects,
-        trainingDataProvider->TargetData);
-}
-
-
 static TVector<TTrainingDataProviders> UpdateIgnoredFeaturesInLearn(
-    ETaskType taskType,
     const NCatboostOptions::TFeatureEvalOptions& options,
     ETrainingKind trainingKind,
     ui32 testedFeatureSetIdx,
@@ -595,32 +611,9 @@ static TVector<TTrainingDataProviders> UpdateIgnoredFeaturesInLearn(
 
     TVector<TTrainingDataProviders> result;
     result.reserve(foldsData.size());
-    if (taskType == ETaskType::CPU) {
-        for (const auto& foldData : foldsData) {
-            TTrainingDataProviders newTrainingData;
-            newTrainingData.Learn = MakeFeatureSubsetDataProvider<TQuantizedForCPUObjectsDataProvider>(
-                ignoredFeatures,
-                foldData.Learn);
-            newTrainingData.Test.push_back(
-                MakeFeatureSubsetDataProvider<TQuantizedForCPUObjectsDataProvider>(
-                    ignoredFeatures,
-                    foldData.Test[0])
-            );
-            result.push_back(newTrainingData);
-        }
-    } else {
-        for (const auto& foldData : foldsData) {
-            TTrainingDataProviders newTrainingData;
-            newTrainingData.Learn = MakeFeatureSubsetDataProvider<TQuantizedObjectsDataProvider>(
-                ignoredFeatures,
-                foldData.Learn);
-            newTrainingData.Test.push_back(
-                MakeFeatureSubsetDataProvider<TQuantizedObjectsDataProvider>(
-                    ignoredFeatures,
-                    foldData.Test[0])
-            );
-            result.push_back(newTrainingData);
-        }
+
+    for (const auto& foldData : foldsData) {
+        result.push_back(MakeFeatureSubsetTrainingData(ignoredFeatures, foldData));
     }
     return result;
 }
@@ -628,12 +621,14 @@ static TVector<TTrainingDataProviders> UpdateIgnoredFeaturesInLearn(
 
 static void LoadOptions(
     const NJson::TJsonValue& plainJsonParams,
+    const NCB::TDataMetaInfo& metaInfo,
     NCatboostOptions::TCatBoostOptions* catBoostOptions,
     NCatboostOptions::TOutputFilesOptions* outputFileOptions
 ) {
     NJson::TJsonValue jsonParams;
     NJson::TJsonValue outputJsonParams;
     NCatboostOptions::PlainJsonToOptions(plainJsonParams, &jsonParams, &outputJsonParams);
+    ConvertParamsToCanonicalFormat(metaInfo, &jsonParams);
     catBoostOptions->Load(jsonParams);
     outputFileOptions->Load(outputJsonParams);
 
@@ -720,16 +715,19 @@ public:
 
     bool IsContinueTraining(const TMetricsAndTimeLeftHistory& /*history*/) override {
         ++IterationIdx;
-        constexpr double HeartbeatSeconds = 1;
+        constexpr double HeartbeatSeconds = 600;
         if (TrainTimer.Passed() > HeartbeatSeconds) {
             TSetLogging infomationMode(ELoggingLevel::Info);
-            CATBOOST_INFO_LOG << "Train iteration " << IterationIdx << " of " << IterationCount << Endl;
+            CATBOOST_NOTICE_LOG << "Status after (another) " << HeartbeatSeconds << " seconds: iteration " << IterationIdx << " of " << IterationCount << Endl;
             TrainTimer.Reset();
         }
         return /*continue training*/true;
     }
 
-    void OnSaveSnapshot(IOutputStream* snapshot) override {
+    void OnSaveSnapshot(const NJson::TJsonValue& processors, IOutputStream* snapshot) override {
+        if (processors.IsArray()) {
+            Summary->ProcessorsUsage.push_back({float(SnapshotTimer.PassedReset()), IterationIdx, processors});
+        }
         Summary->Save(snapshot);
         NJson::TJsonValue options;
         EvalFeatureOptions.Save(&options);
@@ -789,6 +787,7 @@ public:
 
 private:
     THPTimer TrainTimer;
+    THPTimer SnapshotTimer;
     ui32 IterationIdx = 0;
     const ui32 IterationCount;
     NCatboostOptions::TFeatureEvalOptions EvalFeatureOptions;
@@ -805,6 +804,18 @@ static bool HaveFeaturesToEvaluate(const TVector<TTrainingDataProviders>& foldsD
     return true;
 }
 
+static ui32 GetTrainingCountPerFold(const NCatboostOptions::TFeatureEvalOptions& featureEvalOptions) {
+    const auto useCommonBaseline = featureEvalOptions.FeatureEvalMode != NCB::EFeatureEvalMode::OneVsOthers;
+    const ui32 featureSetCount = featureEvalOptions.FeaturesToEvaluate->size();
+    return useCommonBaseline ? featureSetCount + 1 : 2 * featureSetCount;
+}
+
+
+static ui32 GetTrainingCount(const NCatboostOptions::TFeatureEvalOptions& featureEvalOptions) {
+    const ui32 foldCount = featureEvalOptions.FoldCount;
+    return foldCount * GetTrainingCountPerFold(featureEvalOptions);
+}
+
 static void EvaluateFeaturesImpl(
     const NCatboostOptions::TCatBoostOptions& catBoostOptions,
     const NCatboostOptions::TOutputFilesOptions& outputFileOptions,
@@ -814,17 +825,13 @@ static void EvaluateFeaturesImpl(
     ui32 foldRangeBegin,
     const TCvDataPartitionParams& cvParams,
     TDataProviderPtr data,
+    ui32 processedFoldCount,
     TFeatureEvaluationCallbacks* callbacks,
     TFeatureEvaluationSummary* results
 ) {
     const ui32 foldCount = cvParams.Initialized() ? cvParams.FoldCount : featureEvalOptions.FoldCount.Get();
     CB_ENSURE(data->ObjectsData->GetObjectCount() > foldCount, "Pool is too small to be split into folds");
     CB_ENSURE(data->ObjectsData->GetObjectCount() > featureEvalOptions.FoldSize.Get(), "Pool is too small to be split into folds");
-    // TODO(akhropov): implement ordered split. MLTOOLS-2486.
-    CB_ENSURE(
-        data->ObjectsData->GetOrder() != EObjectsOrder::Ordered,
-        "Feature evaluation for ordered objects data is not yet implemented"
-    );
 
     const ui64 cpuUsedRamLimit
         = ParseMemorySizeDescription(catBoostOptions.SystemOptions->CpuUsedRamLimit.Get());
@@ -879,7 +886,7 @@ static void EvaluateFeaturesImpl(
     dataSpecificOptions.LoggingLevel = ELoggingLevel::Silent;
 
     const auto taskType = catBoostOptions.GetTaskType();
-    THolder<IModelTrainer> modelTrainerHolder = TTrainerFactory::Construct(taskType);
+    THolder<IModelTrainer> modelTrainerHolder(TTrainerFactory::Construct(taskType));
 
     TSetLogging inThisScope(loggingLevel);
 
@@ -926,6 +933,8 @@ static void EvaluateFeaturesImpl(
         results->SetHeaderInfo(metrics, featureEvalOptions.FeaturesToEvaluate);
     }
 
+    ui32 trainingIdx = processedFoldCount * GetTrainingCountPerFold(featureEvalOptions);
+
     const ui32 offsetInRange = cvParams.Initialized() ? 0 : featureEvalOptions.Offset.Get();
     const auto trainFullModels = [&] (
         bool isTest,
@@ -936,6 +945,9 @@ static void EvaluateFeaturesImpl(
         const bool isCalcFstr = !outputFileOptions.CreateFstrIternalFullPath().empty();
         const bool isCalcRegularFstr = !outputFileOptions.CreateFstrRegularFullPath().empty();
         for (auto foldIdx : xrange(foldCount)) {
+            ++trainingIdx;
+            CATBOOST_NOTICE_LOG << "Training model number " << trainingIdx << Endl;
+
             const bool haveSummary = callbacks->HaveEvalFeatureSummary(
                 foldRangeBegin,
                 featureSetIdx,
@@ -962,6 +974,10 @@ static void EvaluateFeaturesImpl(
             callbacks->FoldIndex = offsetInRange + foldIdx;
             callbacks->ResetIterationIndex();
             foldContext.OutputOptions.SetSaveSnapshotFlag(outputFileOptions.SaveSnapshot());
+            CATBOOST_NOTICE_LOG << "Learn dataset: " << foldContext.TrainingData.Learn->ObjectsGrouping->GetObjectCount() << " objects, "
+                << foldContext.TrainingData.Learn->ObjectsGrouping->GetGroupCount() << " groups" << Endl;
+            CATBOOST_NOTICE_LOG << "Test dataset: " << foldContext.TrainingData.Test[0]->ObjectsGrouping->GetObjectCount() << " objects, "
+                << foldContext.TrainingData.Test[0]->ObjectsGrouping->GetGroupCount() << " groups" << Endl;
             Train(
                 dataSpecificOptions,
                 JoinFsPaths(topLevelTrainDir, foldDir),
@@ -987,20 +1003,14 @@ static void EvaluateFeaturesImpl(
 
             if (isCalcFstr || isCalcRegularFstr) {
                 const auto& model = foldContext.FullModel.GetRef();
-                const auto& floatFeatures = model.ModelTrees->GetFloatFeatures();
-                const auto& catFeatures = model.ModelTrees->GetCatFeatures();
-                const NCB::TFeaturesLayout layout(
-                    TVector<TFloatFeature>(floatFeatures.begin(), floatFeatures.end()),
-                    TVector<TCatFeature>(catFeatures.begin(), catFeatures.end())
-                );
+                const NCB::TFeaturesLayout layout = MakeFeaturesLayout(model);
                 const auto fstrType = outputFileOptions.GetFstrType();
                 const auto effect = CalcFeatureEffect(model, /*dataset*/nullptr, fstrType, &NPar::LocalExecutor());
                 results->FeatureStrengths[isTest][featureSetIdx].emplace_back(ExpandFeatureDescriptions(layout, effect));
                 if (isCalcRegularFstr) {
                     const auto regularEffect = CalcRegularFeatureEffect(
                         effect,
-                        model.GetNumCatFeatures(),
-                        model.GetNumFloatFeatures());
+                        model);
                     results->RegularFeatureStrengths[isTest][featureSetIdx].emplace_back(
                         ExpandFeatureDescriptions(layout, regularEffect));
                 }
@@ -1027,11 +1037,13 @@ static void EvaluateFeaturesImpl(
         const auto haveBaseline = featureSetIdx > 0 && useCommonBaseline;
         if (!haveBaseline) {
             auto newFoldsData = UpdateIgnoredFeaturesInLearn(
-                taskType,
                 featureEvalOptions,
                 ETrainingKind::Baseline,
                 featureSetIdx,
                 foldsData);
+            CB_ENSURE(
+                HaveFeaturesToEvaluate(newFoldsData),
+                "All features in baseline for feature set " << featureSetIdx << " are ignored or constant");
             trainFullModels(/*isTest*/false, featureSetIdx, &newFoldsData);
         } else {
             results->BestMetrics[/*isTest*/0][featureSetIdx] = results->BestMetrics[/*isTest*/0][0];
@@ -1039,7 +1051,6 @@ static void EvaluateFeaturesImpl(
         }
 
         auto newFoldsData = UpdateIgnoredFeaturesInLearn(
-            taskType,
             featureEvalOptions,
             ETrainingKind::Testing,
             featureSetIdx,
@@ -1123,7 +1134,13 @@ static void CountDisjointFolds(
             "Relative fold size must be greater than " << 1.0f / samplingUnitsCount << " so that size of each fold is non-zero";
         );
     }
-    *disjointFoldCount = Max<ui32>(1, samplingUnitsCount / *absoluteFoldSize);
+    *disjointFoldCount = samplingUnitsCount / *absoluteFoldSize;
+    if (*disjointFoldCount < 2) {
+        CATBOOST_WARNING_LOG << "Fold size (" << *absoluteFoldSize << " units) excceds 50% of dataset size (" << samplingUnitsCount << " units). "
+            << "Fold size is decreased to 50% of dataset size." << Endl;
+        *disjointFoldCount = 2;
+        *absoluteFoldSize = samplingUnitsCount / 2;
+    }
 }
 
 TFeatureEvaluationSummary EvaluateFeatures(
@@ -1144,7 +1161,7 @@ TFeatureEvaluationSummary EvaluateFeatures(
     }
     NCatboostOptions::TCatBoostOptions catBoostOptions(taskType);
     NCatboostOptions::TOutputFilesOptions outputFileOptions;
-    LoadOptions(plainJsonParams, &catBoostOptions, &outputFileOptions);
+    LoadOptions(plainJsonParams, data.Get()->MetaInfo, &catBoostOptions, &outputFileOptions);
     const auto& absoluteSnapshotPath = MakeAbsolutePath(outputFileOptions.GetSnapshotFilename());
     outputFileOptions.SetSnapshotFilename(absoluteSnapshotPath);
 
@@ -1180,6 +1197,10 @@ TFeatureEvaluationSummary EvaluateFeatures(
         callbacks->LoadSnapshot(taskType, absoluteSnapshotPath);
     }
 
+    const ui32 trainingCount = GetTrainingCount(featureEvalOptions);
+    CATBOOST_NOTICE_LOG << "Feature evaluation requires training " << trainingCount << " model(s); "
+        "if training takes more than 10 minutes to complete, progress is printed every 10 minutes" << Endl;
+
     auto foldRangePart = featureEvalOptions;
     foldRangePart.FoldSize = absoluteFoldSize;
     foldRangePart.Offset = offset % disjointFoldCount;
@@ -1197,6 +1218,7 @@ TFeatureEvaluationSummary EvaluateFeatures(
             /*foldRangeBegin*/ foldRangeIdx * disjointFoldCount,
             cvParams,
             data,
+            processedFoldCount,
             callbacks.Get(),
             &summary
         );

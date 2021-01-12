@@ -8,7 +8,7 @@
 #include <catboost/private/libs/options/enum_helpers.h>
 #include <catboost/private/libs/options/data_processing_options.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/array_ref.h>
 #include <util/generic/vector.h>
@@ -24,7 +24,7 @@ static constexpr int BinaryClassesCount = 2;
 TVector<double> MakeConfusionMatrix(
     TConstArrayRef<TVector<double>> approxes,
     TConstArrayRef<float> labels,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     const bool isMultiClass = approxes.size() > 1;
     const int classesCount = isMultiClass ? approxes.size() : BinaryClassesCount;
@@ -39,7 +39,7 @@ TVector<double> MakeConfusionMatrix(
         const int end = Min(objectsCount, begin + blockSize);
         for (auto i : xrange(begin, end)) {
             const int realLabel = isMultiClass ? int(labels[i]) : labels[i] > GetDefaultTargetBorder();
-            const int predictedLabel = GetApproxClass(approxes, i);
+            const int predictedLabel = GetApproxClass(approxes, i, /*predictionLogitBorder=*/0.0);
 
             CB_ENSURE(0 <= realLabel && realLabel < classesCount, "Target label out of range");
             blockCms[blockId][realLabel * classesCount + predictedLabel] += 1;

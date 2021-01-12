@@ -8,9 +8,9 @@
 #include <catboost/private/libs/data_types/text.h>
 #include <catboost/private/libs/options/text_processing_options.h>
 
-#include <library/text_processing/dictionary/dictionary.h>
-#include <library/text_processing/dictionary/dictionary_builder.h>
-#include <library/text_processing/dictionary/mmap_frequency_based_dictionary.h>
+#include <library/cpp/text_processing/dictionary/dictionary.h>
+#include <library/cpp/text_processing/dictionary/dictionary_builder.h>
+#include <library/cpp/text_processing/dictionary/mmap_frequency_based_dictionary.h>
 
 #include <util/stream/input.h>
 #include <util/stream/output.h>
@@ -40,6 +40,7 @@ namespace NCB {
 
         void Save(IOutputStream* stream) const;
         void Load(IInputStream* stream);
+        void LoadNonOwning(TMemoryInput* in);
 
     private:
         TDictionaryPtr DictionaryImpl;
@@ -67,7 +68,7 @@ namespace NCB {
         }
 
         template <class F>
-        void ForEach(F&& visitor, NPar::TLocalExecutor* localExecutor) const {
+        void ForEach(F&& visitor, NPar::ILocalExecutor* localExecutor) const {
             NPar::ParallelFor(
                 *localExecutor,
                 0,
@@ -99,7 +100,7 @@ namespace NCB {
         }
 
         template <class F>
-        void ForEach(F&& visitor, NPar::TLocalExecutor* localExecutor) const {
+        void ForEach(F&& visitor, NPar::ILocalExecutor* localExecutor) const {
             TextFeature->ParallelForEach(visitor, localExecutor);
         }
 

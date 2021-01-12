@@ -8,7 +8,7 @@
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/sparse_array.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/ptr.h>
 
@@ -18,17 +18,23 @@
 namespace NCB {
 
     // hack to extract private data from inside providers
-    class TRawBuilderDataHelper {
+    template <class TTObjectsDataProvider>
+    class TBuilderDataHelper {
+        using TTDataProvider = TDataProviderTemplate<TTObjectsDataProvider>;
+        using TTBuilderData = TBuilderData<decltype(std::declval<TTDataProvider>().ObjectsData->ExtractObjectData())>;
     public:
-        static TRawBuilderData Extract(TRawDataProvider&& rawDataProvider) {
-            TRawBuilderData data;
-            data.MetaInfo = std::move(rawDataProvider.MetaInfo);
-            data.TargetData = std::move(rawDataProvider.RawTargetData.Data);
-            data.CommonObjectsData = std::move(rawDataProvider.ObjectsData->CommonData);
-            data.ObjectsData = std::move(rawDataProvider.ObjectsData->Data);
+        static TTBuilderData Extract(TTDataProvider&& dataProvider) {
+            TTBuilderData data;
+            data.MetaInfo = std::move(dataProvider.MetaInfo);
+            data.TargetData = std::move(dataProvider.RawTargetData.Data);
+            data.CommonObjectsData = std::move(dataProvider.ObjectsData->CommonData);
+            data.ObjectsData = dataProvider.ObjectsData->ExtractObjectData();
             return data;
         }
     };
+
+    using TRawBuilderDataHelper = TBuilderDataHelper<TRawObjectsDataProvider>;
+    using TQuantizedForCPUBuilderDataHelper = TBuilderDataHelper<TQuantizedForCPUObjectsDataProvider>;
 
     struct IDataProviderBuilder {
         virtual ~IDataProviderBuilder() = default;
@@ -45,8 +51,6 @@ namespace NCB {
     };
 
     struct TDataProviderBuilderOptions {
-        bool CpuCompatibleFormat = true;
-        bool GpuCompatibleFormat = true;
         bool GpuDistributedFormat = false;
         TPathWithScheme PoolPath = TPathWithScheme();
         ui64 MaxCpuRamUsage = Max<ui64>();
@@ -59,7 +63,7 @@ namespace NCB {
         EDatasetVisitorType visitorType,
         const TDataProviderBuilderOptions& options,
         TDatasetSubset loadSubset,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     );
 
 
@@ -69,7 +73,7 @@ namespace NCB {
         TDataProviderClosure(
             EDatasetVisitorType visitorType,
             const TDataProviderBuilderOptions& options,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) {
             DataProviderBuilder = CreateDataProviderBuilder(
                 visitorType,
@@ -107,7 +111,7 @@ namespace NCB {
     template <class IVisitor>
     void CreateDataProviderBuilderAndVisitor(
         const TDataProviderBuilderOptions& options,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         THolder<IDataProviderBuilder>* dataProviderBuilder,
         IVisitor** builderVisitor
     ) {
@@ -117,7 +121,7 @@ namespace NCB {
             localExecutor
         );
         *builderVisitor = dataProviderClosure->template GetVisitor<IVisitor>();
-        *dataProviderBuilder = dataProviderClosure.Release();
+        *dataProviderBuilder = std::move(dataProviderClosure);
     }
 
     /*

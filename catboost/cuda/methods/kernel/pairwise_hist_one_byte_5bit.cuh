@@ -2,7 +2,7 @@
 #include "split_properties_helpers.cuh"
 #include "compute_pair_hist_loop.cuh"
 #include <cooperative_groups.h>
-#include <library/cuda/wrappers/arch.cuh>
+#include <library/cpp/cuda/wrappers/arch.cuh>
 #include <catboost/cuda/cuda_util/kernel/instructions.cuh>
 #include <catboost/cuda/cuda_util/kernel/kernel_helpers.cuh>
 #include <cstdio>
@@ -360,17 +360,6 @@ namespace NKernel {
                 }
             }
         }
-    }
-
-
-    inline int OneHotCount(const TCFeature* features, int fCount) {
-        int count = 0;
-        for (int i = 0; i < fCount; ++i) {
-            if (features[i].OneHotFeature) {
-                ++count;
-            }
-        }
-        return count;
     }
 
 

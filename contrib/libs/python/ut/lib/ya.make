@@ -2,7 +2,7 @@
 
 PY23_LIBRARY()
 PEERDIR(
-    library/unittest
+    library/cpp/testing/unittest
 )
 SRCS(test.cpp)
 END()

@@ -41,10 +41,6 @@
 {"unicodedata", initunicodedata},
 {"zlib", initzlib},
 
-#ifdef _HAVE_NIS
-{"nis", initnis},
-#endif
-
 #ifdef _FREEBSD_
 {"_multiprocessing", init_multiprocessing},
 {"_multiprocessing", init_multiprocessing},
@@ -91,6 +87,6 @@
 {"_winreg", init_winreg},
 #endif
 
-#if defined(_x86_) && !defined(_CYGWIN_)
+#if defined(_x86_) && !defined(_CYGWIN_) || defined(__powerpc__) || defined(__aarch64__)
 {"_ctypes", init_ctypes},
 #endif

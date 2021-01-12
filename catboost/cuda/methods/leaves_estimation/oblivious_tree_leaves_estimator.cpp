@@ -69,7 +69,7 @@ namespace NCatboostCuda {
     const TVector<double>& NCatboostCuda::TObliviousTreeLeavesEstimator::GetCurrentPointInfo() {
         if (CurrentPointInfo == nullptr) {
             CB_ENSURE(CurrentPoint.size(), "Error: set point first");
-            CurrentPointInfo = new TVector<double>;
+            CurrentPointInfo = MakeHolder<TVector<double>>();
             auto& profiler = NCudaLib::GetProfiler();
             auto projectDerGuard = profiler.Profile("Compute values and derivatives");
 
@@ -138,7 +138,7 @@ namespace NCatboostCuda {
         }
     }
 
-    void TObliviousTreeLeavesEstimator::Estimate(NPar::TLocalExecutor* localExecutor) {
+    void TObliviousTreeLeavesEstimator::Estimate(NPar::ILocalExecutor* localExecutor) {
         CreatePartStats();
         ComputePartWeights();
 

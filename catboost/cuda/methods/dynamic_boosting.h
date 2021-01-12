@@ -19,11 +19,30 @@
 #include <catboost/private/libs/options/loss_description.h>
 #include <catboost/libs/overfitting_detector/overfitting_detector.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/stream/format.h>
 
 namespace NCatboostCuda {
+    namespace {
+        template <typename TTargetSlice>
+        inline bool IsMetricDefined(ELossFunction lossFunction, const TTargetSlice& targetSlice) {
+            if (IsPairwiseMetric(lossFunction) && !targetSlice.GetSamplesGrouping().HasPairs()) {
+                CATBOOST_DEBUG_LOG << "Dynamic boosting skipped some fold for some permutation because it did not have pairs; "
+                    "this may happen if train or test datasets are very small" << Endl;
+                return false;
+            }
+            if (IsGroupwiseMetric(lossFunction)) {
+                const auto objectCount = targetSlice.GetTarget().GetSamplesMapping().GetObjectsSlice().Size();
+                if (targetSlice.GetSamplesGrouping().GetQueryCount() >= objectCount) {
+                    CATBOOST_DEBUG_LOG << "Dynamic boosting skipped some fold for some permutation because all groups were trivial; "
+                        "this may happen if train or test datasets are very small" << Endl;
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
     template <template <class TMapping> class TTargetTemplate,
               class TWeakLearner_>
     class TDynamicBoosting {
@@ -49,7 +68,7 @@ namespace NCatboostCuda {
         const NCatboostOptions::TBoostingOptions& Config;
         const NCatboostOptions::TLossDescription& TargetOptions;
 
-        NPar::TLocalExecutor* LocalExecutor;
+        NPar::ILocalExecutor* LocalExecutor;
 
     private:
         struct TFold {
@@ -147,7 +166,7 @@ namespace NCatboostCuda {
         THolder<TObjective> CreateTarget(const TFeatureParallelDataSet& dataSet) const {
             auto slice = dataSet.GetSamplesMapping().GetObjectsSlice();
             CB_ENSURE(slice.Size());
-            return new TObjective(dataSet,
+            return MakeHolder<TObjective>(dataSet,
                                   Random,
                                   slice,
                                   TargetOptions);
@@ -274,7 +293,8 @@ namespace NCatboostCuda {
 
                         auto optimizer = weak.template CreateStructureSearcher<TWeakTarget, TFeatureParallelDataSet>(
                             *iterationCacheHolderPtr,
-                            taskDataSet);
+                            taskDataSet,
+                            *result);
 
                         optimizer.SetRandomStrength(
                             CalcScoreModelLengthMult(dataSet.GetDataProvider().GetObjectCount(),
@@ -361,11 +381,16 @@ namespace NCatboostCuda {
                             for (ui32 foldId = 0; foldId < folds.size(); ++foldId) {
                                 const auto& estimationSlice = folds[foldId].EstimateSamples;
 
+                                const auto& targetPermutation = target.GetTarget(permutation);
+                                const auto& targetSlice = TargetSlice(targetPermutation, estimationSlice);
+                                if (!IsMetricDefined(targetPermutation.GetType(), targetSlice)) {
+                                    continue;
+                                }
+                                const auto& cursorSlice = cursor.Get(permutation, foldId).SliceView(estimationSlice);
                                 estimator.AddEstimationTask(*iterationCacheHolderPtr,
-                                                            TargetSlice(target.GetTarget(permutation),
-                                                                        estimationSlice),
+                                                            targetSlice,
                                                             permutationDataSet,
-                                                            cursor.Get(permutation, foldId).SliceView(estimationSlice),
+                                                            cursorSlice,
                                                             &models.FoldData[permutation][foldId]);
                             }
                         }
@@ -481,7 +506,7 @@ namespace NCatboostCuda {
                          const NCatboostOptions::TCatBoostOptions& catBoostOptions,
                          EGpuCatFeaturesStorage catFeaturesStorage,
                          TGpuAwareRandom& random,
-                         NPar::TLocalExecutor* localExecutor)
+                         NPar::ILocalExecutor* localExecutor)
             : FeaturesManager(binarizedFeaturesManager)
             , CatFeaturesStorage(catFeaturesStorage)
             , Random(random)
@@ -536,7 +561,7 @@ namespace NCatboostCuda {
                     "You can't use boost_from_average with baseline now.");
                 CB_ENSURE(!TestDataProvider || !TestDataProvider->TargetData->GetBaseline(),
                     "You can't use boost_from_average with baseline now.");
-                state->StartingPoint = NCB::CalcOptimumConstApprox(
+                state->StartingPoint = NCB::CalcOneDimensionalOptimumConstApprox(
                     CatBoostOptions.LossFunctionDescription,
                     DataProvider->TargetData->GetOneDimensionalTarget().GetOrElse(TConstArrayRef<float>()),
                     GetWeights(*DataProvider->TargetData));

@@ -69,36 +69,60 @@ inline static void SetBucketIndex(
 
 }
 
+static void GetIndexingParams(
+    const TCalcScoreFold& fold,
+    bool isEstimatedData,
+    bool isOnlineData,
+    const ui32** objectIndexing,
+    int* beginOffset
+) {
+    // Simple indexing possible only at first level now
+    if (isOnlineData) {
+        const bool simpleIndexing = (fold.LeavesBounds.ysize() == 1)
+            && (fold.OnlineDataPermutationBlockSize == fold.GetDocCount());
+        *objectIndexing = simpleIndexing ? nullptr : GetDataPtr(fold.IndexInFold);
+        *beginOffset = 0;
+    } else if (isEstimatedData) {
+        *objectIndexing = fold.GetLearnPermutationOfflineEstimatedFeaturesSubset().data();
+        *beginOffset = 0;
+    } else {
+        const bool simpleIndexing = (fold.LeavesBounds.size() == 1) &&
+            (fold.MainDataPermutationBlockSize == fold.GetDocCount());
+        *objectIndexing = simpleIndexing
+            ? nullptr
+            : fold.LearnPermutationFeaturesSubset.Get<TIndexedSubset<ui32>>().data();
+        *beginOffset = simpleIndexing ? fold.FeaturesSubsetBegin : 0;
+    }
+}
 
-template <class T, NCB::EFeatureValuesType FeatureValuesType, typename TBucketIndexType>
+
+template <class TColumn, typename TBucketIndexType>
 inline static void ExtractBucketIndex(
     const TCalcScoreFold& fold,
-    const TTypedFeatureValuesHolder<T, FeatureValuesType>& column,
+    const TColumn& column,
+    bool isEstimatedData,
+    bool isOnlineData,
     TIndexRange<ui32> docIndexRange,
     int groupSize,
     const TVector<ui32>& groupPartsBucketsOffsets,
     TVector<TBucketIndexType>* bucketIdx // already of proper size
 ) {
     if (const auto* denseColumnData
-        = dynamic_cast<const TCompressedValuesHolderImpl<T, FeatureValuesType>*>(&column))
+        = dynamic_cast<const TCompressedValuesHolderImpl<TColumn>*>(&column))
     {
-        // Simple indexing possible only at first level now
-        const bool simpleIndexing = (fold.LeavesBounds.size() == 1) && (fold.NonCtrDataPermutationBlockSize == fold.GetDocCount());
-        const ui32* docInDataProviderIndexing = simpleIndexing
-            ? nullptr
-            : fold.LearnPermutationFeaturesSubset.Get<TIndexedSubset<ui32>>().data();
-        const int docInDataProviderBeginOffset = simpleIndexing ? fold.FeaturesSubsetBegin : 0;
+        const ui32* objectIndexing;
+        int beginOffset;
+        GetIndexingParams(fold, isEstimatedData, isOnlineData, &objectIndexing, &beginOffset);
 
         const TCompressedArray& compressedArray = *denseColumnData->GetCompressedData().GetSrc();
 
-        DispatchBitsPerKeyToDataType(
-            compressedArray,
+        compressedArray.DispatchBitsPerKeyToDataType(
             "ExtractBucketIndex",
             [&] (const auto* columnData) {
                 SetBucketIndex(
                     columnData,
-                    docInDataProviderIndexing,
-                    docInDataProviderBeginOffset,
+                    objectIndexing,
+                    beginOffset,
                     docIndexRange,
                     groupSize,
                     groupPartsBucketsOffsets,
@@ -117,7 +141,7 @@ template <typename TBucketIndexType>
 inline static void ExtractBucketIndex(
     const TCalcScoreFold& fold,
     const TQuantizedForCPUObjectsDataProvider& objectsDataProvider,
-    const std::tuple<const TOnlineCTRHash&, const TOnlineCTRHash&>& allCtrs,
+    const std::tuple<const TOnlineCtrBase&, const TOnlineCtrBase&>& allCtrs,
     const TSplitEnsemble& splitEnsemble,
     TIndexRange<ui32> docIndexRange,
     int groupSize,
@@ -126,14 +150,19 @@ inline static void ExtractBucketIndex(
 ) {
     if (splitEnsemble.IsSplitOfType(ESplitType::OnlineCtr)) {
         const TCtr& ctr = splitEnsemble.SplitCandidate.Ctr;
-        // Simple indexing possible only at first level
-        const bool simpleIndexing = (fold.LeavesBounds.ysize() == 1)
-            && (fold.CtrDataPermutationBlockSize == fold.GetDocCount());
-        const ui32* docInFoldIndexing = simpleIndexing ? nullptr : GetDataPtr(fold.IndexInFold);
+        const ui32* objectIndexing;
+        int beginOffset;
+        GetIndexingParams(
+            fold,
+            /*isEstimatedData*/ false,
+            /*isOnlineData*/true,
+            &objectIndexing,
+            &beginOffset
+        );
         SetBucketIndex(
-            GetCtr(allCtrs, ctr.Projection).Feature[ctr.CtrIdx][ctr.TargetBorderIdx][ctr.PriorIdx].data(),
-            docInFoldIndexing,
-            0,
+            GetCtr(allCtrs, ctr.Projection).GetData(ctr, /*datasetIdx*/ 0).data(),
+            objectIndexing,
+            beginOffset,
             docIndexRange,
             groupSize,
             groupPartsBucketsOffsets,
@@ -144,6 +173,8 @@ inline static void ExtractBucketIndex(
             ExtractBucketIndex(
                 fold,
                 column,
+                splitEnsemble.IsEstimated,
+                splitEnsemble.IsOnlineEstimated,
                 docIndexRange,
                 groupSize,
                 groupPartsBucketsOffsets,
@@ -155,7 +186,9 @@ inline static void ExtractBucketIndex(
             case ESplitEnsembleType::OneFeature:
             {
                 const auto& splitCandidate = splitEnsemble.SplitCandidate;
-                if (splitCandidate.Type == ESplitType::FloatFeature) {
+                if ((splitCandidate.Type == ESplitType::FloatFeature) ||
+                    (splitCandidate.Type == ESplitType::EstimatedFeature))
+                {
                     extractBucketIndexFunc(
                         **objectsDataProvider.GetNonPackedFloatFeature((ui32)splitCandidate.FeatureIdx)
                     );
@@ -240,6 +273,7 @@ static void CalcScoresForSubCandidate(
     const TCalcScoreFold& fold,
     const TFold& initialFold,
     const TVector<TIndexType>& leafs,
+    const TStatsForSubtractionTrick& statsForSubtractionTrick,
     TLearnContext* ctx,
     TScoreCalcer* scoreCalcer
 ) {
@@ -308,22 +342,41 @@ static void CalcScoresForSubCandidate(
             updateSplitScoreClosure);
     };
 
-    // TODO(ilyzhin) make caching for nonsymmetric trees
-    if (!ctx->UseTreeLevelCaching() || ctx->Params.ObliviousTreeOptions->GrowPolicy != EGrowPolicy::SymmetricTree) {
-        TVector<TBucketStats> stats;
-        stats.yresize(bucketCount);
+    TArrayRef<TBucketStats> statsRef = statsForSubtractionTrick.GetStatsRef();
+    TArrayRef<TBucketStats> parentStatsRef = statsForSubtractionTrick.GetParentStatsRef();
+    TArrayRef<TBucketStats> siblingStatsRef = statsForSubtractionTrick.GetSiblingStatsRef();
 
+    auto calcStatsScores = [&] (TArrayRef<TBucketStats> stats) {
+        // TODO(ShvetsKS, espetrov) enable subtraction trick for multiclass
+        const bool useSubtractionTrick = parentStatsRef.data() != nullptr && siblingStatsRef.data() != nullptr && approxDimension == 1;
         for (auto leaf : leafs) {
             const auto leafBounds = fold.LeavesBounds[leaf];
             if (leafBounds.Empty()) {
                 continue;
             }
-
-            extractBucketIndex(leafBounds);
-            for (int dim : xrange(approxDimension)) {
-                calcStats(leafBounds, dim, stats);
+            if (useSubtractionTrick) {
+                for(int i = 0; i < bucketCount; ++i) {
+                    stats[i].SumWeightedDelta = parentStatsRef[i].SumWeightedDelta - siblingStatsRef[i].SumWeightedDelta;
+                    stats[i].SumWeight = parentStatsRef[i].SumWeight - siblingStatsRef[i].SumWeight;
+                }
                 calcScores(stats);
+            } else {
+                extractBucketIndex(leafBounds);
+                for (int dim : xrange(approxDimension)) {
+                    calcStats(leafBounds, dim, stats);
+                    calcScores(stats);
+                }
             }
+        }
+    };
+
+    if (!ctx->UseTreeLevelCaching() || ctx->Params.ObliviousTreeOptions->GrowPolicy != EGrowPolicy::SymmetricTree) {
+        if (statsRef.data() == nullptr) {
+            TVector<TBucketStats> stats;
+            stats.yresize(bucketCount);
+            calcStatsScores(stats);
+        } else {
+            calcStatsScores(statsRef);
         }
     } else { /* UseTreeLevelCaching */
         bool areStatsDirty;
@@ -393,6 +446,7 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
     const TCalcScoreFold& fold,
     const TFold& initialFold,
     const TVector<TIndexType>& leafs,
+    const TStatsForSubtractionTrick& statsForSubtractionTrick,
     TLearnContext* ctx
 ) {
     TVector<TVector<double>> scores(candidate.Candidates.size());
@@ -401,11 +455,6 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
         [&](int subCandId) {
             const auto& candidateInfo = candidate.Candidates[subCandId];
             const auto& splitEnsemble = candidateInfo.SplitEnsemble;
-
-            if (splitEnsemble.IsSplitOfType(ESplitType::OnlineCtr)) {
-                const auto& proj = splitEnsemble.SplitCandidate.Ctr.Projection;
-                Y_ASSERT(!initialFold.GetCtr(proj).Feature.empty());
-            }
 
             const int bucketCount = GetBucketCount(
                 splitEnsemble,
@@ -432,6 +481,8 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
             const float l2Regularizer = static_cast<const float>(ctx->Params.ObliviousTreeOptions->L2Reg);
             const double scaledL2Regularizer = l2Regularizer * (sumAllWeights / docCount);
             scoreCalcer.SetL2Regularizer(scaledL2Regularizer);
+            const int maxBucketCount = statsForSubtractionTrick.GetMaxBucketCount();
+
             if (bucketIndexBitCount <= 8) {
                 CalcScoresForSubCandidate<ui8>(
                     objectsDataProvider,
@@ -440,6 +491,7 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
                     fold,
                     initialFold,
                     leafs,
+                    statsForSubtractionTrick.MakeSlice(subCandId, maxBucketCount),
                     ctx,
                     &scoreCalcer);
             } else if (bucketIndexBitCount <= 16) {
@@ -450,6 +502,7 @@ static TVector<TVector<double>> CalcScoresForOneCandidateImpl(
                     fold,
                     initialFold,
                     leafs,
+                    statsForSubtractionTrick.MakeSlice(subCandId, maxBucketCount),
                     ctx,
                     &scoreCalcer);
             } else {
@@ -471,6 +524,7 @@ TVector<TVector<double>> CalcScoresForOneCandidate(
     const TCalcScoreFold& fold,
     const TFold& initialFold,
     const TVector<TIndexType>& leafs,
+    const TStatsForSubtractionTrick& statsForSubtractionTrick,
     TLearnContext* ctx
 ) {
     const auto scoreFunction = ctx->Params.ObliviousTreeOptions->ScoreFunction;
@@ -481,6 +535,7 @@ TVector<TVector<double>> CalcScoresForOneCandidate(
             fold,
             initialFold,
             leafs,
+            statsForSubtractionTrick,
             ctx);
     } else if (scoreFunction == EScoreFunction::L2) {
         return CalcScoresForOneCandidateImpl<TL2ScoreCalcer>(
@@ -489,6 +544,7 @@ TVector<TVector<double>> CalcScoresForOneCandidate(
             fold,
             initialFold,
             leafs,
+            statsForSubtractionTrick,
             ctx);
     } else {
         CB_ENSURE(false, "Error: score function for CPU should be Cosine or L2");
@@ -497,22 +553,42 @@ TVector<TVector<double>> CalcScoresForOneCandidate(
 
 
 double CalcScoreWithoutSplit(int leaf, const TFold& fold, const TLearnContext& ctx) {
-    // TODO(ilyzhin) make parallel
     const auto& leafBounds = ctx.SampledDocs.LeavesBounds[leaf];
-    double sumWeightedDerivatives = 0;
     const auto& ders = ctx.SampledDocs.BodyTailArr[0].SampleWeightedDerivatives;
-    for (auto dim : xrange(ctx.LearnProgress->ApproxDimension)) {
-        sumWeightedDerivatives += Accumulate(
-            ders[dim].begin() + leafBounds.Begin,
-            ders[dim].begin() + leafBounds.End,
-            0.0);
-    }
-    double sumWeights = Accumulate(
-        ctx.SampledDocs.SampleWeights.begin() + leafBounds.Begin,
-        ctx.SampledDocs.SampleWeights.begin() + leafBounds.End,
-        0.0);
-    TBucketStats stats {sumWeightedDerivatives, sumWeights, 0, 0};
 
+    const size_t leafBoundsSize = leafBounds.End - leafBounds.Begin;
+    const size_t blockSize = Max<size_t>(CeilDiv<size_t>(leafBoundsSize, ctx.LocalExecutor->GetThreadCount() + 1), 1000);
+    const TSimpleIndexRangesGenerator<size_t> rangesGenerator(TIndexRange<size_t>(leafBoundsSize), blockSize);
+    const int blockCount = rangesGenerator.RangesCount();
+
+    TVector<double> sumWeightedDerivativesLocal(blockCount, 0);
+    TVector<double> sumWeightsLocal(blockCount, 0);
+
+    ctx.LocalExecutor->ExecRange(
+        [&](int blockId) {
+            double localSumWeightedDerivatives = 0;
+            for (auto dim : xrange(ctx.LearnProgress->ApproxDimension)) {
+                TConstArrayRef<double> dersLocalRef(ders[dim].data() + leafBounds.Begin, leafBoundsSize);
+                for (auto idx : rangesGenerator.GetRange(blockId).Iter()) {
+                    localSumWeightedDerivatives += dersLocalRef[idx];
+                }
+            }
+            sumWeightedDerivativesLocal[blockId] = localSumWeightedDerivatives;
+            double localSumWeights = 0;
+            TConstArrayRef<float> sumWeightsRef(ctx.SampledDocs.SampleWeights.data() + leafBounds.Begin, leafBoundsSize);
+            for(auto idx : rangesGenerator.GetRange(blockId).Iter()) {
+                localSumWeights += sumWeightsRef[idx];
+            }
+            sumWeightsLocal[blockId] = localSumWeights;
+        },
+        0,
+        blockCount,
+        NPar::TLocalExecutor::WAIT_COMPLETE
+    );
+
+    double sumWeightedDerivatives = Accumulate(sumWeightedDerivativesLocal.begin(), sumWeightedDerivativesLocal.end(), 0.0);
+    double sumWeights = Accumulate(sumWeightsLocal.begin(), sumWeightsLocal.end(), 0.0);
+    TBucketStats stats{sumWeightedDerivatives, sumWeights, 0, 0};
     const double sumAllWeights = fold.BodyTailArr[0].BodySumWeight;
     const int docCount = fold.BodyTailArr[0].BodyFinish;
     const double scaledL2Regularizer = ScaleL2Reg(ctx.Params.ObliviousTreeOptions->L2Reg, sumAllWeights, docCount);

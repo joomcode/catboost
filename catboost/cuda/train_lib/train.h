@@ -13,8 +13,8 @@
 #include <catboost/private/libs/options/output_file_options.h>
 #include <catboost/libs/train_lib/train_model.h>
 
-#include <library/object_factory/object_factory.h>
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/object_factory/object_factory.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/ptr.h>
 
@@ -37,7 +37,7 @@ namespace NCatboostCuda {
             TGpuAwareRandom& random,
             ui32 approxDimension,
             ITrainingCallbacks* trainingCallbacks,
-            NPar::TLocalExecutor* localExecutor,
+            NPar::ILocalExecutor* localExecutor,
             TVector<TVector<double>>* testMultiApprox, // [dim][objectIdx]
             TMetricsAndTimeLeftHistory* metricsAndTimeHistory) const = 0;
 
@@ -49,7 +49,7 @@ namespace NCatboostCuda {
             const NCB::TTrainingDataProvider& test,
             TGpuAwareRandom& random,
             ui32 approxDimension,
-            NPar::TLocalExecutor* localExecutor) const = 0;
+            NPar::ILocalExecutor* localExecutor) const = 0;
 
         virtual ~IGpuTrainer() = default;
     };

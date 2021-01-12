@@ -1,9 +1,13 @@
 #pragma once
 
+#include <utility>
+
 #include "option.h"
 #include "unimplemented_aware_option.h"
+#include "loss_description.h"
 
-#include <library/json/json_value.h>
+#include <library/cpp/json/json_value.h>
+#include <library/cpp/json/json_reader.h>
 
 #include <util/generic/string.h>
 #include <util/generic/set.h>
@@ -190,6 +194,75 @@ namespace NCatboostOptions {
         }
     };
 
+    template <>
+    class TJsonFieldHelper<TLossParams, false> {
+    public:
+        constexpr static TStringBuf ParamsKeyOrderRecord = "__params_key_order";
+    public:
+        static Y_NO_INLINE void Read(const NJson::TJsonValue& src, TLossParams* dst) {
+            CB_ENSURE(dst, "Error: can't write to nullptr");
+            TVector<std::pair<TString, TString>> keyValuePairs;
+            // The input JSON might be either a map of parameters or a list of key-value pairs (which are lists of
+            // length 2).
+            if (src.IsArray()) {
+                // support format from catboost 0.23.2 version
+                // (don't want to break deserialization again)
+                // [["key1, "value1"], ["key2", "value2"]]
+                const NJson::TJsonValue::TArray& data = src.GetArraySafe();
+                TVector<TString> keyValuePair;
+                for (ui32 i = 0; i < data.size(); ++i) {
+                    TJsonFieldHelper<TVector<TString>, false>::Read(data.at(i), &keyValuePair);
+                    CB_ENSURE(keyValuePair.size() == 2, "Error: payload must contain lists of length 2 (key-value pairs)");
+                    keyValuePairs.emplace_back(keyValuePair[0], keyValuePair[1]);
+                }
+            } else if (src.IsMap()) {
+                // {"key1": "value1", "key2": "value2", "__params_key_order": ["key2", "key1"]}
+                const auto& data = src.GetMapSafe();
+                if (!data.contains(ParamsKeyOrderRecord)) {
+                    for (const auto& entry : data) {
+                        CB_ENSURE(entry.second.IsString(), "Error: TLossParams map values must be strings.");
+                        keyValuePairs.emplace_back(entry.first, entry.second.GetStringSafe());
+                    }
+                } else {
+                    TVector<TString> keyOrder;
+                    NJson::TJsonValue keyOrderJson;
+                    NJson::ReadJsonTree(data.at(ParamsKeyOrderRecord).GetString(), &keyOrderJson);
+                    TJsonFieldHelper<TVector<TString>, false>::Read(
+                        keyOrderJson,
+                        &keyOrder
+                    );
+                    CB_ENSURE(
+                        keyOrder.size() + 1 == data.size(),
+                        "Error: key order list size don't match dictionary size"
+                    );
+                    keyValuePairs.reserve(keyOrder.size());
+                    for (const auto& key : keyOrder) {
+                        const auto& value = data.at(key);
+                        CB_ENSURE(value.IsString(), "Error: TLossParams map values must be strings.");
+                        keyValuePairs.emplace_back(key, value.GetString());
+                    }
+                }
+            } else {
+                ythrow TCatBoostException() << "Error: TLossParams serialized JSON is not a map nor a list.";
+            }
+            *dst = TLossParams::FromVector(keyValuePairs);
+        }
+
+        static Y_NO_INLINE void Write(const TLossParams& src, NJson::TJsonValue* dst) {
+            // Writing TLossParams as a vector of key-value pairs to preserve the params order.
+            CB_ENSURE(dst, "Error: can't write to nullptr");
+            TJsonFieldHelper<TMap<TString, TString>, false>::Write(src.GetParamsMap(), dst);
+            if (!src.GetUserSpecifiedKeyOrder().empty()) {
+                NJson::TJsonValue keyOrderList;
+                TJsonFieldHelper<TVector<TString>, false>::Write(src.GetUserSpecifiedKeyOrder(), &keyOrderList);
+                dst->InsertValue(
+                    ParamsKeyOrderRecord,
+                    keyOrderList.GetStringRobust()
+                );
+            }
+        }
+    };
+
     class TUnimplementedAwareOptionsLoader {
     public:
         explicit TUnimplementedAwareOptionsLoader(const NJson::TJsonValue& src)
@@ -304,6 +377,36 @@ namespace NCatboostOptions {
         TUnimplementedAwareOptionsSaver saver(dst);
         saver.SaveMany(fields...);
     };
+}
+
+template <typename T>
+void FromJson(const NJson::TJsonValue& value, T* result) {
+    switch (value.GetType()) {
+        case NJson::EJsonValueType::JSON_INTEGER:
+            *result = T(value.GetInteger());
+            break;
+        case NJson::EJsonValueType::JSON_DOUBLE:
+            *result = T(value.GetDouble());
+            break;
+        case NJson::EJsonValueType::JSON_UINTEGER:
+            *result = T(value.GetUInteger());
+            break;
+        case NJson::EJsonValueType::JSON_STRING:
+            *result = FromString<T>(value.GetString());
+            break;
+        default:
+            CB_ENSURE("Incorrect format");
+    }
+}
+
+template <>
+void FromJson(const NJson::TJsonValue& value, TString* result);
+
+template <typename T>
+T FromJson(const NJson::TJsonValue& value) {
+    T result;
+    FromJson(value, &result);
+    return result;
 }
 
 NJson::TJsonValue ReadTJsonValue(TStringBuf paramsJson);

@@ -11,8 +11,8 @@ SRCS(
 
 PEERDIR(
     catboost/private/libs/index_range
-    library/binsaver
-    library/object_factory
+    library/cpp/binsaver
+    library/cpp/object_factory
 )
 
 END()

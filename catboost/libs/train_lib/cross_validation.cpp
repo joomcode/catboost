@@ -40,19 +40,21 @@
 using namespace NCB;
 
 
-TVector<TArraySubsetIndexing<ui32>> CalcTrainSubsets(
+TVector<TArraySubsetIndexing<ui32>> CalcTrainSubsetsRange(
     const TVector<TArraySubsetIndexing<ui32>>& testSubsets,
-    ui32 groupCount
+    ui32 groupCount,
+    const TIndexRange<ui32>& trainSubsetsRange
 ) {
 
+    CB_ENSURE_INTERNAL(trainSubsetsRange.End <= testSubsets.size(), "Too many train subsets are requested");
     TVector<TVector<ui32>> trainSubsetIndices(testSubsets.size());
-    for (ui32 fold = 0; fold < testSubsets.size(); ++fold) {
+    for (ui32 fold : trainSubsetsRange.Iter()) {
         trainSubsetIndices[fold].reserve(groupCount - testSubsets[fold].Size());
     }
     for (ui32 testFold = 0; testFold < testSubsets.size(); ++testFold) {
         testSubsets[testFold].ForEach(
             [&](ui32 /*idx*/, ui32 srcIdx) {
-                for (ui32 fold = 0; fold < trainSubsetIndices.size(); ++fold) {
+                for (ui32 fold : trainSubsetsRange.Iter()) {
                     if (testFold == fold) {
                         continue;
                     }
@@ -68,6 +70,13 @@ TVector<TArraySubsetIndexing<ui32>> CalcTrainSubsets(
     }
 
     return result;
+}
+
+TVector<TArraySubsetIndexing<ui32>> CalcTrainSubsets(
+    const TVector<TArraySubsetIndexing<ui32>>& testSubsets,
+    ui32 groupCount
+) {
+    return CalcTrainSubsetsRange(testSubsets, groupCount, TIndexRange<ui32>(testSubsets.size()));
 }
 
 static double ComputeStdDev(const TVector<double>& values, double avg) {
@@ -290,7 +299,7 @@ void TrainBatch(
     ELoggingLevel loggingLevel,
     TFoldContext* foldContext,
     IModelTrainer* modelTrainer,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     TMaybe<ui32>* upToIteration) { // exclusive bound, if not inited - init from profile data
 
     // don't output data from folds training
@@ -328,6 +337,7 @@ void TrainBatch(
         objectiveDescriptor,
         evalMetricDescriptor,
         foldContext->TrainingData,
+        /*precomputedSingleOnlineCtrDataForSingleFold*/ Nothing(),
         labelConverter,
         cvCallbacks.Get(),
         /*initModel*/ Nothing(),
@@ -378,7 +388,7 @@ void Train(
     ITrainingCallbacks* trainingCallbacks,
     TFoldContext* foldContext,
     IModelTrainer* modelTrainer,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     // don't output data from folds training
     TSetLoggingSilent silentMode;
@@ -401,6 +411,7 @@ void Train(
         objectiveDescriptor,
         evalMetricDescriptor,
         foldContext->TrainingData,
+        /*precomputedSingleOnlineCtrDataForSingleFold*/ Nothing(),
         labelConverter,
         trainingCallbacks,
         /*initModel*/ Nothing(),
@@ -490,7 +501,7 @@ void CrossValidate(
     const TLabelConverter& labelConverter,
     NCB::TTrainingDataProviderPtr trainingData,
     const TCrossValidationParams& cvParams,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     TVector<TCVResult>* results,
     bool isAlreadyShuffled) {
 
@@ -500,6 +511,7 @@ void CrossValidate(
     NJson::TJsonValue outputJsonParams;
     ConvertIgnoredFeaturesFromStringToIndices(trainingData.Get()->MetaInfo, &plainJsonParams);
     NCatboostOptions::PlainJsonToOptions(plainJsonParams, &jsonParams, &outputJsonParams);
+    ConvertParamsToCanonicalFormat(trainingData.Get()->MetaInfo, &jsonParams);
     NCatboostOptions::TCatBoostOptions catBoostOptions(NCatboostOptions::LoadOptions(jsonParams));
     NCatboostOptions::TOutputFilesOptions outputFileOptions;
     outputFileOptions.Load(outputJsonParams);
@@ -537,6 +549,7 @@ void CrossValidate(
     }
 
     UpdateYetiRankEvalMetric(trainingData->MetaInfo.TargetStats, Nothing(), &catBoostOptions);
+    UpdateSampleRateOption(allDataObjectCount, &catBoostOptions);
 
     InitializeEvalMetricIfNotSet(catBoostOptions.MetricOptions->ObjectiveMetric,
                                  &catBoostOptions.MetricOptions->EvalMetric);
@@ -553,14 +566,14 @@ void CrossValidate(
 
     const bool isGpuDeviceType = taskType == ETaskType::GPU;
     if (isGpuDeviceType && TTrainerFactory::Has(ETaskType::GPU)) {
-        modelTrainerHolder = TTrainerFactory::Construct(ETaskType::GPU);
+        modelTrainerHolder = THolder<IModelTrainer>(TTrainerFactory::Construct(ETaskType::GPU));
     } else {
         CB_ENSURE(
             !isGpuDeviceType,
             "Can't load GPU learning library. "
             "Module was not compiled or driver  is incompatible with package. "
             "Please install latest NVDIA driver and check again");
-        modelTrainerHolder = TTrainerFactory::Construct(ETaskType::CPU);
+        modelTrainerHolder = THolder<IModelTrainer>(TTrainerFactory::Construct(ETaskType::CPU));
     }
 
     TSetLogging inThisScope(loggingLevel);
@@ -848,6 +861,7 @@ void CrossValidate(
     NJson::TJsonValue outputJsonParams;
     ConvertIgnoredFeaturesFromStringToIndices(data.Get()->MetaInfo, &plainJsonParams);
     NCatboostOptions::PlainJsonToOptions(plainJsonParams, &jsonParams, &outputJsonParams);
+    ConvertParamsToCanonicalFormat(data.Get()->MetaInfo, &jsonParams);
     NCatboostOptions::TCatBoostOptions catBoostOptions(NCatboostOptions::LoadOptions(jsonParams));
     NCatboostOptions::TOutputFilesOptions outputFileOptions;
     outputFileOptions.Load(outputJsonParams);

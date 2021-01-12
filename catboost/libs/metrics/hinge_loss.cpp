@@ -1,3 +1,5 @@
+#include "hinge_loss.h"
+
 #include "metric_holder.h"
 
 #include <util/generic/vector.h>
@@ -8,12 +10,12 @@
 #include <limits>
 
 
-TMetricHolder ComputeHingeLossMetric(TConstArrayRef<TVector<double>> approx,
+TMetricHolder ComputeHingeLossMetric(TConstArrayRef<TConstArrayRef<double>> approx,
                                      TConstArrayRef<float> target,
                                      TConstArrayRef<float> weight,
                                      int begin,
                                      int end,
-                                     double border) {
+                                     double targetBorder) {
     TMetricHolder error(2);
     error.Stats[0] = 0;
     error.Stats[1] = 0;
@@ -35,7 +37,7 @@ TMetricHolder ComputeHingeLossMetric(TConstArrayRef<TVector<double>> approx,
             }
             value = 1 - (approx[targetValue][index] - maxApprox);
         } else {
-            if (target[index] > border) {;
+            if (target[index] > targetBorder) {;
                 value = 1 - approx.front()[index];
             } else {
                 value = 1 + approx.front()[index];

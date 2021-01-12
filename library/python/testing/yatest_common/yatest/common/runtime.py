@@ -76,11 +76,30 @@ def build_path(path=None):
 
 def java_path():
     """
-    Get path to java
+    [DEPRECATED] Get path to java
     :return: absolute path to java
     """
-    import runtime_java
+    from . import runtime_java
     return runtime_java.get_java_path(binary_path(os.path.join('contrib', 'tools', 'jdk')))
+
+
+def java_home():
+    """
+    Get jdk directory path
+    """
+    from . import runtime_java
+    jdk_dir = runtime_java.get_build_java_dir(binary_path('jdk'))
+    if not jdk_dir:
+        raise Exception("Cannot find jdk - make sure 'jdk' is added to the DEPENDS section and exists for the current platform")
+    return jdk_dir
+
+
+def java_bin():
+    """
+    Get path to the java binary
+    Requires DEPENDS(jdk)
+    """
+    return os.path.join(java_home(), "bin", "java")
 
 
 def data_path(path=None):
@@ -299,5 +318,9 @@ class Context(object):
             return _flags_dict
         else:
             return dict()
+
+    def get_context_key(self, key):
+        return _get_ya_plugin_instance().get_context(key)
+
 
 context = Context()

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <catboost/libs/data/data_provider.h>
+#include <catboost/libs/data/pairs.h>
 #include <catboost/libs/data/util.h>
 #include <catboost/private/libs/data_types/groupid.h>
 #include <catboost/libs/helpers/restorable_rng.h>
@@ -8,8 +9,8 @@
 #include <catboost/libs/model/model.h>
 #include <catboost/private/libs/options/loss_description.h>
 
-#include <library/json/json_value.h>
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/json/json_value.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/fwd.h>
 
@@ -28,6 +29,7 @@ namespace NCB {
     struct TInputClassificationInfo {
         TMaybe<ui32> KnownClassCount;
         TConstArrayRef<float> ClassWeights; // [classIdx], empty if not specified
+        EAutoClassWeightsType AutoClassWeightsType;
         TVector<NJson::TJsonValue> ClassLabels; // can be Integers, Floats or Strings
         TMaybe<float> TargetBorder;
     };
@@ -36,6 +38,7 @@ namespace NCB {
         TVector<NJson::TJsonValue> ClassLabels; // can be Integers, Floats or Strings
         TMaybe<TLabelConverter*> LabelConverter; // needed only for multiclass
         TMaybe<float> TargetBorder; // TODO(isaf27): delete it from output parameters
+        TMaybe<TVector<float>> ClassWeights;
     };
 
     struct TOutputPairsInfo {
@@ -81,7 +84,7 @@ namespace NCB {
         const TInputClassificationInfo& inputClassificationInfo,
         TOutputClassificationInfo* outputClassificationInfo,
         TRestorableFastRng64* rand, // for possible pairs generation
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         TOutputPairsInfo* outputPairsInfo);
 
 
@@ -93,20 +96,21 @@ namespace NCB {
         const TFullModel& model,
         ui64 cpuRamLimit,
         TRestorableFastRng64* rand, // for possible pairs generation
-        NPar::TLocalExecutor* localExecutor);
+        NPar::ILocalExecutor* localExecutor,
+        bool metricsThatRequireTargetCanBeSkipped=false);
 
     TProcessedDataProvider CreateClassificationCompatibleDataProvider(
         const TDataProvider& srcData,
         const TFullModel& model,
         ui64 cpuRamLimit,
         TRestorableFastRng64* rand, // for possible pairs generation
-        NPar::TLocalExecutor* localExecutor);
+        NPar::ILocalExecutor* localExecutor);
 
 
     TSharedVector<TQueryInfo> MakeGroupInfos(
         const TObjectsGrouping& objectsGrouping,
         TMaybeData<TConstArrayRef<TSubgroupId>> subgroupIds,
         const TWeights<float>& groupWeights,
-        TConstArrayRef<TPair> pairs);
+        TMaybe<TRawPairsDataRef> pairs);
 
 }

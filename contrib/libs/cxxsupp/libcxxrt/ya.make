@@ -18,26 +18,11 @@ ADDINCL(
     GLOBAL contrib/libs/cxxsupp/libcxxrt
 )
 
-IF (CLANG OR USE_LTO)
-    PEERDIR(
-        contrib/libs/cxxsupp/builtins
-    )
-ENDIF ()
-
 NO_RUNTIME()
 NO_COMPILER_WARNINGS()
 
 IF (SANITIZER_TYPE STREQUAL undefined)
     NO_SANITIZE()
-ENDIF ()
-
-IF (MUSL)
-    ADDINCL(
-        contrib/libs/musl/arch/x86_64
-        contrib/libs/musl/arch/generic
-        contrib/libs/musl/include
-        contrib/libs/musl/extra
-    )
 ENDIF ()
 
 CXXFLAGS(

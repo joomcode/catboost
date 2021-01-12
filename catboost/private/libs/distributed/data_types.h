@@ -3,6 +3,7 @@
 #include <catboost/private/libs/algo/calc_score_cache.h>
 #include <catboost/private/libs/algo/fold.h>
 #include <catboost/private/libs/algo/learn_context.h>
+#include <catboost/private/libs/algo/online_ctr.h>
 #include <catboost/private/libs/algo/pairwise_scoring.h>
 #include <catboost/private/libs/algo/score_calcers.h>
 #include <catboost/private/libs/algo/target_classifier.h>
@@ -16,10 +17,10 @@
 #include <catboost/private/libs/options/load_options.h>
 #include <catboost/private/libs/options/restrictions.h>
 
-#include <library/binsaver/bin_saver.h>
-#include <library/json/json_value.h>
-#include <library/par/par.h>
-#include <library/par/par_util.h>
+#include <library/cpp/binsaver/bin_saver.h>
+#include <library/cpp/json/json_value.h>
+#include <library/cpp/par/par.h>
+#include <library/cpp/par/par_util.h>
 
 #include <util/generic/maybe.h>
 #include <util/generic/ptr.h>
@@ -43,19 +44,16 @@ namespace NCatboostDistributed {
     using TWorkerPairwiseStats = TVector<TVector<TPairwiseStats>>; // [cand][subCand]
 
     struct TTrainData : public IObjectBase {
-        NCB::TTrainingForCPUDataProviderPtr TrainData;
+        NCB::TTrainingDataProviders TrainData;
 
     public:
         TTrainData() = default;
-        TTrainData(NCB::TTrainingForCPUDataProviderPtr trainData)
-        : TrainData(trainData)
+        TTrainData(NCB::TTrainingDataProviders trainData)
+        : TrainData(std::move(trainData))
         {
         }
 
-        int operator&(IBinSaver& binSaver) {
-            NCB::AddWithShared(&binSaver, &TrainData);
-            return 0;
-        }
+        SAVELOAD(TrainData);
 
         OBJECT_NOCOPY_METHODS(TTrainData);
     };
@@ -70,8 +68,6 @@ namespace NCatboostDistributed {
         EHessianType HessianType;
 
     public:
-        TPlainFoldBuilderParams() = default;
-
         SAVELOAD(
             TargetClassifiers,
             RandomSeed,
@@ -91,8 +87,6 @@ namespace NCatboostDistributed {
         ui64 RandomSeed;
 
     public:
-        TDatasetLoaderParams() = default;
-
         SAVELOAD(
             PoolLoadOptions,
             TrainOptions,
@@ -122,6 +116,9 @@ namespace NCatboostDistributed {
         TArray2D<double> PairwiseBuckets;
         int GradientIteration;
 
+        // Starting point for gradient walker
+        TVector<TVector<double>> BacktrackingStart;
+
         // data used by Exact approx calcer
         TVector<TVector<TVector<std::pair<double, double>>>> ExactDiff; // [dim][leaf][]
         TVector<TVector<TMinMax<int>>> SplitBounds; // [dim][leaf]
@@ -136,7 +133,9 @@ namespace NCatboostDistributed {
 
         NCatboostOptions::TCatBoostOptions Params;
 
-        NCB::TTrainingForCPUDataProviderPtr TrainData;
+        NCB::TTrainingDataProviders TrainData;
+        TMaybe<NCB::TPrecomputedOnlineCtrData> PrecomputedSingleOnlineCtrDataForSingleFold;
+
         TVector<NJson::TJsonValue> ClassLabelsFromDataset;
 
         TFlatPairsInfo FlatPairs;

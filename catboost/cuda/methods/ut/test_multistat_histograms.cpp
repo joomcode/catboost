@@ -1,4 +1,4 @@
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 #include <catboost/cuda/cuda_lib/cuda_buffer_helpers/all_reduce.h>
 #include <catboost/cuda/data/binarizations_manager.h>
@@ -150,7 +150,7 @@ Y_UNIT_TEST_SUITE(TPointwiseMultiStatHistogramTest) {
 
         const auto& cindexCpu = GetCompressedIndexCpu(dataSet);
 
-        for (auto policy : NCatboostCuda::GetAllGroupingPolicies()) {
+        for (auto policy : GetEnumAllValues<NCatboostCuda::EFeaturesGroupingPolicy>()) {
             if (dataSet.HasFeatures()) {
                 CalcRefSums(policy,
                             cindexCpu,

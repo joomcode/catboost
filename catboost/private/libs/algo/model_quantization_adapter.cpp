@@ -30,16 +30,20 @@ namespace {
             const auto docCount = ObjectsEnd - ObjectsStart;
             const auto blockSize = Min(docCount, FORMULA_EVALUATION_BLOCK_SIZE);
             TVector<ui32> transposedHash(blockSize * Model.GetUsedCatFeaturesCount());
-            TVector<float> ctrs(Model.ModelTrees->GetUsedModelCtrs().size() * blockSize);
+            auto applyData = Model.ModelTrees->GetApplyData();
+            TVector<float> ctrs(applyData->UsedModelCtrs.size() * blockSize);
             TVector<float> estimatedFeatures(Model.ModelTrees->GetEstimatedFeatures().size() * blockSize);
 
             BinarizeFeatures(
                 *Model.ModelTrees,
+                *applyData,
                 Model.CtrProvider,
                 Model.TextProcessingCollection,
+                Model.EmbeddingProcessingCollection,
                 rawFeatureAccessor.GetFloatAccessor(),
                 rawFeatureAccessor.GetCatAccessor(),
                 rawFeatureAccessor.GetTextAccessor(),
+                rawFeatureAccessor.GetEmbeddingAccessor(),
                 0,
                 docCount,
                 Result.Get(),
@@ -53,6 +57,7 @@ namespace {
             TQuantizedFeatureAccessor quantizedFeatureAccessor = quantizedFeaturesBlockIterator.GetAccessor();
             AssignFeatureBins(
                *Model.ModelTrees,
+               *Model.ModelTrees->GetApplyData(),
                quantizedFeatureAccessor.GetFloatAccessor(),
                quantizedFeatureAccessor.GetCatAccessor(),
                0,

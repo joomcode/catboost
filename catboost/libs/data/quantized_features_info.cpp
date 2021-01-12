@@ -1,13 +1,14 @@
 #include "quantized_features_info.h"
 
 #include "feature_index.h"
+#include "sparse_columns.h"
 
 #include <catboost/libs/helpers/checksum.h>
 #include <catboost/libs/helpers/dbg_output.h>
 #include <catboost/libs/helpers/serialization.h>
 #include <catboost/libs/helpers/vector_helpers.h>
 
-#include <library/dbg_output/dump.h>
+#include <library/cpp/dbg_output/dump.h>
 
 #include <util/generic/cast.h>
 #include <util/generic/mapfindptr.h>
@@ -62,6 +63,45 @@ namespace NCB {
         return true;
     }
 
+    static bool EqualNanModesWithDefault(
+        const TMap<ui32, ENanMode>& lhs,
+        const TMap<ui32, ENanMode>& rhs
+    ) {
+        auto lhsIter = lhs.begin();
+        auto rhsIter = rhs.begin();
+
+        while ((lhsIter != lhs.end()) && (rhsIter != rhs.end())) {
+            if (lhsIter->first < rhsIter->first) {
+                if (lhsIter->second != ENanMode::Forbidden) {
+                    return false;
+                }
+                ++lhsIter;
+            } else if (lhsIter->first > rhsIter->first) {
+                if (rhsIter->second != ENanMode::Forbidden) {
+                    return false;
+                }
+                ++rhsIter;
+            } else { // lhsIter->first == rhsIter->first
+                if (lhsIter->second != rhsIter->second) {
+                    return false;
+                }
+                ++lhsIter;
+                ++rhsIter;
+            }
+        }
+        for (; lhsIter != lhs.end(); ++lhsIter) {
+            if (lhsIter->second != ENanMode::Forbidden) {
+                return false;
+            }
+        }
+        for (; rhsIter != rhs.end(); ++rhsIter) {
+            if (rhsIter->second != ENanMode::Forbidden) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     TQuantizedFeaturesInfo::TQuantizedFeaturesInfo(
         const NCB::TFeaturesLayout &featuresLayout,
         TConstArrayRef<ui32> ignoredFeatures,
@@ -74,6 +114,7 @@ namespace NCB {
             commonFloatFeaturesBinarization,
             perFloatFeatureQuantization,
             NCatboostOptions::TTextProcessingOptions(),
+            NCatboostOptions::TEmbeddingProcessingOptions(),
             floatFeaturesAllowNansInTestOnly
         )
     {}
@@ -88,12 +129,23 @@ namespace NCB {
         return textFeatureIndices;
     }
 
+    static TVector<ui32> GetAvailableEmbeddingFeatureIndices(const TFeaturesLayout& featuresLayout) {
+        TVector<ui32> embeddingFeatureIndices;
+        featuresLayout.IterateOverAvailableFeatures<EFeatureType::Embedding>(
+            [&embeddingFeatureIndices](TEmbeddingFeatureIdx embeddingFeatureIdx) {
+                embeddingFeatureIndices.push_back(embeddingFeatureIdx.Idx);
+            }
+        );
+        return embeddingFeatureIndices;
+    }
+
     TQuantizedFeaturesInfo::TQuantizedFeaturesInfo(
         const TFeaturesLayout& featuresLayout,
         TConstArrayRef<ui32> ignoredFeatures,
         NCatboostOptions::TBinarizationOptions commonFloatFeaturesBinarization,
         TMap<ui32, NCatboostOptions::TBinarizationOptions> perFloatFeatureQuantization,
         const NCatboostOptions::TTextProcessingOptions& textFeaturesProcessing,
+        const NCatboostOptions::TEmbeddingProcessingOptions& embeddingProcessingOptions,
         bool floatFeaturesAllowNansInTestOnly)
         : FeaturesLayout(MakeIntrusive<TFeaturesLayout>(featuresLayout))
         , CommonFloatFeaturesBinarization(std::move(commonFloatFeaturesBinarization))
@@ -102,16 +154,29 @@ namespace NCB {
         , CatFeaturesPerfectHash(featuresLayout.GetCatFeatureCount())
         , RuntimeTextProcessingOptions(GetAvailableTextFeatureIndices(featuresLayout), textFeaturesProcessing)
         , TextDigitizers()
+        , EmbeddingEstimatorsOptions(GetAvailableEmbeddingFeatureIndices(featuresLayout), embeddingProcessingOptions)
     {
         FeaturesLayout->IgnoreExternalFeatures(ignoredFeatures);
     }
 
+    void TQuantizedFeaturesInfo::Init(TFeaturesLayout* featuresLayout) {
+        FeaturesLayout = MakeIntrusive<TFeaturesLayout>(std::move(*featuresLayout));
+    }
+
 
     bool TQuantizedFeaturesInfo::EqualTo(const TQuantizedFeaturesInfo& rhs, bool ignoreSparsity) const {
-        return FeaturesLayout->EqualTo(*rhs.FeaturesLayout, ignoreSparsity) &&
+        return EqualWithoutOptionsTo(rhs, ignoreSparsity) &&
             (CommonFloatFeaturesBinarization == rhs.CommonFloatFeaturesBinarization) &&
-            (PerFloatFeatureQuantization == rhs.PerFloatFeatureQuantization) &&
-            ApproximatelyEqualQuantization(Quantization, rhs.Quantization) && (NanModes == rhs.NanModes) &&
+            (PerFloatFeatureQuantization == rhs.PerFloatFeatureQuantization);
+    }
+
+    bool TQuantizedFeaturesInfo::EqualWithoutOptionsTo(
+        const TQuantizedFeaturesInfo& rhs,
+        bool ignoreSparsity
+    ) const {
+        return FeaturesLayout->EqualTo(*rhs.FeaturesLayout, ignoreSparsity) &&
+            ApproximatelyEqualQuantization(Quantization, rhs.Quantization) &&
+            EqualNanModesWithDefault(NanModes, rhs.NanModes) &&
             (CatFeaturesPerfectHash == rhs.CatFeaturesPerfectHash);
     }
 
@@ -129,53 +194,6 @@ namespace NCB {
         return 0;
     }
 
-    bool TQuantizedFeaturesInfo::IsSupersetOf(const TQuantizedFeaturesInfo& rhs) const {
-        if (this == &rhs) { // shortcut
-            return true;
-        }
-        if (!FeaturesLayout->IsSupersetOf(*rhs.FeaturesLayout)) {
-            return false;
-        }
-        if (CommonFloatFeaturesBinarization != rhs.CommonFloatFeaturesBinarization) {
-            return false;
-        }
-
-        for (const auto& [floatFeatureIdx, binarization] : rhs.PerFloatFeatureQuantization) {
-            const auto it = PerFloatFeatureQuantization.find(floatFeatureIdx);
-            if (it == PerFloatFeatureQuantization.end()) {
-                if (binarization != CommonFloatFeaturesBinarization) {
-                    return false;
-                }
-            } else if (binarization != it->second) {
-                return false;
-            }
-        }
-
-        constexpr auto EPS = 1.e-6f;
-
-        for (const auto& [floatFeatureIdx, quantization] : rhs.Quantization) {
-            const auto it = Quantization.find(floatFeatureIdx);
-            if (it == Quantization.end()) {
-                return false;
-            }
-            if (!ApproximatelyEqual<float>(quantization.Borders, it->second.Borders, EPS)) {
-                return false;
-            }
-        }
-
-        for (const auto& [floatFeatureIdx, nanMode] : rhs.NanModes) {
-            const auto it = NanModes.find(floatFeatureIdx);
-            if (it == NanModes.end()) {
-                return false;
-            }
-            if (nanMode != it->second) {
-                return false;
-            }
-        }
-
-        return CatFeaturesPerfectHash.IsSupersetOf(rhs.CatFeaturesPerfectHash);
-    }
-
     ENanMode TQuantizedFeaturesInfo::ComputeNanMode(const TFloatValuesHolder& feature) const {
         auto& floatFeaturesBinarization = GetFloatFeatureBinarization(feature.GetId());
         if (floatFeaturesBinarization.NanMode == ENanMode::Forbidden) {
@@ -186,17 +204,17 @@ namespace NCB {
 
         if (const auto* denseData = dynamic_cast<const TFloatArrayValuesHolder*>(&feature)) {
             hasNans
-                = denseData->GetData()->Find([] (size_t /*idx*/, float value) { return IsNan(value); });
+                = denseData->GetData()->Find([] (size_t /*idx*/, float value) { return std::isnan(value); });
         } else if (const auto* sparseData = dynamic_cast<const TFloatSparseValuesHolder*>(&feature)) {
             const TConstPolymorphicValuesSparseArray<float, ui32>& sparseArray = sparseData->GetData();
-            if (IsNan(sparseArray.GetDefaultValue())) {
+            if (std::isnan(sparseArray.GetDefaultValue())) {
                 hasNans = true;
             } else {
                 hasNans = false;
                 auto blockIterator = sparseArray.GetNonDefaultValues().GetImpl().GetBlockIterator();
                 while (auto block = blockIterator->Next()) {
                     for (auto element : block) {
-                        if (IsNan(element)) {
+                        if (std::isnan(element)) {
                             hasNans = true;
                             break;
                         }
@@ -247,7 +265,7 @@ namespace NCB {
     }
 
     TPerfectHashedToHashedCatValuesMap TQuantizedFeaturesInfo::CalcPerfectHashedToHashedCatValuesMap(
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     ) const {
         // load once and then work with all features in parallel
         LoadCatFeaturePerfectHashToRam();
@@ -307,6 +325,49 @@ namespace NCB {
         checkSum = UpdateCheckSum(checkSum, Quantization);
         checkSum = UpdateCheckSum(checkSum, NanModes);
         return checkSum ^ CatFeaturesPerfectHash.CalcCheckSum();
+    }
+
+
+    TPoolQuantizationSchema GetPoolQuantizationSchema(
+        const TQuantizedFeaturesInfo& quantizedFeaturesInfo,
+        const TVector<NJson::TJsonValue>& classLabels
+    ) {
+        const auto featuresLayout = quantizedFeaturesInfo.GetFeaturesLayout();
+        TVector<TVector<float>> borders;
+        TVector<ENanMode> nanModes;
+        TVector<size_t> floatFeatureIndices;
+        TVector<size_t> catFeatureIndices;
+        for (auto flatFeatureIdx : xrange(featuresLayout->GetExternalFeatureCount())) {
+            const auto featureMetaInfo = featuresLayout->GetExternalFeatureMetaInfo(flatFeatureIdx);
+            if (featureMetaInfo.Type == EFeatureType::Float) {
+                const auto floatFeatureIdx = featuresLayout->GetInternalFeatureIdx<EFeatureType::Float>(
+                    flatFeatureIdx);
+                const auto featureBorders =
+                    quantizedFeaturesInfo.HasBorders(floatFeatureIdx) ?
+                        quantizedFeaturesInfo.GetBorders(floatFeatureIdx) : TVector<float>();
+                const auto featureNanMode =
+                    quantizedFeaturesInfo.HasNanMode(floatFeatureIdx) ?
+                        quantizedFeaturesInfo.GetNanMode(floatFeatureIdx) : ENanMode::Forbidden;
+                borders.push_back(featureBorders);
+                nanModes.push_back(featureNanMode);
+                floatFeatureIndices.push_back(flatFeatureIdx);
+            } else if (featureMetaInfo.Type == EFeatureType::Categorical) {
+                catFeatureIndices.push_back(flatFeatureIdx);
+            } else {
+                CB_ENSURE_INTERNAL(
+                    false,
+                    "building quantization results is supported only for numerical and categorical features"
+                );
+            }
+        }
+        return TPoolQuantizationSchema {
+            std::move(floatFeatureIndices),
+            std::move(borders),
+            std::move(nanModes),
+            classLabels,
+            std::move(catFeatureIndices),
+            TVector<TMap<ui32, TValueWithCount>>() // TODO(akhropov): build CatFeaturesPerfectHash
+        };
     }
 
 }

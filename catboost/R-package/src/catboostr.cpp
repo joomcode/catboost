@@ -1,21 +1,22 @@
+#include <catboost/libs/cat_feature/cat_feature.h>
 #include <catboost/libs/data/data_provider.h>
 #include <catboost/libs/data/data_provider_builders.h>
 #include <catboost/libs/data/load_data.h>
-#include <catboost/private/libs/algo/apply.h>
-#include <catboost/private/libs/algo/helpers.h>
-#include <catboost/libs/train_lib/train_model.h>
-#include <catboost/libs/train_lib/cross_validation.h>
 #include <catboost/libs/eval_result/eval_helpers.h>
 #include <catboost/libs/fstr/calc_fstr.h>
-#include <catboost/private/libs/documents_importance/docs_importance.h>
-#include <catboost/private/libs/documents_importance/enums.h>
-#include <catboost/libs/model/model.h>
-#include <catboost/libs/logging/logging.h>
-#include <catboost/private/libs/options/cross_validation_params.h>
 #include <catboost/libs/helpers/int_cast.h>
 #include <catboost/libs/helpers/mem_usage.h>
-#include <catboost/libs/cat_feature/cat_feature.h>
+#include <catboost/libs/logging/logging.h>
+#include <catboost/libs/model/model.h>
 #include <catboost/libs/model/model_export/model_exporter.h>
+#include <catboost/libs/model/utils.h>
+#include <catboost/libs/train_lib/train_model.h>
+#include <catboost/libs/train_lib/cross_validation.h>
+#include <catboost/private/libs/algo/apply.h>
+#include <catboost/private/libs/algo/helpers.h>
+#include <catboost/private/libs/documents_importance/docs_importance.h>
+#include <catboost/private/libs/documents_importance/enums.h>
+#include <catboost/private/libs/options/cross_validation_params.h>
 
 #include <util/generic/cast.h>
 #include <util/generic/mem_copy.h>
@@ -118,6 +119,7 @@ SEXP CatBoostCreateFromFile_R(SEXP poolFileParam,
                               SEXP pairsFileParam,
                               SEXP featureNamesFileParam,
                               SEXP delimiterParam,
+                              SEXP numVectorDelimiterParam,
                               SEXP hasHeaderParam,
                               SEXP threadCountParam,
                               SEXP verboseParam) {
@@ -126,8 +128,11 @@ SEXP CatBoostCreateFromFile_R(SEXP poolFileParam,
 
     NCatboostOptions::TColumnarPoolFormatParams columnarPoolFormatParams;
     columnarPoolFormatParams.DsvFormat =
-        TDsvFormatOptions{static_cast<bool>(asLogical(hasHeaderParam)),
-                               CHAR(asChar(delimiterParam))[0]};
+        TDsvFormatOptions{
+            static_cast<bool>(asLogical(hasHeaderParam)),
+            CHAR(asChar(delimiterParam))[0],
+            CHAR(asChar(numVectorDelimiterParam))[0]
+        };
 
     TStringBuf cdPathWithScheme(CHAR(asChar(cdFileParam)));
     if (!cdPathWithScheme.empty()) {
@@ -140,7 +145,7 @@ SEXP CatBoostCreateFromFile_R(SEXP poolFileParam,
     TDataProviderPtr poolPtr = ReadDataset(/*taskType*/Nothing(),
                                            TPathWithScheme(CHAR(asChar(poolFileParam)), "dsv"),
                                            !pairsPathWithScheme.empty() ?
-                                               TPathWithScheme(pairsPathWithScheme, "dsv") : TPathWithScheme(),
+                                               TPathWithScheme(pairsPathWithScheme, "dsv-flat") : TPathWithScheme(),
                                            /*groupWeightsFilePath=*/TPathWithScheme(),
                                            /*timestampsFilePath=*/TPathWithScheme(),
                                            /*baselineFilePath=*/TPathWithScheme(),
@@ -205,6 +210,7 @@ SEXP CatBoostCreateFromMatrix_R(SEXP matrixParam,
             dataColumns,
             ToUnsigned(GetVectorFromSEXP<int>(catFeaturesParam)),
             TVector<ui32>{}, // TODO(d-kruchinin) support text features in R
+            TVector<ui32>{}, // TODO(akhropov) support embedding features in R
             featureId);
 
         metaInfo.TargetType = targetColumns ? ERawTargetType::Float : ERawTargetType::None;
@@ -295,7 +301,7 @@ SEXP CatBoostCreateFromMatrix_R(SEXP matrixParam,
                     weight
                 );
             }
-            visitor->SetPairs(std::move(pairs));
+            visitor->SetPairs(TRawPairsData(std::move(pairs)));
         }
         visitor->Finish();
     };
@@ -796,6 +802,17 @@ SEXP CatBoostGetModelParams_R(SEXP modelParam) {
     return result;
 }
 
+
+SEXP CatBoostGetPlainParams_R(SEXP modelParam) {
+    SEXP result = NULL;
+    R_API_BEGIN();
+    TFullModelHandle model = reinterpret_cast<TFullModelHandle>(R_ExternalPtrAddr(modelParam));
+    result = PROTECT(mkString(ToString(GetPlainJsonWithAllOptions(*model)).c_str()));
+    R_API_END();
+    UNPROTECT(1);
+    return result;
+}
+
 SEXP CatBoostCalcRegularFeatureEffect_R(SEXP modelParam, SEXP poolParam, SEXP fstrTypeParam, SEXP threadCountParam) {
     SEXP result = NULL;
     SEXP resultDim = NULL;
@@ -815,6 +832,7 @@ SEXP CatBoostCalcRegularFeatureEffect_R(SEXP modelParam, SEXP poolParam, SEXP fs
         TVector<TVector<TVector<double>>> fstr = GetFeatureImportancesMulti(fstrType,
                                                                             *model,
                                                                             pool,
+                                                                            /*referenceDataset*/ nullptr,
                                                                             threadCount,
                                                                             EPreCalcShapValues::Auto,
                                                                             verbose);
@@ -840,6 +858,7 @@ SEXP CatBoostCalcRegularFeatureEffect_R(SEXP modelParam, SEXP poolParam, SEXP fs
         TVector<TVector<double>> fstr = GetFeatureImportances(fstrType,
                                                               *model,
                                                               pool,
+                                                              /*referenceDataset*/ nullptr,
                                                               threadCount,
                                                               EPreCalcShapValues::Auto,
                                                               verbose);

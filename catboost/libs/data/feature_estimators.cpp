@@ -3,6 +3,18 @@
 #include <catboost/libs/helpers/exception.h>
 
 #include <util/generic/xrange.h>
+#include <util/stream/output.h>
+
+
+template <>
+void Out<NCB::TEstimatedFeatureId>(IOutputStream& out, const NCB::TEstimatedFeatureId& feature) {
+    out << "estimatorId=" << feature.EstimatorId.Id;
+    if (feature.EstimatorId.IsOnline) {
+        out << "(online)";
+    }
+    out << ", id=" << feature.LocalFeatureId;
+}
+
 
 namespace NCB {
 
@@ -41,6 +53,27 @@ namespace NCB {
         );
         TEstimatorId estimatorId = EstimatorGuidToFlatId.at(guid);
         return EstimatorToSourceFeatures.at(estimatorId);
+    }
+
+    TEstimatorSourceId TFeatureEstimators::GetEstimatorSourceFeatureIdx(TEstimatorId estimatorId) const {
+        return EstimatorToSourceFeatures.at(estimatorId);
+    }
+
+    EFeatureType TFeatureEstimators::GetEstimatorSourceType(TEstimatorId estimatorId) const {
+        if (estimatorId.IsOnline) {
+            return OnlineFeatureEstimators.at(estimatorId.Id)->GetSourceType();
+        } else {
+            return FeatureEstimators.at(estimatorId.Id)->GetSourceType();
+        }
+    }
+
+    EFeatureType TFeatureEstimators::GetEstimatorSourceType(const TGuid& guid) const {
+        CB_ENSURE(
+            EstimatorGuidToFlatId.contains(guid),
+            "There is no estimator with " << LabeledOutput(guid)
+        );
+        TEstimatorId estimatorId = EstimatorGuidToFlatId.at(guid);
+        return GetEstimatorSourceType(estimatorId);
     }
 
     void TFeatureEstimators::RebuildInnerData() {

@@ -9,7 +9,7 @@
 #include <catboost/libs/model/model.h>
 #include <catboost/private/libs/options/json_helper.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/folder/path.h>
 #include <util/generic/array_ref.h>
@@ -36,7 +36,7 @@ TMetricsPlotCalcer::TMetricsPlotCalcer(
     ui32 last,
     ui32 step,
     ui32 processIterationStep,
-    NPar::TLocalExecutor* executor)
+    NPar::ILocalExecutor* executor)
     : Model(model)
     , Executor(*executor)
     , First(first)
@@ -466,7 +466,7 @@ TMetricsPlotCalcer CreateMetricCalcer(
     int processedIterationsStep,
     const TString& tmpDir,
     const TVector<THolder<IMetric>>& metrics,
-    NPar::TLocalExecutor* executor
+    NPar::ILocalExecutor* executor
 ) {
     if (model.ModelInfo.contains("params") &&
         ReadTJsonValue(model.ModelInfo.at("params")).Has("loss_function"))

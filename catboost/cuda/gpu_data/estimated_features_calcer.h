@@ -9,19 +9,20 @@
 #include <catboost/cuda/cuda_lib/device_subtasks_helper.h>
 
 #include <catboost/private/libs/ctr_description/ctr_config.h>
+#include <catboost/libs/data/feature_estimators.h>
 
 namespace NCatboostCuda {
 
     class TEstimatorsExecutor {
     public:
         using TBinarizedFeatureVisitor =  std::function<void(TConstArrayRef<ui8>, //binarizedFeature
-                                                             TEstimatedFeature,
+                                                             NCB::TEstimatedFeatureId,
                                                              ui8)>; //binCount
 
         TEstimatorsExecutor(TBinarizedFeaturesManager& featuresManager,
                             const NCB::TFeatureEstimators& featureEstimators,
                             const TDataPermutation& permutation,
-                            NPar::TLocalExecutor* localExecutor)
+                            NPar::ILocalExecutor* localExecutor)
             : FeaturesManager(featuresManager)
             , Estimators(featureEstimators)
             , Permutation(permutation)
@@ -44,6 +45,6 @@ namespace NCatboostCuda {
         const NCB::TFeatureEstimators& Estimators;
         const TDataPermutation& Permutation;
         TVector<ui32> PermutationIndices;
-        NPar::TLocalExecutor* LocalExecutor;
+        NPar::ILocalExecutor* LocalExecutor;
     };
 }

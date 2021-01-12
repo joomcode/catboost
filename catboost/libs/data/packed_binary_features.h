@@ -2,9 +2,9 @@
 
 #include <catboost/libs/helpers/exception.h>
 
-#include <library/binsaver/bin_saver.h>
-#include <library/dbg_output/dump.h>
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/binsaver/bin_saver.h>
+#include <library/cpp/dbg_output/dump.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/array_ref.h>
 #include <util/generic/cast.h>
@@ -111,13 +111,13 @@ namespace NCB {
         TConstArrayRef<TSrcElement> srcFeature,
         ui8 bitIdx,
         bool needToClearDstBits,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         TArrayRef<TBinaryFeaturesPack>* dstFeaturePacks) {
 
         CheckBitIdxForPackedBinaryIndex(bitIdx);
 
         int objectCount = SafeIntegerCast<int>(srcFeature.size());
-        NPar::TLocalExecutor::TExecRangeParams rangeParams(0, objectCount);
+        NPar::ILocalExecutor::TExecRangeParams rangeParams(0, objectCount);
         rangeParams.SetBlockCount(localExecutor->GetThreadCount() + 1);
 
         localExecutor->ExecRangeWithThrow(

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/algorithm.h>
 #include <util/generic/vector.h>
@@ -65,7 +65,7 @@ namespace NCB {
     inline void ParallelMergeSort(
         TCompare cmp,
         TVector<TElement>* elements,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         TVector<TElement>* buf = nullptr
     ) {
         if (elements->size() <= 1u) {

@@ -12,6 +12,7 @@
 #include "yetirank_helpers.h"
 
 #include <catboost/libs/data/data_provider.h>
+#include <catboost/libs/helpers/vector_helpers.h>
 #include <catboost/libs/helpers/parallel_tasks.h>
 #include <catboost/libs/helpers/quantile.h>
 #include <catboost/libs/logging/logging.h>
@@ -19,6 +20,7 @@
 #include <catboost/libs/metrics/metric.h>
 #include <catboost/libs/metrics/optimal_const_for_loss.h>
 #include <catboost/private/libs/algo/approx_calcer/approx_calcer_multi.h>
+#include <catboost/private/libs/algo/approx_calcer/eval_additive_metric_with_leaves.h>
 #include <catboost/private/libs/algo/approx_calcer/gradient_walker.h>
 #include <catboost/private/libs/algo_helpers/approx_calcer_helpers.h>
 #include <catboost/private/libs/algo_helpers/langevin_utils.h>
@@ -29,7 +31,7 @@
 #include <catboost/private/libs/options/loss_description.h>
 #include <catboost/private/libs/functools/forward_as_const.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/algorithm.h>
 #include <util/generic/ymath.h>
@@ -57,7 +59,7 @@ inline void UpdateApproxKernel(const double* leafDeltas, const TIndexType* indic
 
 template <bool StoreExpApprox>
 inline void UpdateApproxBlock(
-    const NPar::TLocalExecutor::TExecRangeParams& params,
+    const NPar::ILocalExecutor::TExecRangeParams& params,
     const double* leafDeltas,
     const TIndexType* indices,
     int blockIdx,
@@ -78,7 +80,7 @@ void UpdateApproxDeltas(
     bool storeExpApprox,
     const TVector<TIndexType>& indices,
     int docCount,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     TVector<double>* leafDeltas,
     TVector<double>* deltasDimension) {
     ExpApproxIf(storeExpApprox, *leafDeltas);
@@ -87,7 +89,7 @@ void UpdateApproxDeltas(
     const TIndexType* indicesData = indices.data();
     const double* leafDeltasData = leafDeltas->data();
 
-    NPar::TLocalExecutor::TExecRangeParams blockParams(0, docCount);
+    NPar::ILocalExecutor::TExecRangeParams blockParams(0, docCount);
     blockParams.SetBlockSize(AdjustBlockSize(docCount, /*regularBlockSize*/1000));
 
     const auto getUpdateApproxBlockLambda = [&](auto boolConst) -> std::function<void(int)> {
@@ -118,7 +120,7 @@ static void CalcApproxDers(
     int sampleFinish,
     TArrayRef<TDers> approxDers,
     TLearnContext* ctx) {
-    NPar::TLocalExecutor::TExecRangeParams blockParams(sampleStart, sampleFinish);
+    NPar::ILocalExecutor::TExecRangeParams blockParams(sampleStart, sampleFinish);
     blockParams.SetBlockSize(AdjustBlockSize(sampleFinish - sampleStart, APPROX_BLOCK_SIZE));
     ctx->LocalExecutor->ExecRangeWithThrow(
         [&](int blockId) {
@@ -166,10 +168,10 @@ static void CalcLeafDers(
     int sampleCount,
     bool recalcLeafWeights,
     ELeavesEstimation estimationMethod,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     TArrayRef<TSum> leafDers,
     TArrayRef<TDers> weightedDers) {
-    NPar::TLocalExecutor::TExecRangeParams blockParams(0, sampleCount);
+    NPar::ILocalExecutor::TExecRangeParams blockParams(0, sampleCount);
     blockParams.SetBlockCount(AdjustBlockCountLimit(sampleCount, CB_THREAD_LIMIT));
 
     const int leafCount = leafDers.size();
@@ -275,7 +277,7 @@ void CalcLeafDersSimple(
     ELeavesEstimation estimationMethod,
     const NCatboostOptions::TCatBoostOptions& params,
     ui64 randomSeed,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     TVector<TSum>* leafDers,
     TArray2D<double>* pairwiseBuckets,
     TVector<TDers>* scratchDers) {
@@ -481,7 +483,7 @@ static void UpdateApproxDeltasHistorically(
     float l2Regularizer,
     const NCatboostOptions::TCatBoostOptions& params,
     ui64 randomSeed,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     TLearnContext* ctx,
     TArrayRef<TSum> leafDers,
     TVector<double>* approxDeltas,
@@ -569,11 +571,8 @@ static void CalcExactLeafDeltas(
 
     Y_ASSERT(leafCount == leafDeltas->size());
     for (size_t i = 0; i < leafCount; i++) {
-        Y_ASSERT(i < (*leafDeltas).size());
-        Y_ASSERT(i < leafSamples.size());
-        Y_ASSERT(i < leafWeights.size());
         double& leafDelta = (*leafDeltas)[i];
-        leafDelta = *NCB::CalcOptimumConstApprox(lossDescription, leafSamples[i], leafWeights[i]);
+        leafDelta = *NCB::CalcOneDimensionalOptimumConstApprox(lossDescription, leafSamples[i], leafWeights[i]);
     }
 }
 
@@ -643,12 +642,21 @@ static void CalcApproxDeltaSimple(
             ctx->Params.ObliviousTreeOptions->L2Reg,
             fold.GetSumWeight(),
             fold.GetLearnSampleCount());
-        AddLangevinNoiseToLeafDerivativesSum(
-            ctx->Params.BoostingOptions->DiffusionTemperature,
-            ctx->Params.BoostingOptions->LearningRate,
-            scaledL2Regularizer,
-            randomSeed,
-            &leafDers);
+        if (estimationMethod == ELeavesEstimation::Gradient) {
+            AddLangevinNoiseToLeafDerivativesSum(
+                ctx->Params.BoostingOptions->DiffusionTemperature,
+                ctx->Params.BoostingOptions->LearningRate,
+                scaledL2Regularizer,
+                randomSeed,
+                &leafDers);
+        } else if (estimationMethod == ELeavesEstimation::Newton) {
+            AddLangevinNoiseToLeafNewtonSum(
+                ctx->Params.BoostingOptions->DiffusionTemperature,
+                ctx->Params.BoostingOptions->LearningRate,
+                scaledL2Regularizer,
+                randomSeed,
+                &leafDers);
+        }
         if (treeHasMonotonicConstraints) {
             CalcMonotonicLeafDeltasSimple(
                 leafDers,
@@ -712,26 +720,49 @@ static void CalcApproxDeltaSimple(
     TVector<THolder<IMetric>> lossFunction;
     CreateBacktrackingObjective(*ctx, &haveBacktrackingObjective, &minimizationSign, &lossFunction);
 
-    const auto lossCalcerFunc = [&](const TVector<TVector<double>>& approxDeltas) {
+    TVector<TVector<double>> localSumLeafDeltas;
+    if (sumLeafDeltas == nullptr) {
+        ResizeRank2(/*approxDimension*/1, leafCount, localSumLeafDeltas);
+        sumLeafDeltas = &localSumLeafDeltas;
+    }
+
+    const auto lossCalcerFunc = [&](const TVector<TVector<double>>& approxDeltas, const TVector<TVector<double>>& leafDeltas) {
         TConstArrayRef<TQueryInfo> bodyTailQueryInfo(fold.LearnQueriesInfo.begin(), bt.BodyQueryFinish);
         TConstArrayRef<float> bodyTailTarget(fold.LearnTarget[0].begin(), bt.BodyFinish);
-        const auto& additiveStats = EvalErrors(
-            bt.Approx,
-            approxDeltas,
-            error.GetIsExpApprox(),
-            bodyTailTarget,
-            fold.GetLearnWeights(),
-            bodyTailQueryInfo,
-            *lossFunction[0],
-            ctx->LocalExecutor);
+        TMetricHolder additiveStats;
+        if (!ctx->Params.BoostingOptions->ApproxOnFullHistory) {
+            TVector<TVector<double>> localLeafDeltas(*sumLeafDeltas);
+            AddElementwise(leafDeltas, &localLeafDeltas);
+            additiveStats = EvalErrorsWithLeaves(
+                To2DConstArrayRef<double>(bt.Approx),
+                To2DConstArrayRef<double>(localLeafDeltas),
+                indices,
+                error.GetIsExpApprox(),
+                bodyTailTarget,
+                fold.GetLearnWeights(),
+                bodyTailQueryInfo,
+                *lossFunction[0],
+                ctx->LocalExecutor);
+            return minimizationSign * lossFunction[0]->GetFinalError(additiveStats);
+        } else {
+            Y_ASSERT(!IsPairwiseScoring(ctx->Params.LossFunctionDescription->GetLossFunction()));
+            TVector<TVector<double>> localApproxDeltas;
+            CopyApprox(approxDeltas, &localApproxDeltas, ctx->LocalExecutor);
+            approxUpdaterFunc(leafDeltas, &localApproxDeltas);
+            additiveStats = EvalErrors(
+                To2DConstArrayRef<double>(bt.Approx),
+                To2DConstArrayRef<double>(localApproxDeltas),
+                error.GetIsExpApprox(),
+                bodyTailTarget,
+                fold.GetLearnWeights(),
+                bodyTailQueryInfo,
+                *lossFunction[0],
+                ctx->LocalExecutor);
+        }
         return minimizationSign * lossFunction[0]->GetFinalError(additiveStats);
     };
 
-    const auto approxCopyFunc = [ctx](const TVector<TVector<double>>& src, TVector<TVector<double>>* dst) {
-        CopyApprox(src, dst, ctx->LocalExecutor);
-    };
-
-    GradientWalker</*IsLeafwise*/false>(
+    FastGradientWalker</*IsLeafwise*/false>(
         /*isTrivialWalker*/ !haveBacktrackingObjective,
         gradientIterations,
         leafCount,
@@ -739,7 +770,6 @@ static void CalcApproxDeltaSimple(
         leafUpdaterFunc,
         approxUpdaterFunc,
         lossCalcerFunc,
-        approxCopyFunc,
         approxDeltas,
         sumLeafDeltas
     );
@@ -863,10 +893,11 @@ static void CalcLeafValuesSimple(
     TVector<THolder<IMetric>> lossFunction;
     CreateBacktrackingObjective(*ctx, &haveBacktrackingObjective, &minimizationSign, &lossFunction);
 
-    const auto lossCalcerFunc = [&](const TVector<TVector<double>>& approx) {
-        const auto& additiveStats = EvalErrors(
-            approx,
-            /*approxDelta*/ {},
+    const auto lossCalcerFunc = [&](const TVector<TVector<double>>& approx, const TVector<TVector<double>>& leafDeltas) {
+        const auto& additiveStats = EvalErrorsWithLeaves(
+            To2DConstArrayRef<double>(approx),
+            To2DConstArrayRef<double>(leafDeltas),
+            indices,
             error.GetIsExpApprox(),
             fold.LearnTarget[0],
             fold.GetLearnWeights(),
@@ -876,11 +907,7 @@ static void CalcLeafValuesSimple(
         return minimizationSign * lossFunction[0]->GetFinalError(additiveStats);
     };
 
-    const auto approxCopyFunc = [ctx](const TVector<TVector<double>>& src, TVector<TVector<double>>* dst) {
-        CopyApprox(src, dst, ctx->LocalExecutor);
-    };
-
-    GradientWalker</*IsLeafwise*/ false>(
+    FastGradientWalker</*IsLeafwise*/ false>(
         /*isTrivialWalker*/ !haveBacktrackingObjective,
         gradientIterations,
         leafCount,
@@ -888,7 +915,6 @@ static void CalcLeafValuesSimple(
         leafUpdaterFunc,
         approxUpdaterFunc,
         lossCalcerFunc,
-        approxCopyFunc,
         &approxes,
         sumLeafDeltas
     );
@@ -933,7 +959,7 @@ inline void CalcLeafValuesMultiForAllLeaves(
 }
 
 void CalcLeafValues(
-    const NCB::TTrainingForCPUDataProviders& data,
+    const NCB::TTrainingDataProviders& data,
     const IDerCalcer& error,
     const TFold& fold,
     const TVariant<TSplitTree, TNonSymmetricTreeStructure>& tree,
@@ -941,7 +967,7 @@ void CalcLeafValues(
     TVector<TVector<double>>* leafDeltas,
     TVector<TIndexType>* indices) {
 
-    *indices = BuildIndices(fold, tree, data.Learn, data.Test, ctx->LocalExecutor);
+    *indices = BuildIndices(fold, tree, data, EBuildIndicesDataParts::All, ctx->LocalExecutor);
     const int approxDimension = ctx->LearnProgress->AveragingFold.GetApproxDimension();
     Y_VERIFY(fold.GetLearnSampleCount() == data.Learn->GetObjectCount());
     const int leafCount = GetLeafCount(tree);
@@ -960,7 +986,7 @@ void CalcLeafValues(
 
 // output is permuted (learnSampleCount samples are permuted by LearnPermutation, test is indexed directly)
 void CalcApproxForLeafStruct(
-    const NCB::TTrainingForCPUDataProviders& data,
+    const NCB::TTrainingDataProviders& data,
     const IDerCalcer& error,
     const TFold& fold,
     const TVariant<TSplitTree, TNonSymmetricTreeStructure>& tree,
@@ -968,7 +994,12 @@ void CalcApproxForLeafStruct(
     TLearnContext* ctx,
     TVector<TVector<TVector<double>>>* approxesDelta // [bodyTailId][approxDim][docIdxInPermuted]
 ) {
-    const TVector<TIndexType> indices = BuildIndices(fold, tree, data.Learn, /*testData*/ {}, ctx->LocalExecutor);
+    const TVector<TIndexType> indices = BuildIndices(
+        fold,
+        tree,
+        data,
+        EBuildIndicesDataParts::LearnOnly,
+        ctx->LocalExecutor);
     const int approxDimension = ctx->LearnProgress->ApproxDimension;
     const int leafCount = GetLeafCount(tree);
     const auto treeMonotoneConstraints = GetTreeMonotoneConstraints(

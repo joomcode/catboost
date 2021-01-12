@@ -2,6 +2,8 @@ UNITTEST(catboost_ut)
 
 
 
+SIZE(MEDIUM)
+
 SRCS(
     apply_ut.cpp
     train_ut.cpp
@@ -20,7 +22,7 @@ PEERDIR(
     catboost/libs/helpers
     catboost/libs/model/ut/lib
     catboost/libs/train_lib
-    library/threading/local_executor
+    library/cpp/threading/local_executor
 )
 
 END()

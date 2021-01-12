@@ -12,7 +12,7 @@ namespace NCatboostCuda {
                                                                    const TPairwiseOptimizationSubsets& subsets,
                                                                    const NCatboostOptions::TObliviousTreeLearnerOptions& treeConfig,
                                                                    TRandom& random) {
-        return new TComputePairwiseScoresHelper(policy,
+        return MakeHolder<TComputePairwiseScoresHelper>(policy,
                                                 dataSet,
                                                 subsets,
                                                 random,
@@ -46,7 +46,7 @@ namespace NCatboostCuda {
             , TreeConfig(treeConfig)
             , StoreTempResults(storeSolverTempResults)
         {
-            for (auto policy : GetAllGroupingPolicies()) {
+            for (auto policy : GetEnumAllValues<NCatboostCuda::EFeaturesGroupingPolicy>()) {
                 if (Features.GetGridSize(policy)) {
                     Helpers[policy] = CreateScoreHelper(policy,
                                                         Features,

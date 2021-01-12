@@ -4,12 +4,13 @@
 #include "enums.h"
 #include "binarization_options.h"
 #include "text_processing_options.h"
+#include "runtime_embedding_options.h"
 #include "unimplemented_aware_option.h"
 
 #include <catboost/libs/helpers/sparse_array.h>
 
-#include <library/grid_creator/binarization.h>
-#include <library/json/json_value.h>
+#include <library/cpp/grid_creator/binarization.h>
+#include <library/cpp/json/json_value.h>
 
 #include <util/generic/map.h>
 #include <util/generic/maybe.h>
@@ -36,8 +37,10 @@ namespace NCatboostOptions {
         TOption<TBinarizationOptions> FloatFeaturesBinarization;
         TOption<TMap<ui32, TBinarizationOptions>> PerFloatFeatureQuantization;
         TOption<TTextProcessingOptions> TextProcessingOptions;
+        TOption<TEmbeddingProcessingOptions> EmbeddingProcessingOptions;
         TOption<ui32> ClassesCount;
         TOption<TVector<float>> ClassWeights;
+        TOption<EAutoClassWeightsType> AutoClassWeights;
         TOption<TVector<NJson::TJsonValue>> ClassLabels; // can be Integers, Floats or Strings
 
         TOption<float> DevDefaultValueFractionToEnableSparseStorage; // 0 means sparse storage is disabled
@@ -51,6 +54,10 @@ namespace NCatboostOptions {
     };
 
     constexpr float GetDefaultTargetBorder() {
+        return 0.5;
+    }
+
+    constexpr float GetDefaultPredictionBorder() {
         return 0.5;
     }
 }

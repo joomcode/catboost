@@ -1,9 +1,10 @@
 #include "data_processing_options.h"
 #include "json_helper.h"
 #include "restrictions.h"
+#include "metric_options.h"
 
 #include <catboost/libs/helpers/exception.h>
-
+#include <util/string/cast.h>
 
 NCatboostOptions::TDataProcessingOptions::TDataProcessingOptions(ETaskType type)
     : IgnoredFeatures("ignored_features", TVector<ui32>())
@@ -14,12 +15,14 @@ NCatboostOptions::TDataProcessingOptions::TDataProcessingOptions(ETaskType type)
           EBorderSelectionType::GreedyLogSum,
           type == ETaskType::GPU ? 128 : 254,
           ENanMode::Min,
-          type
+          200000
       ))
       , PerFloatFeatureQuantization("per_float_feature_quantization", TMap<ui32, TBinarizationOptions>())
       , TextProcessingOptions("text_processing_options", TTextProcessingOptions())
+      , EmbeddingProcessingOptions("embedding_processing_options", TEmbeddingProcessingOptions())
       , ClassesCount("classes_count", 0)
       , ClassWeights("class_weights", TVector<float>())
+      , AutoClassWeights("auto_class_weights", EAutoClassWeightsType::None)
       , ClassLabels("class_names", TVector<NJson::TJsonValue>()) // "class_names" is used for compatibility
       , DevDefaultValueFractionToEnableSparseStorage("dev_default_value_fraction_for_sparse", 0.83f)
       , DevSparseArrayIndexingType("dev_sparse_array_indexing", NCB::ESparseArrayIndexingType::Indices)
@@ -35,7 +38,7 @@ void NCatboostOptions::TDataProcessingOptions::Load(const NJson::TJsonValue& opt
     CheckedLoad(
         options, &IgnoredFeatures, &HasTimeFlag, &AllowConstLabel, &TargetBorder,
         &FloatFeaturesBinarization, &PerFloatFeatureQuantization, &TextProcessingOptions,
-        &ClassesCount, &ClassWeights, &ClassLabels,
+        &ClassesCount, &ClassWeights, &AutoClassWeights, &ClassLabels,
         &DevDefaultValueFractionToEnableSparseStorage,
         &DevSparseArrayIndexingType,
         &GpuCatFeaturesStorage, &DevLeafwiseScoring, &DevGroupFeatures
@@ -48,7 +51,7 @@ void NCatboostOptions::TDataProcessingOptions::Save(NJson::TJsonValue* options) 
     SaveFields(
         options, IgnoredFeatures, HasTimeFlag, AllowConstLabel, TargetBorder,
         FloatFeaturesBinarization, PerFloatFeatureQuantization, TextProcessingOptions,
-        ClassesCount, ClassWeights, ClassLabels,
+        ClassesCount, ClassWeights, AutoClassWeights, ClassLabels,
         DevDefaultValueFractionToEnableSparseStorage,
         DevSparseArrayIndexingType,
         GpuCatFeaturesStorage, DevLeafwiseScoring, DevGroupFeatures
@@ -61,13 +64,13 @@ bool NCatboostOptions::TDataProcessingOptions::operator==(const TDataProcessingO
                     ClassesCount, ClassWeights, ClassLabels,
                     DevDefaultValueFractionToEnableSparseStorage,
                     DevSparseArrayIndexingType, GpuCatFeaturesStorage, DevLeafwiseScoring,
-                    DevGroupFeatures) ==
+                    DevGroupFeatures, AutoClassWeights) ==
            std::tie(rhs.IgnoredFeatures, rhs.HasTimeFlag, rhs.AllowConstLabel, rhs.TargetBorder,
                     rhs.FloatFeaturesBinarization, rhs.PerFloatFeatureQuantization, rhs.TextProcessingOptions,
                     rhs.ClassesCount, rhs.ClassWeights, rhs.ClassLabels,
                     rhs.DevDefaultValueFractionToEnableSparseStorage,
                     rhs.DevSparseArrayIndexingType, rhs.GpuCatFeaturesStorage, rhs.DevLeafwiseScoring,
-                    rhs.DevGroupFeatures);
+                    rhs.DevGroupFeatures, rhs.AutoClassWeights);
 }
 
 bool NCatboostOptions::TDataProcessingOptions::operator!=(const TDataProcessingOptions& rhs) const {
@@ -84,6 +87,8 @@ void NCatboostOptions::TDataProcessingOptions::Validate() const {
         DevGroupFeatures.NotSet() || DevLeafwiseScoring.IsSet(),
         "DevGroupFeatures is supported only with DevLeafwiseScoring"
     );
+    CB_ENSURE(AutoClassWeights.Get() == EAutoClassWeightsType::None || ClassWeights.IsDefault(),
+        "ClassWeights should be default if AutoClassWeights is not None");
 }
 
 
@@ -94,6 +99,11 @@ void NCatboostOptions::TDataProcessingOptions::SetPerFeatureMissingSettingToComm
     const auto& commonSettings = FloatFeaturesBinarization.Get();
     for (auto& [id, binarizationOption] : PerFloatFeatureQuantization.Get()) {
         Y_UNUSED(id);
+        binarizationOption.BorderSelectionType.SetDefault(commonSettings.BorderSelectionType.GetDefaultValue());
+        binarizationOption.BorderCount.SetDefault(commonSettings.BorderCount.GetDefaultValue());
+        binarizationOption.NanMode.SetDefault(commonSettings.NanMode.GetDefaultValue());
+        binarizationOption.MaxSubsetSizeForBuildBorders.SetDefault(commonSettings.MaxSubsetSizeForBuildBorders.GetDefaultValue());
+
         if (!binarizationOption.BorderCount.IsSet() && commonSettings.BorderCount.IsSet()) {
             binarizationOption.BorderCount = commonSettings.BorderCount;
         }
@@ -102,6 +112,9 @@ void NCatboostOptions::TDataProcessingOptions::SetPerFeatureMissingSettingToComm
         }
         if (!binarizationOption.NanMode.IsSet() && commonSettings.NanMode.IsSet()) {
             binarizationOption.NanMode = commonSettings.NanMode;
+        }
+        if (!binarizationOption.MaxSubsetSizeForBuildBorders.IsSet() && commonSettings.MaxSubsetSizeForBuildBorders.IsSet()) {
+            binarizationOption.MaxSubsetSizeForBuildBorders = commonSettings.MaxSubsetSizeForBuildBorders;
         }
     }
 }

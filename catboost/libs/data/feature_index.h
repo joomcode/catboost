@@ -2,7 +2,7 @@
 
 #include <catboost/private/libs/options/enums.h>
 
-#include <library/binsaver/bin_saver.h>
+#include <library/cpp/binsaver/bin_saver.h>
 
 #include <util/system/types.h>
 #include <util/str_stl.h>
@@ -32,7 +32,7 @@ namespace NCB {
     using TFloatFeatureIdx = TFeatureIdx<EFeatureType::Float>;
     using TCatFeatureIdx = TFeatureIdx<EFeatureType::Categorical>;
     using TTextFeatureIdx = TFeatureIdx<EFeatureType::Text>;
-
+    using TEmbeddingFeatureIdx = TFeatureIdx<EFeatureType::Embedding>;
 
     struct TFeatureIdxWithType {
         EFeatureType FeatureType;

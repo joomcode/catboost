@@ -56,13 +56,13 @@ SRCS(Modules/_bisectmodule.c
 
 CFLAGS(-DBUILD_ZLIB)
 
-IF (ARCH_X86_64 OR ARCH_I386)
+IF (ARCH_X86_64 OR ARCH_I386 OR ARCH_PPC64LE OR ARCH_AARCH64)
     IF (OS_CYGWIN)
         #TODO
     ELSE()
-        PEERDIR(contrib/deprecated/libffi)
+        PEERDIR(contrib/restricted/libffi)
 
-        ADDINCL(contrib/deprecated/libffi/include)
+        ADDINCL(contrib/restricted/libffi/include)
 
         SRCS(
             Modules/_ctypes/_ctypes.c
@@ -73,18 +73,6 @@ IF (ARCH_X86_64 OR ARCH_I386)
         )
     ENDIF()
 ENDIF()
-
-IF (FREEBSD OR LINUX)
-    IF (NOT MUSL)
-        SRCS(Modules/nismodule.c)
-
-        IF (LINUX)
-            EXTRALIBS(nsl)
-        ENDIF ()
-
-        CFLAGS(-D_HAVE_NIS=1)
-    ENDIF ()
-ENDIF ()
 
 IF(FREEBSD)
     IF(FREEBSD_VER GREATER 7)

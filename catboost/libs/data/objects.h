@@ -1,6 +1,7 @@
 #pragma once
 
 #include "columns.h"
+#include "composite_columns.h"
 #include "exclusive_feature_bundling.h"
 #include "feature_grouping.h"
 #include "feature_index.h"
@@ -22,9 +23,9 @@
 
 #include <catboost/private/libs/options/binarization_options.h>
 
-#include <library/binsaver/bin_saver.h>
-#include <library/dbg_output/dump.h>
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/binsaver/bin_saver.h>
+#include <library/cpp/dbg_output/dump.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/array_ref.h>
 #include <util/generic/maybe.h>
@@ -93,7 +94,7 @@ namespace NCB {
 
         TCommonObjectsData GetSubset(
             const TObjectsGroupingSubset& objectsGroupingSubset,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const;
 
         void Load(TFeaturesLayoutPtr featuresLayout, ui32 objectCount, IBinSaver* binSaver);
@@ -145,13 +146,13 @@ namespace NCB {
             const TObjectsGroupingSubset& objectsGroupingSubset,
             TMaybe<TConstArrayRef<ui32>> ignoredFeatures,
             ui64 cpuRamLimit,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const = 0;
 
         TIntrusivePtr<TObjectsDataProvider> GetSubset(
             const TObjectsGroupingSubset& objectsGroupingSubset,
             ui64 cpuRamLimit,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const {
             return GetSubsetImpl(
                 objectsGroupingSubset,
@@ -163,7 +164,7 @@ namespace NCB {
 
         TIntrusivePtr<TObjectsDataProvider> GetFeaturesSubset(
             const TVector<ui32>& ignoredFeatures,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const;
 
         // The following Get* functions are common for all implementations, so they're in this base class
@@ -212,7 +213,8 @@ namespace NCB {
 
     private:
         friend class TQuantizationImpl;
-        friend class TRawBuilderDataHelper;
+        template <class TTObjectsDataProvider>
+        friend class TBuilderDataHelper;
 
     protected:
         TObjectsGroupingPtr ObjectsGrouping;
@@ -232,6 +234,7 @@ namespace NCB {
         TVector<THolder<TFloatValuesHolder>> FloatFeatures; // [floatFeatureIdx]
         TVector<THolder<THashedCatValuesHolder>> CatFeatures; // [catFeatureIdx]
         TVector<THolder<TStringTextValuesHolder>> TextFeatures; // [textFeatureIdx]
+        TVector<THolder<TEmbeddingValuesHolder>> EmbeddingFeatures; // [embeddingFeatureIdx]
 
     public:
         bool operator==(const TRawObjectsData& rhs) const;
@@ -246,7 +249,7 @@ namespace NCB {
 
             // can be nullptr is there's no categorical features
             const TVector<THashMap<ui32, TString>>* catFeaturesHashToString,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const;
     };
 
@@ -263,7 +266,7 @@ namespace NCB {
             bool skipCheck,
 
             // needed for check parallelization, can pass Nothing() if skipCheck is true
-            TMaybe<NPar::TLocalExecutor*> localExecutor
+            TMaybe<NPar::ILocalExecutor*> localExecutor
         )
             : TObjectsDataProvider(std::move(objectsGrouping), std::move(commonData), skipCheck)
         {
@@ -290,7 +293,7 @@ namespace NCB {
             const TObjectsGroupingSubset& objectsGroupingSubset,
             TMaybe<TConstArrayRef<ui32>> ignoredFeatures,
             ui64 cpuRamLimit,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const override;
 
         bool HasDenseData() const override;
@@ -323,6 +326,13 @@ namespace NCB {
             return MakeMaybeData<const TStringTextValuesHolder>(Data.TextFeatures[textFeatureIdx]);
         }
 
+        /* can return nullptr if this feature is unavailable
+         * (ignored or this data provider contains only subset of features)
+         */
+        TMaybeData<const TEmbeddingValuesHolder*> GetEmbeddingFeature(ui32 embeddingFeatureIdx) const {
+            return MakeMaybeData<const TEmbeddingValuesHolder>(Data.EmbeddingFeatures[embeddingFeatureIdx]);
+        }
+
         /* set functions are needed for current python mutable Pool interface
            builders should prefer to set fields directly to avoid unnecessary data copying
         */
@@ -332,14 +342,20 @@ namespace NCB {
 
     private:
         friend class TQuantizationImpl;
-        friend class TRawBuilderDataHelper;
+        template <class TTObjectsDataProvider>
+        friend class TBuilderDataHelper;
+
+    private:
+        TData ExtractObjectData() {
+            return std::move(Data);
+        }
 
     private:
         TRawObjectsData Data;
     };
 
     // for use while building and storing this part in TQuantizedObjectsDataProvider
-    struct TQuantizedObjectsData {
+    struct TQuantizedObjectsData : public TMoveOnly {
     public:
         /* some feature holders can contain nullptr
          *  (ignored or this data provider contains only subset of features)
@@ -347,6 +363,7 @@ namespace NCB {
         TVector<THolder<IQuantizedFloatValuesHolder>> FloatFeatures; // [floatFeatureIdx]
         TVector<THolder<IQuantizedCatValuesHolder>> CatFeatures; // [catFeatureIdx]
         TVector<THolder<TTokenizedTextValuesHolder>> TextFeatures; // [textFeatureIdx]
+        TVector<THolder<TEmbeddingValuesHolder>> EmbeddingFeatures; // [EmbeddingFeatureIdx]
 
         TQuantizedFeaturesInfoPtr QuantizedFeaturesInfo;
 
@@ -366,7 +383,7 @@ namespace NCB {
         void Check(
             ui32 objectCount,
             const TFeaturesLayout& featuresLayout,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const;
 
         void Load(
@@ -393,7 +410,7 @@ namespace NCB {
             bool skipCheck,
 
             // needed for check, can pass Nothing() if skipCheck is true
-            TMaybe<NPar::TLocalExecutor*> localExecutor
+            TMaybe<NPar::ILocalExecutor*> localExecutor
         )
             : TObjectsDataProvider(std::move(objectsGrouping), std::move(commonData), skipCheck)
         {
@@ -416,11 +433,15 @@ namespace NCB {
             const TObjectsGroupingSubset& objectsGroupingSubset,
             TMaybe<TConstArrayRef<ui32>> ignoredFeatures,
             ui64 cpuRamLimit,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const override;
 
         bool HasDenseData() const override;
         bool HasSparseData() const override;
+
+        const TFeaturesArraySubsetIndexing& GetFeaturesArraySubsetIndexing() const {
+            return *CommonData.SubsetIndexing;
+        }
 
         /* can return nullptr if this feature is unavailable
          * (ignored or this data provider contains only subset of features)
@@ -443,25 +464,34 @@ namespace NCB {
             return MakeMaybeData<const TTokenizedTextValuesHolder>(Data.TextFeatures[textFeatureIdx]);
         }
 
+        TMaybeData<const TEmbeddingValuesHolder*> GetEmbeddingFeature(ui32 embeddingFeatureIdx) const {
+            return MakeMaybeData<const TEmbeddingValuesHolder>(Data.EmbeddingFeatures[embeddingFeatureIdx]);
+        }
+
         TQuantizedFeaturesInfoPtr GetQuantizedFeaturesInfo() const {
             return Data.QuantizedFeaturesInfo;
         }
 
-        ui32 CalcFeaturesCheckSum(NPar::TLocalExecutor* localExecutor) const;
+        ui32 CalcFeaturesCheckSum(NPar::ILocalExecutor* localExecutor) const;
 
     protected:
         friend class TObjectsSerialization;
+        template <class TTObjectsDataProvider>
+        friend class TBuilderDataHelper;
 
     protected:
         void SaveDataNonSharedPart(IBinSaver* binSaver) const {
             Data.SaveNonSharedPart(*GetFeaturesLayout(), binSaver);
         }
 
+        TData ExtractObjectData() {
+            return std::move(Data);
+        }
+
     protected:
         TQuantizedObjectsData Data;
     };
 
-    using TQuantizedObjectsDataProviderPtr = TIntrusivePtr<TQuantizedObjectsDataProvider>;
 
     void DbgDumpQuantizedFeatures(
         const TQuantizedObjectsDataProvider& quantizedObjectsDataProvider,
@@ -475,10 +505,10 @@ namespace NCB {
 
         TVector<TExclusiveFeaturesBundle> MetaData; // [bundleIdx]
 
-        /* supported TExclusiveFeatureBundleHolder types are TExclusiveFeatureBundleArrayHolder
+        /* supported TExclusiveFeatureBundleArrayHolder types are TExclusiveFeatureBundleArrayHolder
          * and TExclusiveFeatureBundleSparseArrayHolder
          */
-        TVector<THolder<TExclusiveFeatureBundleHolder>> SrcData; // [bundleIdx]
+        TVector<THolder<IExclusiveFeatureBundleArray>> SrcData; // [bundleIdx]
 
     public:
         TExclusiveFeatureBundlesData() = default;
@@ -499,7 +529,7 @@ namespace NCB {
             TExclusiveFeatureBundlesData* subsetData
         ) const;
 
-        void Save(NPar::TLocalExecutor* localExecutor, IBinSaver* binSaver) const;
+        void Save(NPar::ILocalExecutor* localExecutor, IBinSaver* binSaver) const;
         void Load(const TArraySubsetIndexing<ui32>* subsetIndexing, IBinSaver* binSaver);
     };
 
@@ -507,7 +537,7 @@ namespace NCB {
     struct TFeatureGroupsData {
         TVector<TMaybe<TFeaturesGroupIndex>> FlatFeatureIndexToGroupPart;
         TVector<TFeaturesGroup> MetaData;
-        TVector<THolder<TFeaturesGroupHolder>> SrcData; // [groupIdx]
+        TVector<THolder<IFeaturesGroupArray>> SrcData; // [groupIdx]
 
     public:
         TFeatureGroupsData() = default;
@@ -528,7 +558,7 @@ namespace NCB {
             TFeatureGroupsData* subsetData
         ) const;
 
-        void Save(NPar::TLocalExecutor* localExecutor, IBinSaver* binSaver) const;
+        void Save(NPar::ILocalExecutor* localExecutor, IBinSaver* binSaver) const;
         void Load(const TArraySubsetIndexing<ui32>* subsetIndexing, IBinSaver* binSaver);
     };
 
@@ -538,8 +568,7 @@ namespace NCB {
         TVector<TMaybe<TPackedBinaryIndex>> FlatFeatureIndexToPackedBinaryIndex; // [flatFeatureIdx]
         TVector<TFeatureIdxWithType> PackedBinaryToSrcIndex; // [linearPackedBinaryIndex]
 
-        // supported TBinaryPacksHolder types are TBinaryPacksArrayHolder or TBinaryPacksSparseArrayHolder
-        TVector<THolder<TBinaryPacksHolder>> SrcData; // [packIdx][objectIdx][bitIdx]
+        TVector<THolder<IBinaryPacksArray>> SrcData; // [packIdx][objectIdx][bitIdx]
 
     public:
         TPackedBinaryFeaturesData() = default;
@@ -562,7 +591,7 @@ namespace NCB {
             TPackedBinaryFeaturesData* subsetData
         ) const;
 
-        void Save(NPar::TLocalExecutor* localExecutor, IBinSaver* binSaver) const;
+        void Save(NPar::ILocalExecutor* localExecutor, IBinSaver* binSaver) const;
         void Load(const TArraySubsetIndexing<ui32>* subsetIndexing, IBinSaver* binSaver);
     };
 
@@ -613,7 +642,7 @@ namespace NCB {
             bool skipCheck,
 
             // needed for check, can pass Nothing() if skipCheck is true
-            TMaybe<NPar::TLocalExecutor*> localExecutor
+            TMaybe<NPar::ILocalExecutor*> localExecutor
         );
 
         TQuantizedForCPUObjectsDataProvider(
@@ -624,13 +653,13 @@ namespace NCB {
             const TObjectsGroupingSubset& objectsGroupingSubset,
             TMaybe<TConstArrayRef<ui32>> ignoredFeatures,
             ui64 cpuRamLimit,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const override;
 
         /* needed for effective calculation with Permutation blocks on CPU
          * sparse data is unaffected
          */
-        void EnsureConsecutiveIfDenseFeaturesData(NPar::TLocalExecutor* localExecutor);
+        void EnsureConsecutiveIfDenseFeaturesData(NPar::ILocalExecutor* localExecutor);
 
         // needed for low-level optimizations in CPU training code
         const TFeaturesArraySubsetIndexing& GetFeaturesArraySubsetIndexing() const {
@@ -662,7 +691,7 @@ namespace NCB {
             return PackedBinaryFeaturesData.SrcData.size();
         }
 
-        const TBinaryPacksHolder& GetBinaryFeaturesPack(ui32 packIdx) const {
+        const IBinaryPacksArray& GetBinaryFeaturesPack(ui32 packIdx) const {
             return *(PackedBinaryFeaturesData.SrcData[packIdx]);
         }
 
@@ -691,6 +720,7 @@ namespace NCB {
             return PackedBinaryFeaturesData.PackedBinaryToSrcIndex[packedBinaryIndex.GetLinearIdx()];
         }
 
+        void CheckCPUTrainCompatibility() const;
 
         size_t GetExclusiveFeatureBundlesSize() const {
             return ExclusiveFeatureBundlesData.MetaData.size();
@@ -700,7 +730,7 @@ namespace NCB {
             return ExclusiveFeatureBundlesData.MetaData;
         }
 
-        const TExclusiveFeatureBundleHolder& GetExclusiveFeaturesBundle(ui32 bundleIdx) const {
+        const IExclusiveFeatureBundleArray& GetExclusiveFeaturesBundle(ui32 bundleIdx) const {
             return *ExclusiveFeatureBundlesData.SrcData[bundleIdx];
         }
 
@@ -739,7 +769,7 @@ namespace NCB {
             return FeaturesGroupsData.MetaData[groupIdx];
         }
 
-        const TFeaturesGroupHolder& GetFeaturesGroup(ui32 groupIdx) const {
+        const IFeaturesGroupArray& GetFeaturesGroup(ui32 groupIdx) const {
             return *FeaturesGroupsData.SrcData[groupIdx];
         }
 
@@ -752,18 +782,15 @@ namespace NCB {
         }
 
         template <EFeatureType FeatureType>
-        TMaybe<TFeaturesGroupIndex> GetFeatureToFeaturesGroupIndex(TFeatureIdx<FeatureType> featureIdx) const {
+        inline TMaybe<TFeaturesGroupIndex> GetFeatureToFeaturesGroupIndex(TFeatureIdx<FeatureType> featureIdx) const {
             const ui32 flatFeatureIdx = GetFeaturesLayout()->GetExternalFeatureIdx(*featureIdx, FeatureType);
             return FeaturesGroupsData.FlatFeatureIndexToGroupPart[flatFeatureIdx];
         }
 
-        /* binary packs and bundles in *this are compatible with rhs
-         * useful for low-level compatibility (for example when calculating hashes by packs/bundles)
-         */
-        bool IsPackingCompatibleWith(const TQuantizedForCPUObjectsDataProvider& rhs) const;
-
     protected:
         friend class TObjectsSerialization;
+        template <class TTObjectsDataProvider>
+        friend class TBuilderDataHelper;
 
     protected:
         void SaveDataNonSharedPart(IBinSaver* binSaver) const {
@@ -775,13 +802,16 @@ namespace NCB {
             Data.SaveNonSharedPart(*GetFeaturesLayout(), binSaver);
         }
 
-    private:
-        void Check(
-            const TPackedBinaryFeaturesData& packedBinaryData,
-            const TExclusiveFeatureBundlesData& exclusiveFeatureBundlesData,
-            const TFeatureGroupsData& featuresGroupsData
-        ) const;
+        TData ExtractObjectData() {
+            TData result;
+            result.PackedBinaryFeaturesData = std::move(PackedBinaryFeaturesData);
+            result.ExclusiveFeatureBundlesData = std::move(ExclusiveFeatureBundlesData);
+            result.FeaturesGroupsData = std::move(FeaturesGroupsData);
+            result.Data = TQuantizedObjectsDataProvider::ExtractObjectData();
+            return result;
+        }
 
+    private:
         void CheckFeatureIsNotInAggregated(
             EFeatureType featureType,
             const TStringBuf featureTypeName,
@@ -796,6 +826,8 @@ namespace NCB {
         // store directly instead of looking up in Data.QuantizedFeaturesInfo for runtime efficiency
         TVector<TCatFeatureUniqueValuesCounts> CatFeatureUniqueValuesCounts; // [catFeatureIdx]
     };
+
+    using TQuantizedObjectsDataProviderPtr = TIntrusivePtr<TQuantizedForCPUObjectsDataProvider>;
 
 
     // needed to make friends with TObjectsDataProvider s

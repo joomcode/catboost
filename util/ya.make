@@ -1,6 +1,7 @@
 LIBRARY(yutil)
 
 
+SUBSCRIBER(g:util-subscribers)
 
 NEED_CHECK()
 
@@ -14,14 +15,9 @@ PEERDIR(
     contrib/libs/double-conversion
 )
 
-IF (OS_ANDROID)
-    PEERDIR(
-        contrib/libs/android_ifaddrs
-    )
-    ADDINCL(
-        contrib/libs/android_ifaddrs
-    )
-ENDIF()
+PEERDIR(
+    contrib/libs/libc_compat
+)
 
 # datetime
 JOIN_SRCS(
@@ -95,7 +91,6 @@ JOIN_SRCS(
     generic/bt_exception.cpp
     generic/buffer.cpp
     generic/cast.cpp
-    generic/chartraits.cpp
     generic/deque.cpp
     generic/explicit_type.cpp
     generic/fastqueue.cpp
@@ -233,6 +228,7 @@ JOIN_SRCS(
     string/hex.cpp
     string/join.cpp
     string/printf.cpp
+    string/reverse.cpp
     string/split.cpp
     string/strip.cpp
     string/strspn.cpp
@@ -244,6 +240,10 @@ JOIN_SRCS(
 
 IF (ARCH_ARM)
     CFLAGS(-D_FORTIFY_SOURCE=0)
+ENDIF()
+
+IF (TSTRING_IS_STD_STRING)
+    CFLAGS(GLOBAL -DTSTRING_IS_STD_STRING)
 ENDIF()
 
 JOIN_SRCS(
@@ -358,9 +358,6 @@ IF (MUSL)
         contrib/libs/linuxvdso
     )
 ELSE()
-    SRCS(
-        system/strlcpy.c
-    )
     IF (OS_LINUX OR SUN OR CYGWIN OR OS_WINDOWS)
         SRCS(
             system/mktemp_system.cpp
@@ -380,3 +377,7 @@ JOIN_SRCS(
 )
 
 END()
+
+RECURSE_FOR_TESTS(
+    tests/ut
+)

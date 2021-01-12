@@ -2,6 +2,7 @@
 
 #include <util/generic/string.h>
 #include <util/generic/typetraits.h>
+#include <util/string/cast.h>
 #include "cast.h"
 
 /*
@@ -59,7 +60,7 @@ namespace NPrivate {
 
     template <>
     inline size_t GetLength(const char* const& s) {
-        return (s ? TCharTraits<char>::GetLength(s) : 0);
+        return (s ? std::char_traits<char>::length(s) : 0);
     }
 
     inline size_t GetAppendLength(const TStringBuf /*delim*/) {

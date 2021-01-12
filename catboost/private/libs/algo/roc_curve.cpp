@@ -8,7 +8,7 @@
 #include <catboost/libs/model/model.h>
 #include <catboost/private/libs/target/data_providers.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/algorithm.h>
 #include <util/generic/array_ref.h>
@@ -74,7 +74,7 @@ void TRocCurve::AddPoint(double newBoundary, double newFnr, double newFpr) {
 void TRocCurve::BuildCurve(
     const TVector<TVector<double>>& approxes, // [poolId][docId]
     const TVector<TConstArrayRef<float>>& labels, // [poolId][docId]
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     size_t allDocumentsCount = 0;
     for (const auto& label : labels) {

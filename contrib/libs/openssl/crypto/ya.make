@@ -1,15 +1,8 @@
 LIBRARY()
 
-LICENSE(
-    OpenSSL
-    SSLeay
-)
 
 
-
-NO_COMPILER_WARNINGS()
-
-NO_UTIL()
+LICENSE(OpenSSL AND SSLeay)
 
 PEERDIR(
     contrib/libs/zlib
@@ -20,11 +13,8 @@ ADDINCL(
     contrib/libs/openssl/crypto
     contrib/libs/openssl/crypto/ec/curve448
     contrib/libs/openssl/crypto/ec/curve448/arch_32
-    contrib/libs/openssl/crypto/include
     contrib/libs/openssl/crypto/modes
     contrib/libs/openssl/include
-    contrib/libs/zlib
-    GLOBAL contrib/libs/openssl/include
 )
 
 IF (OS_LINUX)
@@ -61,8 +51,13 @@ IF (OS_ANDROID)
     ENDIF()
 ENDIF()
 
+NO_COMPILER_WARNINGS()
+
+NO_RUNTIME()
+
 CFLAGS(
     -DDSO_NONE
+    -DAESNI_ASM
     -DECP_NISTZ256_ASM
     -DOPENSSL_BN_ASM_MONT
     -DOPENSSL_CPUID_OBJ
@@ -70,6 +65,7 @@ CFLAGS(
     -DSHA1_ASM
     -DSHA256_ASM
     -DSHA512_ASM
+    -DZLIB
 )
 
 IF (NOT IOS_I386 AND NOT ANDROID_I686)
@@ -99,7 +95,6 @@ IF (OS_DARWIN AND ARCH_X86_64 OR OS_LINUX AND ARCH_X86_64 OR OS_WINDOWS AND ARCH
         -DOPENSSL_BN_ASM_GF2m
         -DOPENSSL_BN_ASM_MONT5
         -DOPENSSL_IA32_SSE2
-        -DPADLOCK_ASM
         -DRC4_ASM
         -DX25519_ASM
     )
@@ -115,10 +110,19 @@ IF (OS_DARWIN AND ARCH_X86_64)
     )
 ENDIF()
 
-IF (OS_WINDOWS AND ARCH_X86_64)
+IF (OS_WINDOWS) 
+    IF (ARCH_X86_64) 
+        CFLAGS(
+            -DENGINESDIR="\"C:\\\\Program\ Files\\\\OpenSSL\\\\lib\\\\engines-1_1\""
+            -DOPENSSLDIR="\"C:\\\\Program\ Files\\\\Common\ Files\\\\SSL\""
+        )
+    ELSEIF(ARCH_I386)
+        CFLAGS(
+            -DENGINESDIR="\"C:\\\\Program\ Files\ \(x86\)\\\\OpenSSL\\\\lib\\\\engines-1_1\""
+            -DOPENSSLDIR="\"C:\\\\Program\ Files\ \(x86\)\\\\Common\ Files\\\\SSL\""
+        )
+    ENDIF()
     CFLAGS(
-        -DENGINESDIR="\"C:\\\\Program\ Files\\\\OpenSSL\\\\lib\\\\engines-1_1\""
-        -DOPENSSLDIR="\"C:\\\\Program\ Files\\\\Common\ Files\\\\SSL\""
         -DOPENSSL_SYS_WIN32
         -DUNICODE
         -DWIN32_LEAN_AND_MEAN
@@ -127,6 +131,7 @@ IF (OS_WINDOWS AND ARCH_X86_64)
         -D_WINSOCK_DEPRECATED_NO_WARNINGS
         /GF
     )
+
 ENDIF()
 
 IF (SANITIZER_TYPE STREQUAL memory)
@@ -850,6 +855,13 @@ IF (OS_DARWIN AND ARCH_X86_64)
 ENDIF()
 
 IF (OS_LINUX AND ARCH_ARM7)
+    IF (CLANG)
+        # XXX: This is a workarond for 'out of range immediate fixup value' 
+        # error with clang integrated assembler:
+        # https://github.com/openssl/openssl/issues/7878
+        CFLAGS(-mno-thumb)
+    ENDIF()
+
     CFLAGS(
         -DOPENSSL_PIC
         -DOPENSSL_BN_ASM_GF2m
@@ -1176,7 +1188,6 @@ IF (OS_ANDROID AND ARCH_X86_64)
         -DMD5_ASM
         -DGHASH_ASM
         -DX25519_ASM
-        -D__ANDROID_API__=21
     )
     SRCS(
         ../asm/android/x86_64/crypto/ec/x25519-x86_64.s
@@ -1225,7 +1236,6 @@ IF (OS_ANDROID AND ARCH_I686)
         -DRMD160_ASM
         -DWHIRLPOOL_ASM
         -DGHASH_ASM
-        -D__ANDROID_API__=15
     )
     SRCS(
         ../asm/android/i686/crypto/ec/ecp_nistz256-x86.s
@@ -1258,13 +1268,18 @@ IF (OS_ANDROID AND ARCH_I686)
 ENDIF()
 
 IF (OS_ANDROID AND ARCH_ARM7)
+    IF (CLANG)
+        # XXX: This is a workarond for 'out of range immediate fixup value'
+        # error with clang integrated assembler:
+        # https://github.com/openssl/openssl/issues/7878
+        CFLAGS(-mno-thumb)
+    ENDIF()
     CFLAGS(
         -DOPENSSL_PIC
         -DOPENSSL_BN_ASM_GF2m
         -DAES_ASM
         -DBSAES_ASM
         -DGHASH_ASM
-        -D__ANDROID_API__=15
     )
     SRCS(
         ../asm/android/arm/crypto/ec/ecp_nistz256-armv4.S
@@ -1297,7 +1312,6 @@ ENDIF()
 IF (OS_ANDROID AND ARCH_ARM64)
     CFLAGS(
        -DOPENSSL_PIC
-       -D__ANDROID_API__=21 
     )
     SRCS(
         ../asm/android/arm64/crypto/ec/ecp_nistz256-armv8.S

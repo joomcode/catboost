@@ -31,10 +31,19 @@ namespace NCatboostOptions {
             }
         }
 
+        const TValue& GetDefaultValue() const {
+            return DefaultValue;
+        }
+
         template <class T>
         void Set(T&& value) {
             Value = std::forward<T>(value);
             IsSetFlag = true;
+        }
+
+        void Reset() {
+            Value = DefaultValue;
+            IsSetFlag = false;
         }
 
         virtual const TValue& Get() const {

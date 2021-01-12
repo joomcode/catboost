@@ -7,11 +7,14 @@
   - adhoc.h
   - apiset.h
   - apisetcconv.h
+  - atltime.h
+  - audioclient.h
   - authz.h
   - basetyps.h
   - bcrypt.h
   - bits.h
   - capi.h
+  - cet.h
   - cfg.h
   - commctrl.h
   - commdlg.h
@@ -46,6 +49,7 @@
   - downloadmgr.h
   - driverspecs.h
   - dshow.h
+  - dsound.h
   - dsparse.h
   - dv.h
   - dvdmedia.h
@@ -120,6 +124,7 @@
   - minwinbase.h
   - minwindef.h
   - mlang.h
+  - mmdeviceapi.h
   - mmsystem.h
   - mq.h
   - mshtmdid.h
@@ -139,6 +144,7 @@
   - new.h
   - npapi.h
   - ntdddisk.h
+  - ntddk.h
   - ntddndis.h
   - ntdef.h
   - ntsecapi.h
@@ -294,6 +300,7 @@
   - wrl/wrappers/corewrappers.h
   - ws2def.h
   - ws2ipdef.h
+  - ws2spi.h
   - ws2tcpip.h
   - wscapi.h
   - wspiapi.h

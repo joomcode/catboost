@@ -7,7 +7,7 @@
 
 #include <catboost/libs/logging/logging.h>
 
-#include <library/json/json_value.h>
+#include <library/cpp/json/json_value.h>
 
 #include <util/generic/strbuf.h>
 #include <util/string/builder.h>
@@ -244,7 +244,8 @@ static Y_NO_INLINE void DeleteSeenOption(NJson::TJsonValue* options, const TStri
 void NCatboostOptions::PlainJsonToOptions(
     const NJson::TJsonValue& plainOptions,
     NJson::TJsonValue* options,
-    NJson::TJsonValue* outputOptions
+    NJson::TJsonValue* outputOptions,
+    NJson::TJsonValue* featuresSelectOptions
 ) {
     ValidatePlainOptionsConsistency(plainOptions);
     TSet<TString> seenKeys;
@@ -328,6 +329,7 @@ void NCatboostOptions::PlainJsonToOptions(
     CopyOption(plainOptions, "model_shrink_rate", &boostingOptionsRef, &seenKeys);
     CopyOption(plainOptions, "model_shrink_mode", &boostingOptionsRef, &seenKeys);
     CopyOption(plainOptions, "langevin", &boostingOptionsRef, &seenKeys);
+    CopyOption(plainOptions, "posterior_sampling", &boostingOptionsRef, &seenKeys);
     CopyOption(plainOptions, "diffusion_temperature", &boostingOptionsRef, &seenKeys);
 
     auto& odConfig = boostingOptionsRef["od_config"];
@@ -371,6 +373,13 @@ void NCatboostOptions::PlainJsonToOptions(
     CopyOption(plainOptions, "subsample", &bootstrapOptions, &seenKeys);
     CopyOption(plainOptions, "mvs_reg", &bootstrapOptions, &seenKeys);
     CopyOption(plainOptions, "sampling_unit", &bootstrapOptions, &seenKeys);
+
+    auto& featurePenaltiesOptions = treeOptions["penalties"];
+    featurePenaltiesOptions.SetType(NJson::JSON_MAP);
+    CopyOption(plainOptions, "feature_weights", &featurePenaltiesOptions, &seenKeys);
+    CopyOption(plainOptions, "penalties_coefficient", &featurePenaltiesOptions, &seenKeys);
+    CopyOption(plainOptions, "first_feature_use_penalties", &featurePenaltiesOptions, &seenKeys);
+    CopyOption(plainOptions, "per_object_feature_penalties", &featurePenaltiesOptions, &seenKeys);
 
     //feature evaluation options
     if (GetTaskType(plainOptions) == ETaskType::GPU) {
@@ -423,6 +432,7 @@ void NCatboostOptions::PlainJsonToOptions(
     CopyOption(plainOptions, "classes_count", &dataProcessingOptions, &seenKeys);
     CopyOption(plainOptions, "class_names", &dataProcessingOptions, &seenKeys);
     CopyOption(plainOptions, "class_weights", &dataProcessingOptions, &seenKeys);
+    CopyOption(plainOptions, "auto_class_weights", &dataProcessingOptions, &seenKeys);
     CopyOption(plainOptions, "dev_default_value_fraction_for_sparse", &dataProcessingOptions, &seenKeys);
     CopyOption(plainOptions, "dev_sparse_array_indexing", &dataProcessingOptions, &seenKeys);
     CopyOption(plainOptions, "gpu_cat_features_storage", &dataProcessingOptions, &seenKeys);
@@ -435,6 +445,7 @@ void NCatboostOptions::PlainJsonToOptions(
     CopyOption(plainOptions, "border_count", &floatFeaturesBinarization, &seenKeys);
     CopyOptionWithNewKey(plainOptions, "feature_border_type", "border_type", &floatFeaturesBinarization, &seenKeys);
     CopyOption(plainOptions, "nan_mode", &floatFeaturesBinarization, &seenKeys);
+    CopyOption(plainOptions, "dev_max_subset_size_for_build_borders", &floatFeaturesBinarization, &seenKeys);
     CopyPerFloatFeatureQuantization(plainOptions, "per_float_feature_quantization", &dataProcessingOptions, &seenKeys);
 
     auto& textProcessingOptions = dataProcessingOptions["text_processing_options"];
@@ -462,6 +473,16 @@ void NCatboostOptions::PlainJsonToOptions(
     CopyOption(plainOptions, "detailed_profile", &trainOptions, &seenKeys);
     CopyOption(plainOptions, "task_type", &trainOptions, &seenKeys);
     CopyOption(plainOptions, "metadata", &trainOptions, &seenKeys);
+
+    if (featuresSelectOptions) {
+        CopyOption(plainOptions, "features_for_select", featuresSelectOptions, &seenKeys);
+        CopyOption(plainOptions, "num_features_to_select", featuresSelectOptions, &seenKeys);
+        CopyOption(plainOptions, "features_selection_steps", featuresSelectOptions, &seenKeys);
+        CopyOption(plainOptions, "train_final_model", featuresSelectOptions, &seenKeys);
+        CopyOption(plainOptions, "features_selection_result_path", featuresSelectOptions, &seenKeys);
+        CopyOption(plainOptions, "features_selection_algorithm", featuresSelectOptions, &seenKeys);
+        CopyOption(plainOptions, "shap_calc_type", featuresSelectOptions, &seenKeys);
+    }
 
     for (const auto& [optionName, optionValue] : plainOptions.GetMapSafe()) {
         if (!seenKeys.contains(optionName)) {
@@ -595,6 +616,9 @@ void NCatboostOptions::ConvertOptionsToPlainJson(
         CopyOption(boostingOptionsRef, "langevin", &plainOptionsJson, &seenKeys);
         DeleteSeenOption(&optionsCopyBoosting, "langevin");
 
+        CopyOption(boostingOptionsRef, "posterior_sampling", &plainOptionsJson, &seenKeys);
+        DeleteSeenOption(&optionsCopyBoosting, "posterior_sampling");
+
         CopyOption(boostingOptionsRef, "diffusion_temperature", &plainOptionsJson, &seenKeys);
         DeleteSeenOption(&optionsCopyBoosting, "diffusion_temperature");
 
@@ -711,6 +735,27 @@ void NCatboostOptions::ConvertOptionsToPlainJson(
             CB_ENSURE(optionsCopyTreeBootstrap.GetMapSafe().empty(), "bootstrap: key " + optionsCopyTreeBootstrap.GetMapSafe().begin()->first + " wasn't added to plain options.");
             DeleteSeenOption(&optionsCopyTree, "bootstrap");
         }
+
+        if (treeOptions.Has("penalties")) {
+            const auto& penaltiesOptions = treeOptions["penalties"];
+            auto& optionsCopyTreePenalties = optionsCopyTree["penalties"];
+
+            CopyOption(penaltiesOptions, "feature_weights", &plainOptionsJson, &seenKeys);
+            DeleteSeenOption(&optionsCopyTreePenalties, "feature_weights");
+
+            CopyOption(penaltiesOptions, "penalties_coefficient", &plainOptionsJson, &seenKeys);
+            DeleteSeenOption(&optionsCopyTreePenalties, "penalties_coefficient");
+
+            CopyOption(penaltiesOptions, "first_feature_use_penalties", &plainOptionsJson, &seenKeys);
+            DeleteSeenOption(&optionsCopyTreePenalties, "first_feature_use_penalties");
+
+            CopyOption(penaltiesOptions, "per_object_feature_penalties", &plainOptionsJson, &seenKeys);
+            DeleteSeenOption(&optionsCopyTreePenalties, "per_object_feature_penalties");
+
+            CB_ENSURE(optionsCopyTreePenalties.GetMapSafe().empty(), "penalties: key " + optionsCopyTreePenalties.GetMapSafe().begin()->first + " wasn't added to plain options.");
+            DeleteSeenOption(&optionsCopyTree, "penalties");
+        }
+
         CB_ENSURE(optionsCopyTree.GetMapSafe().empty(), "tree_learner_options: key " + optionsCopyTree.GetMapSafe().begin()->first + " wasn't added to plain options.");
         DeleteSeenOption(&optionsCopy, "tree_learner_options");
     }
@@ -807,6 +852,9 @@ void NCatboostOptions::ConvertOptionsToPlainJson(
         CopyOption(dataProcessingOptions, "class_weights", &plainOptionsJson, &seenKeys);
         DeleteSeenOption(&optionsCopyDataProcessing, "class_weights");
 
+        CopyOption(dataProcessingOptions, "auto_class_weights", &plainOptionsJson, &seenKeys);
+        DeleteSeenOption(&optionsCopyDataProcessing, "auto_class_weights");
+
         CopyOption(dataProcessingOptions, "dev_default_value_fraction_for_sparse", &plainOptionsJson, &seenKeys);
         DeleteSeenOption(&optionsCopyDataProcessing, "dev_default_value_fraction_for_sparse");
 
@@ -848,6 +896,9 @@ void NCatboostOptions::ConvertOptionsToPlainJson(
 
             CopyOption(floatFeaturesBinarization, "nan_mode", &plainOptionsJson, &seenKeys);
             DeleteSeenOption(&optionsCopyDataProcessingFloatFeaturesBinarization, "nan_mode");
+
+            CopyOption(floatFeaturesBinarization, "dev_max_subset_size_for_build_borders", &plainOptionsJson, &seenKeys);
+            DeleteSeenOption(&optionsCopyDataProcessingFloatFeaturesBinarization, "dev_max_subset_size_for_build_borders");
 
             CB_ENSURE(optionsCopyDataProcessingFloatFeaturesBinarization.GetMapSafe().empty(),
                       "float_features_binarization: key " + optionsCopyDataProcessingFloatFeaturesBinarization.GetMapSafe().begin()->first + " wasn't added to plain options.");

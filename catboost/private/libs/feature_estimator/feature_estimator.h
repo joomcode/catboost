@@ -8,7 +8,7 @@
 #include <util/generic/vector.h>
 #include <util/generic/maybe.h>
 #include <util/generic/array_ref.h>
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 /*
  * Feature estimators - how to build FeatureCalculator from DataProvider
@@ -49,7 +49,7 @@ namespace NCB {
         TMaybe<TPackedFeatureWriter> PackedFeatureWriter;
     };
 
-    //We need this so we could prepare GPU layout before computation of features
+    //We need this so we could prepare layout before computation of features
     struct TEstimatedFeaturesMeta {
         ui32 FeaturesCount = 0;
         TMaybe<TVector<ui32>> UniqueValuesUpperBoundHint;
@@ -69,11 +69,6 @@ namespace NCB {
     class IFeatureEstimator : public TThrRefBase {
     public:
 
-
-        ~IFeatureEstimator() {
-
-        }
-
         //Meta to allocate memory for datasets, for example
         //Or to estimate necessary memory
         virtual TEstimatedFeaturesMeta FeaturesMeta() const = 0;
@@ -83,15 +78,17 @@ namespace NCB {
         //especially on GPU
         virtual void ComputeFeatures(TCalculatedFeatureVisitor learnVisitor,
                                      TConstArrayRef<TCalculatedFeatureVisitor> testVisitors,
-                                     NPar::TLocalExecutor* executor) const = 0;
+                                     NPar::ILocalExecutor* executor) const = 0;
 
 
         virtual THolder<IFeatureCalcer> MakeFinalFeatureCalcer(TConstArrayRef<ui32> featureIndices,
-                                                               NPar::TLocalExecutor* executor) const {
+                                                               NPar::ILocalExecutor* executor) const {
             Y_UNUSED(featureIndices);
             Y_UNUSED(executor);
             CB_ENSURE(false, "Final feature calcer is unimplemented yet");
         }
+
+        virtual EFeatureType GetSourceType() const = 0;
 
         virtual TGuid Id() const = 0;
     };
@@ -105,7 +102,7 @@ namespace NCB {
         virtual void ComputeOnlineFeatures(TConstArrayRef<ui32> learnPermutation,
                                            TCalculatedFeatureVisitor learnVisitor,
                                            TConstArrayRef<TCalculatedFeatureVisitor> testVisitors,
-                                           NPar::TLocalExecutor* executor) const = 0;
+                                           NPar::ILocalExecutor* executor) const = 0;
 
 
     };

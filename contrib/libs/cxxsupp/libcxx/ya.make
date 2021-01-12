@@ -18,17 +18,14 @@ IF (OS_ANDROID)
         src/support/android/locale_android.cpp
     )
 
-    PEERDIR(
-        contrib/libs/android_ifaddrs
-    )
-    ADDINCL(
-        GLOBAL contrib/libs/android_ifaddrs
-    )
-
+    # android_support actually depends on c++abi:
+    # https://github.com/android/ndk/issues/1130
+    LDFLAGS(-Wl,--start-group)
     LDFLAGS(-lc++abi)
     IF (ARCH_I686 OR ARCH_ARM7)
         LDFLAGS(-landroid_support)
     ENDIF()
+    LDFLAGS(-Wl,--end-group)
 
     CFLAGS(-DLIBCXX_BUILDING_LIBCXXABI)
 
@@ -36,14 +33,14 @@ ELSEIF (OS_IOS)
     LDFLAGS(-lc++abi)
 	CFLAGS(-DLIBCXX_BUILDING_LIBCXXABI)
 ELSEIF (CLANG OR MUSL OR OS_DARWIN OR USE_LTO)
-    DEFAULT(CXX_RT "libcxxrt")
+    IF (ARCH_ARM7)
+        # XXX: libcxxrt support for ARM is currently broken
+        DEFAULT(CXX_RT "glibcxx_static")
+    ELSE()
+        DEFAULT(CXX_RT "libcxxrt")
+    ENDIF()
     IF (MUSL)
-        ADDINCL(
-            GLOBAL contrib/libs/musl/arch/x86_64
-            GLOBAL contrib/libs/musl/arch/generic
-            GLOBAL contrib/libs/musl/include
-            GLOBAL contrib/libs/musl/extra
-        )
+        PEERDIR(contrib/libs/musl/include)
     ENDIF()
 ELSEIF (OS_WINDOWS)
     SRCS(
@@ -58,6 +55,10 @@ ELSEIF (OS_WINDOWS)
         GLOBAL -D_LIBCPP_VASPRINTF_DEFINED
         GLOBAL -D_WCHAR_H_CPLUSPLUS_98_CONFORMANCE_
     )
+
+    IF (CLANG_CL)
+        PEERDIR(contrib/libs/cxxsupp/builtins)
+    ENDIF()
 ELSE()
     DEFAULT(CXX_RT "glibcxx_static")
     CXXFLAGS(
@@ -86,21 +87,34 @@ ENDIF()
 
 DEFAULT(CXX_RT "default")
 
+DISABLE(NEED_GLIBCXX_CXX17_SHIMS)
+
 IF (CXX_RT STREQUAL "libcxxrt")
     PEERDIR(ADDINCL contrib/libs/cxxsupp/libcxxrt)
     CXXFLAGS(-DLIBCXXRT=1)
 ELSEIF (CXX_RT STREQUAL "glibcxx" OR CXX_RT STREQUAL "glibcxx_static")
     LDFLAGS(-Wl,-Bstatic -lsupc++ -lgcc -lgcc_eh -Wl,-Bdynamic)
     CXXFLAGS(-D__GLIBCXX__=1)
+    ENABLE(NEED_GLIBCXX_CXX17_SHIMS)
 ELSEIF (CXX_RT STREQUAL "glibcxx_dynamic")
     LDFLAGS(-lgcc_s -lstdc++)
     CXXFLAGS(-D__GLIBCXX__=1)
+    ENABLE(NEED_GLIBCXX_CXX17_SHIMS)
 ELSEIF (CXX_RT STREQUAL "glibcxx_driver")
     CXXFLAGS(-D__GLIBCXX__=1)
 ELSEIF (CXX_RT STREQUAL "default")
     # Do nothing
 ELSE()
     MESSAGE(FATAL_ERROR "Unexpected CXX_RT value: ${CXX_RT}")
+ENDIF()
+
+IF (NEED_GLIBCXX_CXX17_SHIMS)
+    IF (GCC)
+        # Assume GCC is bundled with a modern enough version of C++ runtime
+    ELSEIF (OS_SDK STREQUAL "ubuntu-12" OR OS_SDK STREQUAL "ubuntu-14" OR OS_SDK STREQUAL "ubuntu-16")
+        # Prior to ubuntu-18, system C++ runtime for C++17 is incomplete
+        SRCS(glibcxx_eh_cxx17.cpp)
+    ENDIF()
 ENDIF()
 
 NO_UTIL()

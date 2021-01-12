@@ -7,9 +7,9 @@
 #include <catboost/libs/data/data_provider.h>
 #include <catboost/private/libs/data_types/pair.h>
 #include <catboost/private/libs/data_types/query.h>
-#include <catboost/libs/helpers/clear_array.h>
 #include <catboost/libs/helpers/array_subset.h>
 #include <catboost/libs/model/online_ctr.h>
+#include <catboost/private/libs/options/binarization_options.h>
 #include <catboost/private/libs/options/defaults_helper.h>
 
 #include <util/generic/array_ref.h>
@@ -24,7 +24,7 @@
 struct TRestorableFastRng64;
 
 namespace NPar {
-    class TLocalExecutor;
+    class ILocalExecutor;
 }
 
 
@@ -66,26 +66,38 @@ public:
     };
 
 public:
-    TOnlineCTRHash& GetCtrs(const TProjection& proj) {
-        return proj.HasSingleFeature() ? OnlineSingleCtrs : OnlineCTR;
+    TOwnedOnlineCtr* GetOwnedCtrs(const TProjection& proj) {
+        return (proj.HasSingleFeature() ? OwnedOnlineSingleCtrs : OwnedOnlineCtrs);
     }
 
-    const TOnlineCTRHash& GetCtrs(const TProjection& proj) const {
-        return proj.HasSingleFeature() ? OnlineSingleCtrs : OnlineCTR;
+    void ClearCtrDataForProjectionIfOwned(const TProjection& proj) {
+        auto* ownedCtr = GetOwnedCtrs(proj);
+        if (ownedCtr) {
+            ownedCtr->Data.at(proj).Feature.clear();
+        }
     }
 
-    TOnlineCTR& GetCtrRef(const TProjection& proj) {
-        return GetCtrs(proj)[proj];
+    const TOnlineCtrBase& GetCtrs(const TProjection& proj) const {
+        return *(proj.HasSingleFeature() ? OnlineSingleCtrs : OnlineCtrs);
     }
 
-    const TOnlineCTR& GetCtr(const TProjection& proj) const {
-        return GetCtrs(proj).at(proj);
-    }
 
     void DropEmptyCTRs();
 
-    const std::tuple<const TOnlineCTRHash&, const TOnlineCTRHash&> GetAllCtrs() const {
-        return std::tie(OnlineSingleCtrs, OnlineCTR);
+    const std::tuple<const TOnlineCtrBase&, const TOnlineCtrBase&> GetAllCtrs() const {
+        return std::tie(*OnlineSingleCtrs, *OnlineCtrs);
+    }
+
+    const NCB::TEstimatedForCPUObjectsDataProviders& GetOnlineEstimatedFeatures() const {
+        return OnlineEstimatedFeatures;
+    }
+
+    NCB::TEstimatedForCPUObjectsDataProviders& GetOnlineEstimatedFeatures() {
+        return OnlineEstimatedFeatures;
+    }
+
+    const NCB::TQuantizedEstimatedFeaturesInfo& GetOnlineEstimatedFeaturesInfo() const {
+        return OnlineEstimatedFeatures.QuantizedEstimatedFeaturesInfo;
     }
 
     template <typename T>
@@ -105,8 +117,8 @@ public:
     }
 
     void TrimOnlineCTR(size_t maxOnlineCTRFeatures) {
-        if (OnlineCTR.size() > maxOnlineCTRFeatures) {
-            OnlineCTR.clear();
+        if (OwnedOnlineCtrs && OwnedOnlineCtrs->Data.size() > maxOnlineCTRFeatures) {
+            OwnedOnlineCtrs->Data.clear();
         }
     }
 
@@ -116,7 +128,7 @@ public:
     void LoadApproxes(IInputStream* s);
 
     static TFold BuildDynamicFold(
-        const NCB::TTrainingForCPUDataProvider& learnData,
+        const NCB::TTrainingDataProviders& data,
         const TVector<TTargetClassifier>& targetClassifiers,
         bool shuffle,
         ui32 permuteBlockSize,
@@ -124,22 +136,27 @@ public:
         double multiplier,
         bool storeExpApproxes,
         bool hasPairwiseWeights,
-        TMaybe<double> startingApprox,
+        const TMaybe<TVector<double>>& startingApprox,
+        const NCatboostOptions::TBinarizationOptions& onlineEstimatedFeaturesQuantizationOptions,
+        NCB::TQuantizedFeaturesInfoPtr onlineEstimatedFeaturesQuantizedInfo, // can be nullptr
         TRestorableFastRng64* rand,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     );
 
     static TFold BuildPlainFold(
-        const NCB::TTrainingForCPUDataProvider& learnData,
+        const NCB::TTrainingDataProviders& data,
         const TVector<TTargetClassifier>& targetClassifiers,
         bool shuffle,
         ui32 permuteBlockSize,
         int approxDimension,
         bool storeExpApproxes,
         bool hasPairwiseWeights,
-        TMaybe<double> startingApprox,
+        const TMaybe<TVector<double>>& startingApprox,
+        const NCatboostOptions::TBinarizationOptions& onlineEstimatedFeaturesQuantizationOptions,
+        NCB::TQuantizedFeaturesInfoPtr onlineEstimatedFeaturesQuantizedInfo, // can be nullptr
+        TIntrusivePtr<TPrecomputedOnlineCtr> precomputedSingleOnlineCtrs, // can be empty
         TRestorableFastRng64* rand,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     );
 
     double GetSumWeight() const { return SumWeight; }
@@ -149,14 +166,28 @@ public:
         return LearnPermutation->GetObjectsIndexing().Get<NCB::TIndexedSubset<ui32>>();
     }
 
+    TConstArrayRef<ui32> GetLearnPermutationOfflineEstimatedFeaturesSubset() const {
+        return GetLearnPermutationArray();
+    }
+
 private:
     void AssignTarget(
         NCB::TMaybeData<TConstArrayRef<TConstArrayRef<float>>> target,
         const TVector<TTargetClassifier>& targetClassifiers,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     );
 
     void SetWeights(TConstArrayRef<float> weights, ui32 learnSampleCount);
+
+    void InitOnlineEstimatedFeatures(
+        const NCatboostOptions::TBinarizationOptions& quantizationOptions,
+        NCB::TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
+        const NCB::TTrainingDataProviders& data,
+        NPar::ILocalExecutor* localExecutor,
+        TRestorableFastRng64* rand
+    );
+
+    void InitOwnedOnlineCtrs(const NCB::TTrainingDataProviders& data);
 
 public:
     TVector<TQueryInfo> LearnQueriesInfo;
@@ -189,7 +220,13 @@ private:
     TVector<float> LearnWeights;  // Initial document weights. Empty if no weights present.
     double SumWeight;
 
-    TOnlineCTRHash OnlineSingleCtrs;
-    TOnlineCTRHash OnlineCTR;
+    TIntrusivePtr<TOnlineCtrBase> OnlineSingleCtrs;
+    TIntrusivePtr<TOnlineCtrBase> OnlineCtrs;
+
+    // point to OnlineSingleCtrs & OnlineCtrs if they are of type TOwnedOnlineCtrStorage, null otherwise
+    TOwnedOnlineCtr* OwnedOnlineSingleCtrs = nullptr;
+    TOwnedOnlineCtr* OwnedOnlineCtrs = nullptr;
+
+    NCB::TEstimatedForCPUObjectsDataProviders OnlineEstimatedFeatures;
 };
 

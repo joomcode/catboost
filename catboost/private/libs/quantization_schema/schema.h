@@ -3,22 +3,24 @@
 #include <catboost/private/libs/options/enums.h>
 #include <catboost/libs/data/cat_feature_perfect_hash.h>
 
-#include <library/json/json_value.h>
+#include <library/cpp/json/json_value.h>
 
+#include <util/generic/map.h>
 #include <util/generic/vector.h>
-#include <util/generic/string.h>
+#include <util/system/types.h>
+
 
 namespace NCB {
     struct TPoolQuantizationSchema {
-        // Flat indices of non-ignored features
+        // Flat indices of float non-ignored features
         // Sorted from min to max
-        TVector<size_t> FeatureIndices;
+        TVector<size_t> FloatFeatureIndices;
 
-        // Borders[i] are borders for feature FeatureIndices[i]
+        // Borders[i] are borders for feature FloatFeatureIndices[i]
         // Borders[i] is sorted from min to max
         TVector<TVector<float>> Borders;
 
-        // NanModes[i] is NaN mode for feature FeatureIndices[i]
+        // NanModes[i] is NaN mode for feature FloatFeatureIndices[i]
         // NanModes[i] == EColumn::Forbidden iff there are no NaN's
         TVector<ENanMode> NanModes;
 
@@ -33,5 +35,10 @@ namespace NCB {
         // For building perfect hash
         // FeaturesPerfectHash[i] are hashes for cat feature CatFeatureIndices[i]
         TVector<TMap<ui32, TValueWithCount>> FeaturesPerfectHash; // [catFeatureIdx]
+
+    public:
+        bool HasAvailableFeatures() const {
+            return !FloatFeatureIndices.empty() || !CatFeatureIndices.empty();
+        }
     };
 }

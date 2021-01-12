@@ -67,9 +67,11 @@ namespace NCB {
         size_t NumericFeature1BitCount = 0;
         size_t NumericFeature4BitCount = 0;
         size_t NumericFeature8BitCount = 0;
+        size_t NumericFeature16BitCount = 0;
 
         size_t NonFeatureColumnCount = 0;
 
         size_t ClassesCount = 0;
+        size_t EstimatedIdsLength = 0;
     };
 }

@@ -28,9 +28,9 @@
 #include <catboost/libs/train_lib/options_helper.h>
 #include <catboost/libs/train_lib/train_model.h>
 
-#include <library/json/json_prettifier.h>
-#include <library/json/json_value.h>
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/json/json_prettifier.h>
+#include <library/cpp/json/json_value.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/folder/path.h>
 #include <util/generic/scope.h>
@@ -140,7 +140,7 @@ namespace NCatboostCuda {
     static inline void EstimatePriors(const NCB::TTrainingDataProvider& dataProvider,
                                       TBinarizedFeaturesManager& featureManager,
                                       NCatboostOptions::TCatFeatureParams& options,
-                                      NPar::TLocalExecutor* localExecutor) {
+                                      NPar::ILocalExecutor* localExecutor) {
         CB_ENSURE(&(featureManager.GetCatFeatureOptions()) == &options, "Error: for consistent catFeature options should be equal to one in feature manager");
 
         bool needSimpleCtrsPriorEstimation = NeedPriorEstimation(options.SimpleCtrs);
@@ -181,14 +181,17 @@ namespace NCatboostCuda {
                 if (!NeedPriorEstimation(currentFeatureDescription)) {
                     return;
                 }
-                auto values = catFeatureValues.ExtractValues(localExecutor);
 
                 for (ui32 i = 0; i < currentFeatureDescription.size(); ++i) {
                     if (currentFeatureDescription[i].Type == ECtrType::Borders && options.TargetBinarization->BorderCount == 1u) {
                         ui32 uniqueValues = dataProvider.ObjectsData->GetQuantizedFeaturesInfo()->GetUniqueValuesCounts(TCatFeatureIdx((ui32)catFeatureIdx)).OnAll;
 
-                        TBetaPriorEstimator::TBetaPrior prior = TBetaPriorEstimator::EstimateBetaPrior(binarizedTarget.data(),
-                                                                                                       (*values).data(), (*values).size(), uniqueValues);
+                        TBetaPriorEstimator::TBetaPrior prior = TBetaPriorEstimator::EstimateBetaPrior(
+                            binarizedTarget.data(),
+                            catFeatureValues.GetBlockIterator(),
+                            catFeatureValues.GetSize(),
+                            uniqueValues
+                        );
 
                         CATBOOST_INFO_LOG << "Estimate borders-ctr prior for feature #" << catFeatureFlatIdx << ": " << prior.Alpha << " / " << prior.Beta << Endl;
                         currentFeatureDescription[i].Priors = {{(float)prior.Alpha, (float)(prior.Alpha + prior.Beta)}};
@@ -207,7 +210,7 @@ namespace NCatboostCuda {
                                                const NCB::TTrainingDataProvider* testProvider,
                                                NCatboostOptions::TCatBoostOptions& catBoostOptions,
                                                TBinarizedFeaturesManager& featuresManager,
-                                               NPar::TLocalExecutor* localExecutor) {
+                                               NPar::ILocalExecutor* localExecutor) {
         UpdateGpuSpecificDefaults(catBoostOptions, featuresManager);
         EstimatePriors(dataProvider, featuresManager, catBoostOptions.CatFeatureParams, localExecutor);
         UpdateDataPartitionType(featuresManager, catBoostOptions);
@@ -231,7 +234,7 @@ namespace NCatboostCuda {
                                                                 TBinarizedFeaturesManager& featuresManager,
                                                                 ui32 approxDimension,
                                                                 ITrainingCallbacks* trainingCallbacks,
-                                                                NPar::TLocalExecutor* localExecutor,
+                                                                NPar::ILocalExecutor* localExecutor,
                                                                 TVector<TVector<double>>* testMultiApprox, // [dim][objectIdx]
                                                                 TMetricsAndTimeLeftHistory* metricsAndTimeHistory) {
         auto& profiler = NCudaLib::GetCudaManager().GetProfiler();
@@ -244,7 +247,7 @@ namespace NCatboostCuda {
         const auto optimizationImplementation = GetTrainerFactoryKey(trainCatBoostOptions);
 
         if (TGpuTrainerFactory::Has(optimizationImplementation)) {
-            THolder<IGpuTrainer> trainer = TGpuTrainerFactory::Construct(optimizationImplementation);
+            THolder<IGpuTrainer> trainer(TGpuTrainerFactory::Construct(optimizationImplementation));
             model = trainer->TrainModel(featuresManager,
                                         internalOptions,
                                         trainCatBoostOptions,
@@ -270,7 +273,7 @@ namespace NCatboostCuda {
                             const TTrainingDataProvider& testProvider,
                             TBinarizedFeaturesManager& featuresManager,
                             ui32 approxDimension,
-                            NPar::TLocalExecutor* localExecutor) {
+                            NPar::ILocalExecutor* localExecutor) {
         auto& profiler = NCudaLib::GetCudaManager().GetProfiler();
 
         ConfigureCudaProfiler(trainCatBoostOptions.IsProfile, &profiler);
@@ -278,7 +281,7 @@ namespace NCatboostCuda {
         const auto optimizationImplementation = GetTrainerFactoryKey(trainCatBoostOptions);
         CB_ENSURE(TGpuTrainerFactory::Has(optimizationImplementation),
             "Error: optimization scheme is not supported for GPU learning " << optimizationImplementation);
-        THolder<IGpuTrainer> trainer = TGpuTrainerFactory::Construct(optimizationImplementation);
+        THolder<IGpuTrainer> trainer(TGpuTrainerFactory::Construct(optimizationImplementation));
         TGpuAwareRandom random(trainCatBoostOptions.RandomSeed);
         trainer->ModelBasedEval(featuresManager,
             trainCatBoostOptions,
@@ -299,12 +302,13 @@ namespace NCatboostCuda {
             const TMaybe<TCustomObjectiveDescriptor>& objectiveDescriptor,
             const TMaybe<TCustomMetricDescriptor>& evalMetricDescriptor,
             TTrainingDataProviders trainingData,
+            TMaybe<NCB::TPrecomputedOnlineCtrData> precomputedSingleOnlineCtrDataForSingleFold,
             const TLabelConverter& labelConverter,
             ITrainingCallbacks* trainingCallbacks,
             TMaybe<TFullModel*> initModel,
             THolder<TLearnProgress> initLearnProgress,
             NCB::TDataProviders initModelApplyCompatiblePools,
-            NPar::TLocalExecutor* localExecutor,
+            NPar::ILocalExecutor* localExecutor,
             const TMaybe<TRestorableFastRng64*> rand,
             TFullModel* dstModel,
             const TVector<TEvalResult*>& evalResultPtrs,
@@ -315,6 +319,8 @@ namespace NCatboostCuda {
             Y_UNUSED(evalMetricDescriptor);
             Y_UNUSED(rand);
             CB_ENSURE(trainingData.Test.size() <= 1, "Multiple eval sets not supported for GPU");
+            CB_ENSURE(!precomputedSingleOnlineCtrDataForSingleFold,
+                      "Precomputed online CTR data for GPU is not yet supported");
             Y_VERIFY(evalResultPtrs.size() == trainingData.Test.size());
             CB_ENSURE(!initModel && !initLearnProgress, "Training continuation for GPU is not yet supported");
             Y_UNUSED(initModelApplyCompatiblePools);
@@ -330,18 +336,20 @@ namespace NCatboostCuda {
                     ->CalcMaxCategoricalFeaturesUniqueValuesCountOnLearn()
                   > updatedCatboostOptions.CatFeatureParams.Get().OneHotMaxSize.Get());
 
-            TTrainingForCPUDataProviders trainingDataForFinalCtrCalculation;
-
-            if (saveFinalCtrsInModel) {
-                // do it at this stage to check before training
-                trainingDataForFinalCtrCalculation = trainingData.Cast<TQuantizedForCPUObjectsDataProvider>();
-            }
-
             auto quantizedFeaturesInfo = trainingData.Learn->ObjectsData->GetQuantizedFeaturesInfo();
-
+            TVector<TExclusiveFeaturesBundle> exclusiveBundlesCopy;
+            const auto lossFunction = catboostOptions.LossFunctionDescription->LossFunction;
+            // TODO(kirillovs): check and enable on pairwise losses
+            if (!IsGpuPlainDocParallelOnlyMode(lossFunction)) {
+                exclusiveBundlesCopy.assign(
+                    trainingData.Learn->ObjectsData->GetExclusiveFeatureBundlesMetaData().begin(),
+                    trainingData.Learn->ObjectsData->GetExclusiveFeatureBundlesMetaData().end()
+                );
+            }
             TBinarizedFeaturesManager featuresManager(updatedCatboostOptions.CatFeatureParams,
                                                       trainingData.FeatureEstimators,
                                                       *trainingData.Learn->MetaInfo.FeaturesLayout,
+                                                      exclusiveBundlesCopy,
                                                       quantizedFeaturesInfo);
 
 
@@ -377,6 +385,8 @@ namespace NCatboostCuda {
             );
 
             TVector<TVector<double>> rawValues(approxDimension);
+
+            CheckMetrics(updatedCatboostOptions.MetricOptions);
 
             TGpuTrainResult gpuFormatModel = TrainModelImpl(
                 internalOptions,
@@ -445,7 +455,7 @@ namespace NCatboostCuda {
             auto targetClassifiers = CreateTargetClassifiers(featuresManager);
 
             EFinalFeatureCalcersComputationMode featureCalcerComputationMode = outputOptions.GetFinalFeatureCalcerComputationMode();
-            if (modelPtr->ModelTrees->GetTextFeatures().empty() ||
+            if (modelPtr->ModelTrees->GetTextFeatures().empty() &&
                 modelPtr->ModelTrees->GetEstimatedFeatures().empty()
             ) {
                 featureCalcerComputationMode = EFinalFeatureCalcersComputationMode::Skip;
@@ -461,7 +471,7 @@ namespace NCatboostCuda {
                 featureCalcerComputationMode);
 
             coreModelToFullModelConverter.WithBinarizedDataComputedFrom(
-                                             std::move(trainingDataForFinalCtrCalculation),
+                                             trainingData,
                                              std::move(featureCombinationToProjection),
                                              targetClassifiers)
                 .WithPerfectHashedToHashedCatValuesMap(
@@ -472,13 +482,14 @@ namespace NCatboostCuda {
                 .WithFeatureEstimators(trainingData.FeatureEstimators);
 
             if (dstModel) {
-                coreModelToFullModelConverter.Do(true, dstModel, localExecutor);
+                coreModelToFullModelConverter.Do(true, dstModel, localExecutor, &targetClassifiers);
             } else {
                 coreModelToFullModelConverter.Do(
                     outputOptions.CreateResultModelFullPath(),
                     outputOptions.GetModelFormats(),
                     outputOptions.AddFileFormatExtension(),
-                    localExecutor);
+                    localExecutor,
+                    &targetClassifiers);
             }
         }
 
@@ -487,7 +498,7 @@ namespace NCatboostCuda {
             const NCatboostOptions::TOutputFilesOptions& outputOptions,
             TTrainingDataProviders trainingData,
             const TLabelConverter& labelConverter,
-            NPar::TLocalExecutor* localExecutor) const override {
+            NPar::ILocalExecutor* localExecutor) const override {
 
             CB_ENSURE(trainingData.Test.size() == 1, "Model based evaluation requires exactly one eval set on GPU");
             CB_ENSURE(!IsMultiRegressionObjective(catboostOptions.LossFunctionDescription->LossFunction),
@@ -498,9 +509,16 @@ namespace NCatboostCuda {
             auto quantizedFeaturesInfo = trainingData.Learn->ObjectsData->GetQuantizedFeaturesInfo();
 
             TFeatureEstimatorsPtr estimators;
+            TVector<TExclusiveFeaturesBundle> exclusiveBundlesCopy;
+            // TODO(kirillovs): check and enable in modelbased eval
+            /*exclusiveBundlesCopy.assign(
+                trainingData.Learn->ObjectsData->GetExclusiveFeatureBundlesMetaData().begin(),
+                trainingData.Learn->ObjectsData->GetExclusiveFeatureBundlesMetaData().end()
+            );*/
             TBinarizedFeaturesManager featuresManager(updatedCatboostOptions.CatFeatureParams,
                                                       estimators,
                                                       *trainingData.Learn->MetaInfo.FeaturesLayout,
+                                                      exclusiveBundlesCopy,
                                                       quantizedFeaturesInfo);
 
             SetDataDependentDefaultsForGpu(
@@ -526,6 +544,8 @@ namespace NCatboostCuda {
                 labelConverter,
                 trainingData.Learn->TargetData->GetTargetDimension()
             );
+
+            CheckMetrics(updatedCatboostOptions.MetricOptions);
 
             ModelBasedEvalImpl(
                 updatedCatboostOptions,

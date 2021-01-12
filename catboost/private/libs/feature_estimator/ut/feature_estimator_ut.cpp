@@ -6,7 +6,7 @@
 #include <catboost/private/libs/text_features/bm25.h>
 #include <catboost/private/libs/text_features/naive_bayesian.h>
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 #include <util/random/fast.h>
 
 
@@ -50,13 +50,13 @@ Y_UNIT_TEST_SUITE(TestFeatureEstimators) {
             }
         };
 
-        class TSampleCountEstimator : public TBaseEstimator<TIdentityCalcer, TIdentityVisitor> {
+        class TSampleCountEstimator : public TTextBaseEstimator<TIdentityCalcer, TIdentityVisitor> {
         public:
             TSampleCountEstimator(
                 TTextClassificationTargetPtr target,
                 TTextDataSetPtr learnTexts,
                 TArrayRef<TTextDataSetPtr> testText)
-                : TBaseEstimator(std::move(target), std::move(learnTexts), testText)
+                : TTextBaseEstimator(std::move(target), std::move(learnTexts), testText)
                 , Identity()
             {
             }
@@ -203,11 +203,9 @@ Y_UNIT_TEST_SUITE(TestFeatureEstimators) {
             {EFeatureCalcerType::NaiveBayes, MakeIntrusive<TNaiveBayesVisitor>()}
         };
 
-        TEmbeddingPtr embeddingPtr;
         for (auto calcerType : calcerTypes) {
-            TVector<TOnlineFeatureEstimatorPtr> estimators = CreateEstimators(
+            TVector<TOnlineFeatureEstimatorPtr> estimators = CreateTextEstimators(
                 {NCatboostOptions::TFeatureCalcerDescription(calcerType)},
-                embeddingPtr,
                 target,
                 learnTexts,
                 testText
@@ -248,9 +246,8 @@ Y_UNIT_TEST_SUITE(TestFeatureEstimators) {
         { // Test BagOfWords
             TFeatureCalcerDescription bowParams(EFeatureCalcerType::BoW);
 
-            TVector<TFeatureEstimatorPtr> estimators = CreateEstimators(
+            TVector<TFeatureEstimatorPtr> estimators = CreateTextEstimators(
                 {bowParams},
-                embeddingPtr,
                 learnTexts,
                 testText
             );

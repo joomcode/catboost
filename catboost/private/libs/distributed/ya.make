@@ -9,16 +9,17 @@ SRCS(
 )
 
 PEERDIR(
-    catboost/private/libs/algo
-    catboost/private/libs/algo_helpers
     catboost/libs/data
     catboost/libs/helpers
-    catboost/private/libs/index_range
     catboost/libs/metrics
+    catboost/private/libs/algo
+    catboost/private/libs/algo/approx_calcer
+    catboost/private/libs/algo_helpers
+    catboost/private/libs/index_range
     catboost/private/libs/options
-    library/binsaver
-    library/json
-    library/par
+    library/cpp/binsaver
+    library/cpp/json
+    library/cpp/par
 )
 
 END()

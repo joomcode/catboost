@@ -2,10 +2,9 @@
 #include <catboost/private/libs/text_features/text_processing_collection.h>
 
 #include <catboost/private/libs/text_features/bow.h>
-#include <catboost/private/libs/text_processing/embedding.h>
 #include <catboost/private/libs/text_processing/text_column_builder.h>
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 using namespace NCB;
 using namespace NCBTest;

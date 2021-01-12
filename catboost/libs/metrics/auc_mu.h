@@ -1,6 +1,6 @@
 #pragma once
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/vector.h>
 #include <util/generic/maybe.h>
@@ -9,7 +9,7 @@ double CalcMuAuc(
     const TVector<TVector<double>>& approx,
     const TConstArrayRef<float>& target,
     const TConstArrayRef<float>& weight,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     const TMaybe<TVector<TVector<double>>>& misclassCostMatrix = Nothing()
 );
 

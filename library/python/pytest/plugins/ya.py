@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import base64
 import re
 import sys
 import os
@@ -7,6 +8,7 @@ import logging
 import fnmatch
 import json
 import time
+import traceback
 import collections
 import py
 import pytest
@@ -15,6 +17,8 @@ import _pytest.mark
 import signal
 import inspect
 import six
+
+import faulthandler
 
 from yatest_lib import test_splitter
 
@@ -29,38 +33,24 @@ except ImportError:
     # fallback for pytest script mode
     import yatest_tools as tools
 
+try:
+    from library.python import filelock
+except ImportError:
+    filelock = None
+
+
 import yatest_lib.tools
 
 import yatest_lib.external as canon
+
+from library.python.pytest import context
 
 console_logger = logging.getLogger("console")
 yatest_logger = logging.getLogger("ya.test")
 
 
 _pytest.main.EXIT_NOTESTSCOLLECTED = 0
-COVERAGE_INSTANCE = [0]
-COVERAGE_ENV_NAME = 'PYTHON_COVERAGE_PREFIX'
 SHUTDOWN_REQUESTED = False
-
-# Start coverage collection as soon as possible to avoid missing coverage for modules imported from plugins
-if COVERAGE_ENV_NAME in os.environ:
-    try:
-        import coverage
-    except ImportError:
-        coverage = None
-        logging.exception("Failed to import coverage module - no coverage will be collected")
-
-    if coverage:
-        cov = coverage.Coverage(
-            data_file=os.environ.get(COVERAGE_ENV_NAME),
-            concurrency=['multiprocessing', 'thread'],
-            auto_data=True,
-            branch=True,
-            # debug=['pid', 'trace', 'sys', 'config'],
-        )
-        cov.start()
-        COVERAGE_INSTANCE[0] = cov
-        logging.info("Coverage will be collected during testing. pid: %d", os.getpid())
 
 
 def to_str(s):
@@ -110,17 +100,42 @@ class YaTestLoggingFileHandler(logging.FileHandler):
     pass
 
 
+class _TokenFilterFormatter(logging.Formatter):
+    def __init__(self, fmt):
+        super(_TokenFilterFormatter, self).__init__(fmt)
+        self._replacements = []
+        if not self._replacements:
+            if six.PY2:
+                for k, v in os.environ.iteritems():
+                    if k.endswith('TOKEN') and v:
+                        self._replacements.append(v)
+            elif six.PY3:
+                for k, v in os.environ.items():
+                    if k.endswith('TOKEN') and v:
+                        self._replacements.append(v)
+            self._replacements = sorted(self._replacements)
+
+    def _filter(self, s):
+        for r in self._replacements:
+            s = s.replace(r, "[SECRET]")
+
+        return s
+
+    def format(self, record):
+        return self._filter(super(_TokenFilterFormatter, self).format(record))
+
+
 def setup_logging(log_path, level=logging.DEBUG, *other_logs):
     logs = [log_path] + list(other_logs)
     root_logger = logging.getLogger()
     for i in range(len(root_logger.handlers) - 1, -1, -1):
         if isinstance(root_logger.handlers[i], YaTestLoggingFileHandler):
-            root_logger.handlers.pop(i)
+            root_logger.handlers.pop(i).close()
     root_logger.setLevel(level)
     for log_file in logs:
         file_handler = YaTestLoggingFileHandler(log_file)
         log_format = '%(asctime)s - %(levelname)s - %(name)s - %(funcName)s: %(message)s'
-        file_handler.setFormatter(logging.Formatter(log_format))
+        file_handler.setFormatter(_TokenFilterFormatter(log_format))
         file_handler.setLevel(level)
         root_logger.addHandler(file_handler)
 
@@ -134,7 +149,7 @@ def pytest_addoption(parser):
     parser.addoption("--python-path", action="store", dest="python_path", default="", help="path the canonical python binary")
     parser.addoption("--valgrind-path", action="store", dest="valgrind_path", default="", help="path the canonical valgring binary")
     parser.addoption("--test-filter", action="append", dest="test_filter", default=None, help="test filter")
-    parser.addoption("--test-file-filter", action="append", dest="test_file_filter", default=None, help="test file filter")
+    parser.addoption("--test-file-filter", action="store", dest="test_file_filter", default=None, help="test file filter")
     parser.addoption("--test-param", action="append", dest="test_params", default=None, help="test parameters")
     parser.addoption("--test-log-level", action="store", dest="test_log_level", choices=["critical", "error", "warning", "info", "debug"], default="debug", help="test log level")
     parser.addoption("--mode", action="store", choices=[RunMode.List, RunMode.Run], dest="mode", default=RunMode.Run, help="testing mode")
@@ -161,18 +176,17 @@ def pytest_addoption(parser):
     parser.addoption("--report-deselected", action="store_true", dest="report_deselected", default=False, help="report deselected tests to the trace file")
     parser.addoption("--pdb-on-sigusr1", action="store_true", default=False, help="setup pdb.set_trace on SIGUSR1")
     parser.addoption("--test-tool-bin", help="Path to test_tool")
+    parser.addoption("--test-list-path", dest="test_list_path", action="store", help="path to test list", default="")
 
 
 def pytest_configure(config):
     config.option.continue_on_collection_errors = True
 
-    # XXX Strip java contrib from dep_roots - it's python-irrelevant code,
-    # The number of such deps may lead to problems - see https://st.yandex-team.ru/DEVTOOLS-4627
-    config.option.dep_roots = [e for e in config.option.dep_roots if not e.startswith('contrib/java')]
-
     config.from_ya_test = "YA_TEST_RUNNER" in os.environ
     config.test_logs = collections.defaultdict(dict)
     config.test_metrics = {}
+    config.suite_metrics = {}
+    config.configure_timestamp = time.time()
     context = {
         "project_path": config.option.project_path,
         "test_stderr": config.option.test_stderr,
@@ -219,23 +233,29 @@ def pytest_configure(config):
             if envvar + '_ORIGINAL' in os.environ:
                 os.environ[envvar] = os.environ[envvar + '_ORIGINAL']
 
-    config.coverage = None
-    if COVERAGE_INSTANCE[0]:
-        cov_prefix = os.environ[COVERAGE_ENV_NAME]
-        config.coverage_data_dir = os.path.dirname(cov_prefix)
-
     if config.option.root_dir:
         config.rootdir = config.invocation_dir = py.path.local(config.option.root_dir)
 
-    # Arcadia paths from the test DEPENDS section of CMakeLists.txt
-    sys.path.insert(0, os.path.join(config.option.source_root, config.option.project_path))
-    sys.path.extend([os.path.join(config.option.source_root, d) for d in config.option.dep_roots])
-    sys.path.extend([os.path.join(config.option.build_root, d) for d in config.option.dep_roots])
-
+    extra_sys_path = []
+    # Arcadia paths from the test DEPENDS section of ya.make
+    extra_sys_path.append(os.path.join(config.option.source_root, config.option.project_path))
     # Build root is required for correct import of protobufs, because imports are related to the root
     # (like import devtools.dummy_arcadia.protos.lib.my_proto_pb2)
-    sys.path.append(config.option.build_root)
-    os.environ["PYTHONPATH"] = os.pathsep.join(os.environ.get("PYTHONPATH", "").split(os.pathsep) + sys.path)
+    extra_sys_path.append(config.option.build_root)
+
+    for path in config.option.dep_roots:
+        if os.path.isabs(path):
+            extra_sys_path.append(path)
+        else:
+            extra_sys_path.append(os.path.join(config.option.source_root, path))
+
+    sys_path_set = set(sys.path)
+    for path in extra_sys_path:
+        if path not in sys_path_set:
+            sys.path.append(path)
+            sys_path_set.add(path)
+
+    os.environ["PYTHONPATH"] = os.pathsep.join(sys.path)
 
     if not config.option.collectonly:
         if config.option.ya_trace_path:
@@ -248,14 +268,24 @@ def pytest_configure(config):
     if config.option.pdb_on_sigusr1:
         configure_pdb_on_demand()
 
+    # Dump python backtrace in case of any errors
+    faulthandler.enable()
+    if hasattr(signal, "SIGQUIT"):
+        # SIGQUIT is used by test_tool to teardown tests which overruns timeout
+        faulthandler.register(signal.SIGQUIT, chain=True)
+
     if hasattr(signal, "SIGUSR2"):
-        signal.signal(signal.SIGUSR2, _smooth_shutdown)
+        signal.signal(signal.SIGUSR2, _graceful_shutdown)
 
 
-def _smooth_shutdown(*args):
-    if COVERAGE_INSTANCE[0]:
-        COVERAGE_INSTANCE[0].stop()
-    pytest.exit("Smooth shutdown requested")
+def _graceful_shutdown(*args):
+    try:
+        import library.python.coverage
+        library.python.coverage.stop_coverage_tracing()
+    except ImportError:
+        pass
+    traceback.print_stack(file=sys.stderr)
+    pytest.exit("Graceful shutdown requested")
 
 
 def _get_rusage():
@@ -335,7 +365,8 @@ def pytest_runtest_teardown(item, nextitem):
 
 
 def pytest_runtest_call(item):
-    yatest_logger.info("Test call")
+    class_name, test_name = tools.split_node_id(item.nodeid)
+    yatest_logger.info("Test call (class_name: %s, test_name: %s)", class_name, test_name)
 
 
 def pytest_deselected(items):
@@ -344,7 +375,6 @@ def pytest_deselected(items):
         for item in items:
             deselected_item = DeselectedTestItem(item.nodeid, config.option.test_suffix)
             config.ya_trace_reporter.on_start_test_class(deselected_item)
-            config.ya_trace_reporter.on_start_test_case(deselected_item)
             config.ya_trace_reporter.on_finish_test_case(deselected_item)
             config.ya_trace_reporter.on_finish_test_class(deselected_item)
 
@@ -371,41 +401,58 @@ def pytest_collection_modifyitems(items, config):
         config.hook.pytest_deselected(items=deselected_items)
         items[:] = filtered_items
 
+    def filter_by_full_name(filters):
+        filter_set = {flt for flt in filters}
+        filtered_items = []
+        deselected_items = []
+        for item in items:
+            if item.nodeid in filter_set:
+                filtered_items.append(item)
+            else:
+                deselected_items.append(item)
+
+        config.hook.pytest_deselected(items=deselected_items)
+        items[:] = filtered_items
+
     # XXX - check to be removed when tests for peerdirs don't run
     for item in items:
         if not item.nodeid:
             item._nodeid = os.path.basename(item.location[0])
-
-    if config.option.test_filter:
-        filter_items(config.option.test_filter)
-    partition_mode = config.option.partition_mode
-    modulo = config.option.modulo
-    if modulo > 1:
-        items[:] = sorted(items, key=lambda item: item.nodeid)
-        modulo_index = config.option.modulo_index
-        split_by_tests = config.option.split_by_tests
-        items_by_classes = {}
-        res = []
-        for item in items:
-            if item.nodeid.count("::") == 2 and not split_by_tests:
-                class_name = item.nodeid.rsplit("::", 1)[0]
-                if class_name not in items_by_classes:
-                    items_by_classes[class_name] = []
-                    res.append(items_by_classes[class_name])
-                items_by_classes[class_name].append(item)
-            else:
-                res.append([item])
-        chunk_items = test_splitter.get_splitted_tests(res, modulo, modulo_index, partition_mode, is_sorted=True)
-        items[:] = []
-        for item in chunk_items:
-            items.extend(item)
-        yatest_logger.info("Modulo %s tests are: %s", modulo_index, chunk_items)
+    if os.path.exists(config.option.test_list_path):
+        with open(config.option.test_list_path, 'r') as afile:
+            chunks = json.load(afile)
+            filters = chunks[config.option.modulo_index]
+            filter_by_full_name(filters)
+    else:
+        if config.option.test_filter:
+            filter_items(config.option.test_filter)
+        partition_mode = config.option.partition_mode
+        modulo = config.option.modulo
+        if modulo > 1:
+            items[:] = sorted(items, key=lambda item: item.nodeid)
+            modulo_index = config.option.modulo_index
+            split_by_tests = config.option.split_by_tests
+            items_by_classes = {}
+            res = []
+            for item in items:
+                if item.nodeid.count("::") == 2 and not split_by_tests:
+                    class_name = item.nodeid.rsplit("::", 1)[0]
+                    if class_name not in items_by_classes:
+                        items_by_classes[class_name] = []
+                        res.append(items_by_classes[class_name])
+                    items_by_classes[class_name].append(item)
+                else:
+                    res.append([item])
+            chunk_items = test_splitter.get_splitted_tests(res, modulo, modulo_index, partition_mode, is_sorted=True)
+            items[:] = []
+            for item in chunk_items:
+                items.extend(item)
+            yatest_logger.info("Modulo %s tests are: %s", modulo_index, chunk_items)
 
     if config.option.mode == RunMode.Run:
         for item in items:
             test_item = NotLaunchedTestItem(item.nodeid, config.option.test_suffix)
             config.ya_trace_reporter.on_start_test_class(test_item)
-            config.ya_trace_reporter.on_start_test_case(test_item)
             config.ya_trace_reporter.on_finish_test_case(test_item)
             config.ya_trace_reporter.on_finish_test_class(test_item)
     elif config.option.mode == RunMode.List:
@@ -480,8 +527,13 @@ def pytest_runtest_makereport(item, call):
             yatest_logger.error(longrepr)
         return _pytest.runner.TestReport(item.nodeid, item.location, keywords, outcome, longrepr, when, sections, duration)
 
-    def logreport(report, result):
+    def logreport(report, result, call):
         test_item = TestItem(report, result, pytest.config.option.test_suffix)
+        if not pytest.config.suite_metrics:
+            pytest.config.suite_metrics["pytest_startup_duration"] = call.start - context.Ctx["YA_PYTEST_START_TIMESTAMP"]
+            pytest.config.ya_trace_reporter.dump_suite_metrics()
+
+        pytest.config.ya_trace_reporter.on_log_report(test_item)
         if report.when == "call":
             _collect_test_rusage(item)
             pytest.config.ya_trace_reporter.on_finish_test_case(test_item)
@@ -496,6 +548,8 @@ def pytest_runtest_makereport(item, call):
             if report.outcome == "failed":
                 pytest.config.ya_trace_reporter.on_start_test_case(test_item)
                 pytest.config.ya_trace_reporter.on_finish_test_case(test_item)
+            else:
+                pytest.config.ya_trace_reporter.on_finish_test_case(test_item, duration_only=True)
             pytest.config.ya_trace_reporter.on_finish_test_class(test_item)
 
     rep = makereport(item, call)
@@ -543,7 +597,7 @@ def pytest_runtest_makereport(item, call):
                     rep.wasxfail = evalxfail.getexplanation()
                     return rep
     finally:
-        logreport(rep, result)
+        logreport(rep, result, call)
     return rep
 
 
@@ -707,27 +761,39 @@ class DeselectedTestItem(CustomTestItem):
 class TraceReportGenerator(object):
 
     def __init__(self, out_file_path):
-        self.File = open(out_file_path, 'w')
+        self._filename = out_file_path
+        self._file = open(out_file_path, 'w')
+        self._test_messages = {}
+        self._test_duration = {}
+        # Some machinery to avoid data corruption due sloppy fork()
+        self._current_test = (None, None)
+        self._pid = os.getpid()
+        self._wreckage_filename = out_file_path + '.wreckage'
 
     def on_start_test_class(self, test_item):
         pytest.config.ya.set_test_item_node_id(test_item.nodeid)
-        self.trace('test-started', {'class': test_item.class_name.decode('utf-8') if sys.version_info[0] < 3 else test_item.class_name})
+        class_name = test_item.class_name.decode('utf-8') if sys.version_info[0] < 3 else test_item.class_name
+        self._current_test = (class_name, None)
+        self.trace('test-started', {'class': class_name})
 
     def on_finish_test_class(self, test_item):
         pytest.config.ya.set_test_item_node_id(test_item.nodeid)
         self.trace('test-finished', {'class': test_item.class_name.decode('utf-8') if sys.version_info[0] < 3 else test_item.class_name})
 
     def on_start_test_case(self, test_item):
+        class_name = yatest_lib.tools.to_utf8(test_item.class_name)
+        subtest_name = yatest_lib.tools.to_utf8(test_item.test_name)
         message = {
-            'class': yatest_lib.tools.to_utf8(test_item.class_name),
-            'subtest': yatest_lib.tools.to_utf8(test_item.test_name)
+            'class': class_name,
+            'subtest': subtest_name,
         }
         if test_item.nodeid in pytest.config.test_logs:
             message['logs'] = pytest.config.test_logs[test_item.nodeid]
         pytest.config.ya.set_test_item_node_id(test_item.nodeid)
+        self._current_test = (class_name, subtest_name)
         self.trace('subtest-started', message)
 
-    def on_finish_test_case(self, test_item):
+    def on_finish_test_case(self, test_item, duration_only=False):
         if test_item.result is not None:
             try:
                 result = canon.serialize(test_item.result)
@@ -738,23 +804,42 @@ class TraceReportGenerator(object):
                 result = None
         else:
             result = None
-        message = {
-            'class': yatest_lib.tools.to_utf8(test_item.class_name),
-            'subtest': yatest_lib.tools.to_utf8(test_item.test_name),
-            'status': test_item.status,
-            'comment': self._get_comment(test_item),
-            'time': test_item.duration,
-            'result': result,
-            'metrics': pytest.config.test_metrics.get(test_item.nodeid),
-            'is_diff_test': 'diff_test' in test_item.keywords,
-            'tags': _get_item_tags(test_item),
-        }
-        if test_item.nodeid in pytest.config.test_logs:
-            message['logs'] = pytest.config.test_logs[test_item.nodeid]
+
+        if duration_only and test_item.nodeid in self._test_messages:  # add teardown time
+            message = self._test_messages[test_item.nodeid]
+        else:
+            comment = self._test_messages[test_item.nodeid]['comment'] if test_item.nodeid in self._test_messages else ''
+            comment += self._get_comment(test_item)
+            message = {
+                'class': yatest_lib.tools.to_utf8(test_item.class_name),
+                'subtest': yatest_lib.tools.to_utf8(test_item.test_name),
+                'status': test_item.status,
+                'comment': comment,
+                'result': result,
+                'metrics': pytest.config.test_metrics.get(test_item.nodeid),
+                'is_diff_test': 'diff_test' in test_item.keywords,
+                'tags': _get_item_tags(test_item),
+            }
+            if test_item.nodeid in pytest.config.test_logs:
+                message['logs'] = pytest.config.test_logs[test_item.nodeid]
+
+        message['time'] = self._test_duration.get(test_item.nodeid, test_item.duration)
+
         self.trace('subtest-finished', message)
+        self._test_messages[test_item.nodeid] = message
+
+    def dump_suite_metrics(self):
+        message = {"metrics": pytest.config.suite_metrics}
+        self.trace("suite-event", message)
 
     def on_error(self, test_item):
         self.trace('suite_event', {"errors": [(test_item.status, self._get_comment(test_item))]})
+
+    def on_log_report(self, test_item):
+        if test_item.nodeid in self._test_duration:
+            self._test_duration[test_item.nodeid] += test_item._duration
+        else:
+            self._test_duration[test_item.nodeid] = test_item._duration
 
     @staticmethod
     def _get_comment(test_item):
@@ -763,15 +848,73 @@ class TraceReportGenerator(object):
             return ""
         return msg + "[[rst]]"
 
-    def trace(self, name, value):
+    def _dump_trace(self, name, value):
         event = {
             'timestamp': time.time(),
             'value': value,
             'name': name
         }
+
         data = to_str(json.dumps(event, ensure_ascii=False))
-        self.File.write(data + '\n')
-        self.File.flush()
+        self._file.write(data + '\n')
+        self._file.flush()
+
+    def _check_sloppy_fork(self, name, value):
+        if self._pid == os.getpid():
+            return
+
+        yatest_logger.error("Skip tracing to avoid data corruption, name = %s, value = %s", name, value)
+
+        try:
+            # Lock wreckage tracefile to avoid race if multiple tests use fork sloppily
+            if filelock:
+                lock = filelock.FileLock(self._wreckage_filename + '.lock')
+                lock.acquire()
+
+            with open(self._wreckage_filename, 'a') as afile:
+                self._file = afile
+
+                parts = [
+                    "It looks like you have leaked process - it could corrupt internal test machinery files.",
+                    "Usually it happens when you casually use fork() without os._exit(),",
+                    "which results in two pytest processes running at the same time.",
+                    "Pid of the original pytest's process is {}, however current process has {} pid.".format(self._pid, os.getpid()),
+                ]
+                if self._current_test[1]:
+                    parts.append("Most likely the problem is in '{}' test.".format(self._current_test))
+                else:
+                    parts.append("Most likely new process was created before any test was launched (during the import stage?).")
+
+                if value.get('comment'):
+                    comment = value.get('comment', '').strip()
+                    # multiline comment
+                    newline_required = '\n' if '\n' in comment else ''
+                    parts.append("Debug info: name = '{}' comment:{}{}".format(name, newline_required, comment))
+                else:
+                    val_str = json.dumps(value, ensure_ascii=False).encode('utf-8')
+                    parts.append("Debug info: name = '{}' value = '{}'".format(name, base64.b64encode(val_str)))
+
+                msg = "[[bad]]{}".format('\n'.join(parts))
+                class_name, subtest_name = self._current_test
+                if subtest_name:
+                    data = {
+                        'class': class_name,
+                        'subtest': subtest_name,
+                        'status': 'fail',
+                        'comment': msg,
+                    }
+                    # overwrite original status
+                    self._dump_trace('subtest-finished', data)
+                else:
+                    self._dump_trace('suite_event', {"errors": [('fail', msg)]})
+        except Exception as e:
+            yatest_logger.exception(e)
+        finally:
+            os._exit(38)
+
+    def trace(self, name, value):
+        self._check_sloppy_fork(name, value)
+        self._dump_trace(name, value)
 
 
 class DryTraceReportGenerator(TraceReportGenerator):
@@ -780,7 +923,8 @@ class DryTraceReportGenerator(TraceReportGenerator):
     """
 
     def __init__(self, *args, **kwargs):
-        pass
+        self._test_messages = {}
+        self._test_duration = {}
 
     def trace(self, name, value):
         pass
@@ -871,11 +1015,18 @@ class Ya(object):
         if os.name == "nt":
             if not path[-1].endswith(".exe"):
                 path[-1] += ".exe"
-        for binary_path in [os.path.join(self.build_root, "bin", *path), os.path.join(self.build_root, *path)]:
+
+        target_dirs = [self.build_root]
+        # Search for binaries within PATH dirs to be able to get path to the binaries specified by basename for exectests
+        if 'PATH' in os.environ:
+            target_dirs += os.environ['PATH'].split(':')
+
+        for target_dir in target_dirs:
+            binary_path = os.path.join(target_dir, *path)
             if os.path.exists(binary_path):
                 yatest_logger.debug("Binary was found by %s", binary_path)
                 return binary_path
-            yatest_logger.debug("%s not found", binary_path)
+
         error_message = "Cannot find binary '{binary}': make sure it was added in the DEPENDS section".format(binary=path)
         yatest_logger.debug(error_message)
         if self._mode == RunMode.Run:
@@ -911,14 +1062,25 @@ class Ya(object):
         return root
 
     def _detect_output_root(self):
-        for p in [
-            # if run from kept test working dir
-            tools.TESTING_OUT_DIR_NAME,
-            # if run from source dir
-            os.path.join("test-results", os.path.basename(os.path.splitext(sys.argv[0])[0]), tools.TESTING_OUT_DIR_NAME),
-        ]:
-            if os.path.exists(p):
-                return p
+
+        # if run from kept test working dir
+        if os.path.exists(tools.TESTING_OUT_DIR_NAME):
+            return tools.TESTING_OUT_DIR_NAME
+
+        # if run from source dir
+        if sys.version_info.major == 3:
+            test_results_dir = "py3test"
+        else:
+            test_results_dir = "pytest"
+
+        test_results_output_path = os.path.join("test-results", test_results_dir, tools.TESTING_OUT_DIR_NAME)
+        if os.path.exists(test_results_output_path):
+            return test_results_output_path
+
+        if os.path.exists(os.path.dirname(test_results_output_path)):
+            os.mkdir(test_results_output_path)
+            return test_results_output_path
+
         return None
 
     def set_test_item_node_id(self, node_id):

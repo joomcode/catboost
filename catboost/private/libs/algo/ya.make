@@ -15,6 +15,8 @@ SRCS(
     calc_score_cache.cpp
     ctr_helper.cpp
     data.cpp
+    estimated_features.cpp
+    feature_penalties_calcer.cpp
     features_data_helpers.cpp
     fold.cpp
     full_model_saver.cpp
@@ -46,43 +48,47 @@ SRCS(
     confusion_matrix.cpp
 )
 
+IF (USE_MPI)
+    CFLAGS(-DUSE_MPI)
+ENDIF()
+
 PEERDIR(
-    catboost/private/libs/algo/approx_calcer
-    catboost/private/libs/algo_helpers
     catboost/libs/cat_feature
     catboost/libs/data
-    catboost/private/libs/data_types
     catboost/libs/eval_result
-    catboost/private/libs/feature_estimator
-    catboost/private/libs/functools
     catboost/libs/helpers
-    catboost/private/libs/index_range
-    catboost/private/libs/labels
-    catboost/private/libs/lapack
     catboost/libs/loggers
     catboost/libs/logging
     catboost/libs/metrics
     catboost/libs/model
+    catboost/libs/overfitting_detector
+    catboost/private/libs/algo/approx_calcer
+    catboost/private/libs/algo_helpers
+    catboost/private/libs/data_types
+    catboost/private/libs/feature_estimator
+    catboost/private/libs/functools
+    catboost/private/libs/index_range
+    catboost/private/libs/labels
+    catboost/private/libs/lapack
     catboost/private/libs/target
     catboost/private/libs/text_features
     catboost/private/libs/options
-    catboost/libs/overfitting_detector
-    library/binsaver
-    library/containers/2d_array
-    library/containers/dense_hash
-    library/containers/stack_vector
-    library/digest/crc32c
-    library/digest/md5
-    library/dot_product
-    library/fast_exp
-    library/fast_log
-    library/grid_creator
-    library/json
-    library/malloc/api
-    library/object_factory
-    library/sse
-    library/svnversion
-    library/threading/local_executor
+    library/cpp/binsaver
+    library/cpp/containers/2d_array
+    library/cpp/containers/dense_hash
+    library/cpp/containers/stack_vector
+    library/cpp/digest/crc32c
+    library/cpp/digest/md5
+    library/cpp/dot_product
+    library/cpp/fast_exp
+    library/cpp/fast_log
+    library/cpp/grid_creator
+    library/cpp/json
+    library/cpp/malloc/api
+    library/cpp/object_factory
+    library/cpp/sse
+    library/cpp/svnversion
+    library/cpp/threading/local_executor
 )
 
 END()

@@ -2,7 +2,7 @@
 
 #include <catboost/libs/helpers/vector_helpers.h>
 
-#include <library/grid_creator/binarization.h>
+#include <library/cpp/grid_creator/binarization.h>
 
 #include <util/generic/algorithm.h>
 
@@ -41,7 +41,8 @@ TTargetClassifier BuildTargetClassifier(
     const TMaybe<TCustomObjectiveDescriptor>& objectiveDescriptor,
     int targetBorderCount,
     EBorderSelectionType targetBorderType,
-    bool allowConstLabel) {
+    bool allowConstLabel,
+    ui32 targetId = 0) {
 
     if (targetBorderCount == 0) {
         return TTargetClassifier();
@@ -56,6 +57,11 @@ TTargetClassifier BuildTargetClassifier(
 
     switch (loss) {
         case ELossFunction::RMSE:
+        case ELossFunction::MultiRMSE:
+            return TTargetClassifier(
+                SelectBorders(target, targetBorderCount, targetBorderType, allowConstLabel),
+                targetId);
+        case ELossFunction::RMSEWithUncertainty:
         case ELossFunction::Quantile:
         case ELossFunction::Expectile:
         case ELossFunction::Lq:
@@ -70,22 +76,27 @@ TTargetClassifier BuildTargetClassifier(
         case ELossFunction::YetiRank:
         case ELossFunction::YetiRankPairwise:
         case ELossFunction::StochasticFilter:
+        case ELossFunction::StochasticRank:
         case ELossFunction::Logloss:
         case ELossFunction::CrossEntropy:
         case ELossFunction::Huber:
         case ELossFunction::UserPerObjMetric:
         case ELossFunction::UserQuerywiseMetric:
+        case ELossFunction::Tweedie:
             return TTargetClassifier(
-                SelectBorders(target, targetBorderCount, targetBorderType, allowConstLabel));
+                SelectBorders(target, targetBorderCount, targetBorderType, allowConstLabel),
+                targetId);
 
         case ELossFunction::MultiClass:
         case ELossFunction::MultiClassOneVsAll:
-            return TTargetClassifier(GetMultiClassBorders(targetBorderCount));
+            return TTargetClassifier(GetMultiClassBorders(targetBorderCount), targetId);
 
+        case ELossFunction::PythonUserDefinedMultiRegression:
         case ELossFunction::PythonUserDefinedPerObject: {
             Y_ASSERT(objectiveDescriptor.Defined());
             return TTargetClassifier(
-                SelectBorders(target, targetBorderCount, targetBorderType, allowConstLabel));
+                SelectBorders(target, targetBorderCount, targetBorderType, allowConstLabel),
+                targetId);
         }
 
         default:

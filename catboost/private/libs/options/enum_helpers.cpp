@@ -27,7 +27,8 @@ namespace {
         IsPairwise                     = 1 << 5,
 
         /* various */
-        IsUserDefined                  = 1 << 6
+        IsUserDefined                  = 1 << 6,
+        IsCombination                  = 1 << 7
     };
 
     using EMetricAttributes = TFlags<EMetricAttribute>;
@@ -48,6 +49,7 @@ namespace {
                       || HasFlags(EMetricAttribute::IsGroupwise)
                       || HasFlags(EMetricAttribute::IsPairwise)
                       || HasFlags(EMetricAttribute::IsUserDefined)
+                      || HasFlags(EMetricAttribute::IsCombination)
                       || HasFlags(EMetricAttribute::IsMultiRegression),
                       "no type (regression, classification, ranking) for [" + ToString(loss) + "]");
         }
@@ -63,6 +65,7 @@ namespace {
                       || HasFlags(EMetricAttribute::IsGroupwise)
                       || HasFlags(EMetricAttribute::IsPairwise)
                       || HasFlags(EMetricAttribute::IsUserDefined)
+                      || HasFlags(EMetricAttribute::IsCombination)
                       || HasFlags(EMetricAttribute::IsMultiRegression),
                       "no type (regression, classification, ranking) for [" + ToString(loss) + "]");
         }
@@ -133,6 +136,9 @@ MakeRegister(LossInfos,
     ),
     Registree(MultiRMSE,
         EMetricAttribute::IsMultiRegression
+    ),
+    Registree(RMSEWithUncertainty,
+        EMetricAttribute::IsRegression
     ),
     Registree(RMSE,
         EMetricAttribute::IsRegression
@@ -209,7 +215,13 @@ MakeRegister(LossInfos,
         EMetricAttribute::IsBinaryClassCompatible
         | EMetricAttribute::IsGroupwise
     ),
+    RankingRegistree(StochasticRank, ERankingType::Order,
+        EMetricAttribute::IsGroupwise
+    ),
     Registree(PythonUserDefinedPerObject,
+        EMetricAttribute::IsUserDefined
+    ),
+    Registree(PythonUserDefinedMultiRegression,
         EMetricAttribute::IsUserDefined
     ),
     Registree(UserPerObjMetric,
@@ -228,6 +240,10 @@ MakeRegister(LossInfos,
         EMetricAttribute::IsRegression
     ),
     Registree(AUC,
+        EMetricAttribute::IsBinaryClassCompatible
+        | EMetricAttribute::IsMultiClassCompatible
+    ),
+    Registree(PRAUC,
         EMetricAttribute::IsBinaryClassCompatible
         | EMetricAttribute::IsMultiClassCompatible
     ),
@@ -291,6 +307,9 @@ MakeRegister(LossInfos,
         EMetricAttribute::IsBinaryClassCompatible
         | EMetricAttribute::IsMultiClassCompatible
     ),
+    Registree(Combination,
+        EMetricAttribute::IsCombination
+    ),
     RankingRegistree(PairAccuracy, ERankingType::CrossEntropy,
         EMetricAttribute::IsBinaryClassCompatible
         | EMetricAttribute::IsGroupwise
@@ -331,6 +350,9 @@ MakeRegister(LossInfos,
     RankingRegistree(FilteredDCG, ERankingType::Order,
         EMetricAttribute::IsBinaryClassCompatible
         | EMetricAttribute::IsGroupwise
+    ),
+    Registree(Tweedie,
+        EMetricAttribute::IsRegression
     )
 )
 
@@ -412,6 +434,7 @@ bool IsCvStratifiedObjective(ELossFunction loss) {
 
 static const TVector<ELossFunction> RegressionObjectives = {
     ELossFunction::RMSE,
+    ELossFunction::RMSEWithUncertainty,
     ELossFunction::MAE,
     ELossFunction::Quantile,
     ELossFunction::LogLinQuantile,
@@ -419,11 +442,13 @@ static const TVector<ELossFunction> RegressionObjectives = {
     ELossFunction::MAPE,
     ELossFunction::Poisson,
     ELossFunction::Lq,
-    ELossFunction::Huber
+    ELossFunction::Huber,
+    ELossFunction::Tweedie
 };
 
 static const TVector<ELossFunction> MultiRegressionObjectives = {
-    ELossFunction::MultiRMSE
+    ELossFunction::MultiRMSE,
+    ELossFunction::PythonUserDefinedMultiRegression
 };
 
 static const TVector<ELossFunction> ClassificationObjectives = {
@@ -442,8 +467,10 @@ static const TVector<ELossFunction> RankingObjectives = {
     ELossFunction::QuerySoftMax,
     ELossFunction::QueryCrossEntropy,
     ELossFunction::StochasticFilter,
+    ELossFunction::StochasticRank,
     ELossFunction::UserPerObjMetric,
-    ELossFunction::UserQuerywiseMetric
+    ELossFunction::UserQuerywiseMetric,
+    ELossFunction::Combination
 };
 
 static const TVector<ELossFunction> Objectives = []() {
@@ -557,6 +584,11 @@ bool IsUserDefined(ELossFunction loss) {
     return GetInfo(loss)->HasFlags(EMetricAttribute::IsUserDefined);
 }
 
+bool IsUserDefined(TStringBuf metricName) {
+    ELossFunction lossType = ParseLossType(metricName);
+    return IsUserDefined(lossType);
+}
+
 bool IsClassificationObjective(const TStringBuf lossDescription) {
     ELossFunction lossType = ParseLossType(lossDescription);
     return IsClassificationObjective(lossType);
@@ -617,9 +649,8 @@ bool AreZeroWeightsAfterBootstrap(EBootstrapType type) {
 
 bool IsEmbeddingFeatureEstimator(EFeatureCalcerType estimatorType) {
     return (
-        estimatorType == EFeatureCalcerType::CosDistanceWithClassCenter ||
-        estimatorType == EFeatureCalcerType::GaussianHomoscedasticModel ||
-        estimatorType == EFeatureCalcerType::GaussianHeteroscedasticModel
+        estimatorType == EFeatureCalcerType::LDA ||
+        estimatorType == EFeatureCalcerType::KNN
     );
 }
 
@@ -673,4 +704,29 @@ bool IsInternalFeatureImportanceType(EFstrType type) {
         type == EFstrType::InternalFeatureImportance ||
         type == EFstrType::InternalInteraction
     );
+}
+
+bool IsUncertaintyPredictionType(EPredictionType type) {
+    return (
+        type == EPredictionType::TotalUncertainty ||
+        type == EPredictionType::VirtEnsembles
+    );
+}
+
+EEstimatedSourceFeatureType FeatureTypeToEstimatedSourceFeatureType(EFeatureType featureType) {
+    if (featureType == EFeatureType::Text) {
+        return EEstimatedSourceFeatureType::Text;
+    } else {
+        CB_ENSURE(featureType == EFeatureType::Embedding);
+        return EEstimatedSourceFeatureType::Embedding;
+    }
+}
+
+EFeatureType EstimatedSourceFeatureTypeToFeatureType(EEstimatedSourceFeatureType featureType) {
+    if (featureType == EEstimatedSourceFeatureType::Text) {
+        return EFeatureType::Text;
+    } else {
+        CB_ENSURE(featureType == EEstimatedSourceFeatureType::Embedding);
+        return EFeatureType::Embedding;
+    }
 }

@@ -66,6 +66,7 @@ def on_go_process_srcs(unit):
     asm_files = []
     c_files = []
     cxx_files = []
+    ev_files = []
     go_files = []
     in_files = []
     proto_files = []
@@ -77,6 +78,7 @@ def on_go_process_srcs(unit):
         '.cc': cxx_files,
         '.cpp': cxx_files,
         '.cxx': cxx_files,
+        '.ev': ev_files,
         '.go': go_files,
         '.in': in_files,
         '.proto': proto_files,
@@ -96,7 +98,7 @@ def on_go_process_srcs(unit):
             if is_cgo_export:
                 is_cgo_export = False
                 if ext in ('.c', '.cc', '.cpp', '.cxx', '.C'):
-                    unit.oncopy_file([f, f, 'OUTPUT_INCLUDES', '${BINDIR}/_cgo_export.h'])
+                    unit.oncopy_file_with_context([f, f, 'OUTPUT_INCLUDES', '${BINDIR}/_cgo_export.h'])
                     f = '${BINDIR}/' + f
                 else:
                     ymake.report_configure_error('Unmatched CGO_EXPORT keyword in SRCS()/_GO_SRCS() macro')
@@ -118,24 +120,26 @@ def on_go_process_srcs(unit):
         if not f.endswith('_test.go'):
             ymake.report_configure_error('file {} should not be listed in GO_TEST_SRCS() or GO_XTEST_SRCS() macros'.format(f))
 
-    # Add gofmt style checks
-    resolved_go_files = []
-    for path in itertools.chain(go_files, go_test_files, go_xtest_files):
-        if path.endswith('.go'):
-            resolved = unit.resolve_arc_path([path])
-            if resolved != path and need_lint(resolved):
-                resolved_go_files.append(resolved)
-    if resolved_go_files:
-        basedirs = {}
-        for f in resolved_go_files:
-            basedir = os.path.dirname(f)
-            if basedir not in basedirs:
-                basedirs[basedir] = []
-            basedirs[basedir].append(f)
-        for basedir in basedirs:
-            unit.onadd_check(['gofmt'] + basedirs[basedir])
-
     is_test_module = unit.enabled('GO_TEST_MODULE')
+
+    # Add gofmt style checks
+    if unit.enabled('_GO_FMT_ADD_CHECK'):
+        resolved_go_files = []
+        go_source_files = [] if is_test_module and unit.get(['GO_TEST_FOR_DIR']) else go_files
+        for path in itertools.chain(go_source_files, go_test_files, go_xtest_files):
+            if path.endswith('.go'):
+                resolved = unit.resolve_arc_path([path])
+                if resolved != path and need_lint(resolved):
+                    resolved_go_files.append(resolved)
+        if resolved_go_files:
+            basedirs = {}
+            for f in resolved_go_files:
+                basedir = os.path.dirname(f)
+                if basedir not in basedirs:
+                    basedirs[basedir] = []
+                basedirs[basedir].append(f)
+            for basedir in basedirs:
+                unit.onadd_check(['gofmt'] + basedirs[basedir])
 
     # Go coverage instrumentation (NOTE! go_files list is modified here)
     if is_test_module and unit.enabled('GO_TEST_COVER'):
@@ -164,8 +168,14 @@ def on_go_process_srcs(unit):
     unit_path = unit.path()
 
     # Add go vet check
-    if unit.enabled('_GO_VET') and not unit.enabled('NO_GO_VET') and need_lint(unit_path):
-        unit.onadd_check(["govet", '$(BUILD_ROOT)/' + tobuilddir(os.path.join(unit_path, unit.filename() + '.vet.txt'))[3:]])
+    if unit.enabled('_GO_VET_ADD_CHECK') and need_lint(unit_path):
+        vet_report_file_name = os.path.join(unit_path, '{}{}'.format(unit.filename(), unit.get('GO_VET_REPORT_EXT')))
+        unit.onadd_check(["govet", '$(BUILD_ROOT)/' + tobuilddir(vet_report_file_name)[3:]])
+
+    for f in ev_files:
+        ev_proto_file = '{}.proto'.format(f)
+        unit.oncopy_file_with_context([f, ev_proto_file])
+        proto_files.append(ev_proto_file)
 
     # Process .proto files
     for f in proto_files:

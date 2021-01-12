@@ -1,6 +1,6 @@
 #include "base.h"
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 #include <util/generic/utility.h>
 #include <util/generic/ylimits.h>
@@ -184,7 +184,7 @@ Y_UNIT_TEST_SUITE(TDateTimeTest) {
                                 << a.tm_mon << ", "
                                 << a.tm_year << ", "
                                 << a.tm_wday << ", "
-#if !defined(_musl_)
+#if !defined(_musl_) && !defined(_win_)
                                 << a.tm_yday
 #endif
                                 << ")";
@@ -443,6 +443,17 @@ Y_UNIT_TEST_SUITE(DateTimeTest) {
         UNIT_ASSERT_DOUBLES_EQUAL(TDuration::Minutes(1) / TDuration::Seconds(10), 6.0, 1e-9);
     }
 
+    Y_UNIT_TEST(TestDurationGetters) {
+        const TDuration value = TDuration::MicroSeconds(1234567);
+        UNIT_ASSERT_VALUES_EQUAL(value.Seconds(), 1);
+        UNIT_ASSERT_DOUBLES_EQUAL(value.SecondsFloat(), 1.234567, 1e-9);
+
+        UNIT_ASSERT_VALUES_EQUAL(value.MilliSeconds(), 1234);
+        UNIT_ASSERT_DOUBLES_EQUAL(value.MillisecondsFloat(), 1234.567, 1e-9);
+
+        UNIT_ASSERT_VALUES_EQUAL(value.MicroSeconds(), 1234567);
+    }
+
     template <class T>
     void TestTimeUnits() {
         T withTime = T::MicroSeconds(1249571946000000L);
@@ -477,8 +488,8 @@ Y_UNIT_TEST_SUITE(DateTimeTest) {
     }
 
     Y_UNIT_TEST(TestNoexceptConstruction) {
-        UNIT_ASSERT_EXCEPTION(TDuration::MilliSeconds(FromString(AsStringBuf("not a number"))), yexception);
-        UNIT_ASSERT_EXCEPTION(TDuration::Seconds(FromString(AsStringBuf("not a number"))), yexception);
+        UNIT_ASSERT_EXCEPTION(TDuration::MilliSeconds(FromString(TStringBuf("not a number"))), yexception);
+        UNIT_ASSERT_EXCEPTION(TDuration::Seconds(FromString(TStringBuf("not a number"))), yexception);
     }
 
     Y_UNIT_TEST(TestFromValueForTDuration) {

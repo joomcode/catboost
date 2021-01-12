@@ -121,7 +121,7 @@ NCatboostCuda::TTreeCtrDataSetsHelper::TTreeCtrDataSetsHelper(const NCatboostCud
     NCudaLib::GetCudaManager().WaitComplete();
     for (ui32 dev = 0; dev < devCount; ++dev) {
         auto freeMemory = manager.FreeMemoryMb(dev, false);
-        PackSizeEstimators[dev] = (new TTreeCtrDataSetMemoryUsageEstimator(featuresManager,
+        PackSizeEstimators[dev] = (MakeHolder<TTreeCtrDataSetMemoryUsageEstimator>(featuresManager,
                                                                            freeMemory,
                                                                            dataSet.GetCatFeatures().GetFeatureCount(dev),
                                                                            FoldCount,
@@ -401,6 +401,29 @@ void NCatboostCuda::TTreeCtrDataSetsHelper::VisitPermutationDataSets(ui32 permut
             ProceedDataSets(permutationId, withoutCachedIndexDataSets, visitor);
         }
     });
+}
+
+ui32 NCatboostCuda::TTreeCtrDataSetsHelper::GetMaxUniqueValues() const {
+    ui32 maxUniqueValues = 1;
+    NCudaLib::RunPerDeviceSubtasks([&](ui32 device) {
+        for (const auto& dataSetPtr : DataSets[device]) {
+            const auto& ctrs = dataSetPtr->GetCtrs();
+            for (const TCtr& ctr : ctrs) {
+                if (!FeaturesManager.IsKnown(ctr) || !FeaturesManager.IsUsedCtr(FeaturesManager.GetId(ctr))) {
+                    maxUniqueValues = Max(maxUniqueValues, FeaturesManager.GetMaxCtrUniqueValues(ctr));
+                }
+            }
+        }
+        for (const auto& dataSetPtr : PureTreeCtrDataSets[device]) {
+            const auto& ctrs = dataSetPtr->GetCtrs();
+            for (const TCtr& ctr : ctrs) {
+                if (!FeaturesManager.IsKnown(ctr) || !FeaturesManager.IsUsedCtr(FeaturesManager.GetId(ctr))) {
+                    maxUniqueValues = Max(maxUniqueValues, FeaturesManager.GetMaxCtrUniqueValues(ctr));
+                }
+            }
+        }
+    });
+    return maxUniqueValues;
 }
 
 void NCatboostCuda::TTreeCtrDataSetsHelper::ProceedDataSets(const ui32 dataSetPermutationId,

@@ -5,6 +5,7 @@
 
 #include <util/generic/fwd.h>
 #include <util/generic/ptr.h>
+#include <util/stream/mem.h>
 #include <util/stream/input.h>
 #include <util/stream/output.h>
 #include <util/system/compiler.h>
@@ -48,7 +49,7 @@ void TCtrValueTable::Save(IOutputStream* s) const {
 
 void TCtrValueTable::Load(IInputStream* s) {
     const ui32 size = LoadSize(s);
-    TArrayHolder<ui8> arrayHolder = new ui8[size];
+    TArrayHolder<ui8> arrayHolder = TArrayHolder<ui8>(new ui8[size]);
     s->LoadOrFail(arrayHolder.Get(), size);
     LoadSolid(arrayHolder.Get(), size);
 }
@@ -67,4 +68,24 @@ void TCtrValueTable::LoadSolid(void* buf, size_t length) {
 
     solid.CTRBlob.assign(ctrValueTable->CTRBlob()->data(),
                          ctrValueTable->CTRBlob()->data() + ctrValueTable->CTRBlob()->size());
+}
+
+void TCtrValueTable::LoadThin(TMemoryInput* in) {
+    auto len = LoadSize(in);
+    auto ptr = in->Buf();
+    in->Skip(len);
+
+    using namespace  flatbuffers;
+    Impl = TThinTable();
+    auto& thin = Get<TThinTable>(Impl);
+    auto ctrValueTable = flatbuffers::GetRoot<NCatBoostFbs::TCtrValueTable>(ptr);
+    ModelCtrBase.FBDeserialize(ctrValueTable->ModelCtrBase());
+    CounterDenominator = ctrValueTable->CounterDenominator();
+    TargetClassesCount = ctrValueTable->TargetClassesCount();
+
+    thin.IndexBuckets = TConstArrayRef<NCatboost::TBucket>(
+        reinterpret_cast<const NCatboost::TBucket*>(ctrValueTable->IndexHashRaw()->data()),
+        reinterpret_cast<const NCatboost::TBucket*>(ctrValueTable->IndexHashRaw()->data() + ctrValueTable->IndexHashRaw()->size())
+    );
+    thin.CTRBlob = TConstArrayRef<ui8>(ctrValueTable->CTRBlob()->data(), ctrValueTable->CTRBlob()->size());
 }

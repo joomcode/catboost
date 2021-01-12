@@ -10,7 +10,7 @@
 #include <catboost/libs/loggers/catboost_logger_helpers.h>
 #include <catboost/libs/logging/logging.h>
 
-#include <library/json/json_reader.h>
+#include <library/cpp/json/json_reader.h>
 
 #include <util/generic/xrange.h>
 #include <util/system/fs.h>
@@ -103,11 +103,24 @@ void UpdateUndefinedClassLabels(
     }
 }
 
+static void CheckTimestampsInEachGroup(
+    TConstArrayRef<TGroupId> groupIds,
+    TConstArrayRef<ui64> timestamps
+) {
+    const auto objectCount = groupIds.size();
+    CB_ENSURE_INTERNAL(objectCount == timestamps.size(), "Need same number of group ids and timestamps");
+    for (auto idx : xrange(size_t(1), objectCount)) {
+        CB_ENSURE(
+            (groupIds[idx] == groupIds[idx - 1]) == (timestamps[idx] == timestamps[idx - 1]),
+            "In each group, objects must have the same timestamp"
+        );
+    }
+}
 
 TDataProviderPtr ReorderByTimestampLearnDataIfNeeded(
     const NCatboostOptions::TCatBoostOptions& catBoostOptions,
     TDataProviderPtr learnData,
-    NPar::TLocalExecutor* localExecutor) {
+    NPar::ILocalExecutor* localExecutor) {
 
     if (catBoostOptions.DataProcessingOptions->HasTimeFlag &&
         learnData->MetaInfo.HasTimestamp &&
@@ -115,11 +128,7 @@ TDataProviderPtr ReorderByTimestampLearnDataIfNeeded(
     {
         auto objectsGrouping = learnData->ObjectsData->GetObjectsGrouping();
 
-        // TODO(akhropov): Allow if all objects in each group have the same timestamp
-        CB_ENSURE(
-            objectsGrouping->IsTrivial(),
-            "Reordering grouped data by timestamp is not supported yet"
-        );
+        CheckTimestampsInEachGroup(*learnData->ObjectsData->GetGroupIds(), *learnData->ObjectsData->GetTimestamp());
 
         auto objectsPermutation = CreateOrderByKey<ui32>(*learnData->ObjectsData->GetTimestamp());
 
@@ -162,7 +171,7 @@ static bool NeedShuffle(
 TDataProviderPtr ShuffleLearnDataIfNeeded(
     const NCatboostOptions::TCatBoostOptions& catBoostOptions,
     TDataProviderPtr learnData,
-    NPar::TLocalExecutor* localExecutor,
+    NPar::ILocalExecutor* localExecutor,
     TRestorableFastRng64* rand) {
 
     if (NeedShuffle(

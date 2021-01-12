@@ -28,7 +28,7 @@ namespace NCB {
         EObjectsOrder objectsOrder,
         TDatasetSubset loadSubset,
         TMaybe<TVector<NJson::TJsonValue>*> classLabels,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     ) {
         CB_ENSURE_INTERNAL(!baselineFilePath.Inited() || classLabels, "ClassLabels must be specified if baseline file is specified");
         if (classLabels) {
@@ -122,7 +122,7 @@ namespace NCB {
 
 
     TDataProviderPtr ReadDataset(
-        THolder<ILineDataReader> poolReader,
+        THolder<ILineDataReader>&& poolReader,
         const TPathWithScheme& pairsFilePath, // can be uninited
         const TPathWithScheme& groupWeightsFilePath, // can be uninited
         const TPathWithScheme& timestampsFilePath, // can be uninited
@@ -133,7 +133,7 @@ namespace NCB {
         const TVector<ui32>& ignoredFeatures,
         EObjectsOrder objectsOrder,
         TMaybe<TVector<NJson::TJsonValue>*> classLabels,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     ) {
         const auto loadSubset = TDatasetSubset::MakeColumns();
         THolder<IDataProviderBuilder> dataProviderBuilder = CreateDataProviderBuilder(
@@ -179,7 +179,7 @@ namespace NCB {
         bool readTestData,
         TDatasetSubset trainDatasetSubset,
         TMaybe<TVector<NJson::TJsonValue>*> classLabels,
-        NPar::TLocalExecutor* const executor,
+        NPar::ILocalExecutor* const executor,
         TProfileInfo* const profile
     ) {
         if (readTestData) {
@@ -239,7 +239,7 @@ namespace NCB {
                     loadOptions.ColumnarPoolFormatParams,
                     loadOptions.IgnoredFeatures,
                     objectsOrder,
-                    TDatasetSubset::MakeColumns(),
+                    TDatasetSubset::MakeColumns(trainDatasetSubset.HasFeatures || taskType == ETaskType::CPU),
                     classLabels,
                     executor
                 );

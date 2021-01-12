@@ -2,7 +2,7 @@
 #include "vector.h"
 #include "hash_set.h"
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 #include <utility>
 #include <util/str_stl.h>
@@ -157,6 +157,9 @@ void THashTest::TestHMapConstructorsAndAssignments() {
     UNIT_ASSERT_VALUES_EQUAL(2, c4.at("two"));
     UNIT_ASSERT_VALUES_EQUAL(3, c4.at("three"));
     UNIT_ASSERT_VALUES_EQUAL(4, c4.at("four"));
+
+    // non-existent values must be zero-initialized
+    UNIT_ASSERT_VALUES_EQUAL(c1["nonexistent"], 0);
 }
 
 void THashTest::TestHMap1() {
@@ -355,9 +358,9 @@ void THashTest::TestHMMapHas() {
     m.insert(std::pair<const char, int>('X', 10));
     m.insert(std::pair<const char, int>('X', 20));
     m.insert(std::pair<const char, int>('Y', 32));
-    UNIT_ASSERT(m.contains('X'))
-    UNIT_ASSERT(m.contains('Y'))
-    UNIT_ASSERT(!m.contains('Z'))
+    UNIT_ASSERT(m.contains('X'));
+    UNIT_ASSERT(m.contains('Y'));
+    UNIT_ASSERT(!m.contains('Z'));
 }
 
 void THashTest::TestHSetConstructorsAndAssignments() {
@@ -1070,7 +1073,7 @@ void THashTest::TestAt() {
 
     char key[] = {11, 12, 0, 1, 2, 11, 0};
     TEST_AT_THROWN_EXCEPTION(TString, TString, char*, key, "\\x0B\\x0C");
-    TEST_AT_THROWN_EXCEPTION(TString, TString, TStringBuf, AsStringBuf(key), "\\x0B\\x0C\\0\\1\\2\\x0B");
+    TEST_AT_THROWN_EXCEPTION(TString, TString, TStringBuf, TStringBuf(key, sizeof(key) - 1), "\\x0B\\x0C\\0\\1\\2\\x0B");
 
 #undef TEST_AT_THROWN_EXCEPTION
 }

@@ -29,6 +29,7 @@ PEERDIR(
     catboost/pytest/lib
     catboost/python-package/lib
     contrib/python/numpy
+    contrib/python/pandas
 )
 
 DEPENDS(
@@ -38,6 +39,10 @@ DEPENDS(
 DATA(
     arcadia/catboost/pytest/data
 )
+
+IF (CATBOOST_OPENSOURCE AND AUTOCHECK)
+    INCLUDE(${ARCADIA_ROOT}/catboost//oss/checks/check_deps.inc)
+ENDIF()
 
 END()
 

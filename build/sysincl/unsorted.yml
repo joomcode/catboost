@@ -37,19 +37,6 @@
   - afxwin.h
   - alpha/builtins.h
   - apr_iconv.h
-  - asio/basic_deadline_timer.hpp
-  - asio/buffer.hpp
-  - asio/deadline_timer.hpp
-  - asio/error_code.hpp
-  - asio/io_service.hpp
-  - asio/ip/host_name.hpp
-  - asio/ip/multicast.hpp
-  - asio/ip/tcp.hpp
-  - asio/ip/udp.hpp
-  - asio/read.hpp
-  - asio/ssl.hpp
-  - asio/time_traits.hpp
-  - asio/write.hpp
   - atheos/atomic.h
   - atheos/semaphore.h
   - atheos/threads.h
@@ -231,8 +218,6 @@
   - forwards.h
   - json_valueiterator.inl
   - value.h
-  - gnulib/printf.h
-  - gobject_probes.h
   - pthread/mit/sys/timers.h
   - ../src/config.h
   - sljit/sljitLir.c
@@ -268,6 +253,7 @@
 - includes:
   - cpu-features.h
   - cuda.h
+  - cublas.h
   - cublas_v2.h
   - cublasLt.h
   - cuda_runtime.h
@@ -294,6 +280,8 @@
   - unlocked-io.h
   - cygwin/version.h
   - zircon/syscalls.h
+  - zircon/types.h
+  - zircon/process.h
   - sys/linux-syscalls.h
   - tr1/memory
   - android/log.h
@@ -1020,8 +1008,3 @@
   - zone.h
   - netpacket/if_packet.h
   # end libpcap files
-
-- source_filter: "^ml/tensorflow/ytensorflow/cpp"
-  includes:
-  # tensorflow 1.14 header, doesn't exist in current arcadia tensorflow 1.10
-    - tensorflow/core/util/gpu_kernel_helper.h

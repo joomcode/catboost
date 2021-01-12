@@ -13,7 +13,7 @@
 #include <catboost/private/libs/options/data_processing_options.h>
 #include <catboost/private/libs/options/catboost_options.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/array_ref.h>
 #include <util/generic/maybe.h>
@@ -24,7 +24,7 @@
 
 
 namespace NPar {
-    class TLocalExecutor;
+    class ILocalExecutor;
 }
 
 
@@ -33,11 +33,9 @@ namespace NCB {
     using TInitialBorders = TMaybe<TVector<TConstArrayRef<float>>>;
 
     struct TQuantizationOptions {
-        bool CpuCompatibleFormat = true;
-        bool GpuCompatibleFormat = true;
         ui64 CpuRamLimit = Max<ui64>();
         ui32 MaxSubsetSizeForBuildBordersAlgorithms = 200000;
-        bool BundleExclusiveFeaturesForCpu = true;
+        bool BundleExclusiveFeatures = true;
         TExclusiveFeaturesBundlingOptions ExclusiveFeaturesBundlingOptions{};
         bool PackBinaryFeaturesForCpu = true;
         bool GroupFeaturesForCpu = false;
@@ -46,6 +44,22 @@ namespace NCB {
         TMaybe<float> DefaultValueFractionToEnableSparseStorage = Nothing();
         ESparseArrayIndexingType SparseArrayIndexingType = ESparseArrayIndexingType::Indices;
     };
+
+    void PrepareQuantizationParameters(
+        const NCatboostOptions::TCatBoostOptions& params,
+        const TDataMetaInfo& metaInfo,
+        const TMaybe<TString>& bordersFile,
+        TQuantizationOptions* quantizationOptions,
+        TQuantizedFeaturesInfoPtr* quantizedFeaturesInfo
+    );
+
+    void PrepareQuantizationParameters(
+        NJson::TJsonValue plainJsonParams,
+        const TDataMetaInfo& metaInfo,
+        const TMaybe<TString>& bordersFile,
+        TQuantizationOptions* quantizationOptions,
+        TQuantizedFeaturesInfoPtr* quantizedFeaturesInfo
+    );
 
     /*
      * Used for optimization.
@@ -62,7 +76,7 @@ namespace NCB {
         TIncrementalDenseIndexing(
             const TFeaturesArraySubsetIndexing& srcSubsetIndexing,
             bool hasDenseData,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         );
     };
 
@@ -97,7 +111,7 @@ namespace NCB {
         TRawDataProviderPtr rawDataProvider,
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
         TRestorableFastRng64* rand,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     );
 
 
@@ -106,7 +120,7 @@ namespace NCB {
         TRawObjectsDataProviderPtr rawObjectsDataProvider,
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
         TRestorableFastRng64* rand,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         const TInitialBorders& initialBorders = Nothing()
     );
 
@@ -116,18 +130,8 @@ namespace NCB {
         TRawDataProviderPtr rawDataProvider,
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
         TRestorableFastRng64* rand,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         const TInitialBorders& initialBorders = Nothing()
-    );
-
-    TQuantizedDataProviders Quantize(
-        const TQuantizationOptions& options,
-        const NCatboostOptions::TDataProcessingOptions& dataProcessingOptions,
-        bool floatFeaturesAllowNansInTestOnly,
-        TConstArrayRef<ui32> ignoredFeatures,
-        TRawDataProviders rawDataProviders,
-        TRestorableFastRng64* rand,
-        NPar::TLocalExecutor* localExecutor
     );
 
     TQuantizedObjectsDataProviderPtr GetQuantizedObjectsData(
@@ -135,7 +139,7 @@ namespace NCB {
         TDataProviderPtr srcData,
         const TMaybe<TString>& bordersFile,
         TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         TRestorableFastRng64* rand,
         const TInitialBorders& initialBorders = Nothing()
     );

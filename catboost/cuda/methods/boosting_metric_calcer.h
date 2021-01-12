@@ -4,7 +4,7 @@
 #include <catboost/libs/metrics/metric.h>
 #include <catboost/cuda/targets/gpu_metrics.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 namespace NCatboostCuda {
     class IMetricCalcer {
@@ -21,7 +21,7 @@ namespace NCatboostCuda {
         using TTargetMapping = typename TTarget::TMapping;
         using TConstVec = typename TTarget::TConstVec;
 
-        TMetricCalcer(const TTarget& target, NPar::TLocalExecutor* localExecutor)
+        TMetricCalcer(const TTarget& target, NPar::ILocalExecutor* localExecutor)
             : Target(target)
             , LocalExecutor(localExecutor)
         {
@@ -30,7 +30,7 @@ namespace NCatboostCuda {
         void SetPoint(TConstVec&& point) {
             Point = std::move(point);
             PointOnCpuCached = false;
-            Cache = new TScopedCacheHolder;
+            Cache = MakeHolder<TScopedCacheHolder>();
         }
 
         TMetricHolder Compute(const IGpuMetric* metric) final {
@@ -137,7 +137,7 @@ namespace NCatboostCuda {
         TVector<float> CpuWeights;
         TVector<TQueryInfo> QueryInfo;
 
-        NPar::TLocalExecutor* LocalExecutor;
+        NPar::ILocalExecutor* LocalExecutor;
     };
 
 }

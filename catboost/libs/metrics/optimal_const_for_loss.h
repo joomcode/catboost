@@ -29,12 +29,31 @@ namespace NCB {
         return targetSum / summaryWeight;
     }
 
+    inline float CalculateWeightedTargetVariance(TConstArrayRef<float> target, TConstArrayRef<float> weights, float mean) {
+        const double summaryWeight = weights.empty() ? target.size() : Accumulate(weights, 0.0);
+        double targetSum = 0.0;
+        if (weights.empty()) {
+            for (size_t i = 0; i < target.size(); ++i) {
+                targetSum += Sqr(target[i] - mean);
+            }
+        } else {
+            Y_ASSERT(target.size() == weights.size());
+            for (size_t i = 0; i < target.size(); ++i) {
+                targetSum += Sqr(target[i] - mean) * weights[i];
+            }
+        }
+        return targetSum / summaryWeight;
+    }
+
     inline float CalculateWeightedTargetQuantile(
         TConstArrayRef<float> target,
         TConstArrayRef<float> weights,
         double alpha,
         double delta
     ) {
+        if (target.empty()) {
+            return 0;
+        }
         const TVector<float> defaultWeights(target.size(), 1);
         const auto weightsRef = weights.empty() ? MakeConstArrayRef(defaultWeights) : weights;
         double q = CalcSampleQuantile(target, weightsRef, alpha);
@@ -76,7 +95,7 @@ namespace NCB {
     }
 
     //TODO(isaf27): add baseline to CalcOptimumConstApprox
-    inline TMaybe<double> CalcOptimumConstApprox(
+    inline TMaybe<double> CalcOneDimensionalOptimumConstApprox(
         const NCatboostOptions::TLossDescription& lossDescription,
         TConstArrayRef<float> target,
         TConstArrayRef<float> weights
@@ -94,7 +113,7 @@ namespace NCB {
             }
             case ELossFunction::Quantile:
             case ELossFunction::MAE: {
-                const auto& params = lossDescription.GetLossParams();
+                const auto& params = lossDescription.GetLossParamsMap();
                 auto it = params.find("alpha");
                 double alpha = it == params.end() ? 0.5 : FromString<double>(it->second);
                 it = params.find("delta");
@@ -105,6 +124,41 @@ namespace NCB {
                 return CalculateOptimalConstApproxForMAPE(target, weights);
             default:
                 return Nothing();
+        }
+    }
+
+    inline TMaybe<TVector<double>> CalcOptimumConstApprox(
+        const NCatboostOptions::TLossDescription& lossDescription,
+        TConstArrayRef<TConstArrayRef<float>> target,
+        TConstArrayRef<float> weights
+    ) {
+        auto lossFunction = lossDescription.GetLossFunction();
+        switch (lossFunction) {
+            case ELossFunction::RMSEWithUncertainty:
+            {
+                double mean = CalculateWeightedTargetAverage(target[0], weights);
+                double var = CalculateWeightedTargetVariance(target[0], weights, mean);
+                return TVector<double>({mean, 0.5 * log(var)});
+            }
+            case ELossFunction::MultiRMSE:
+            {
+                NCatboostOptions::TLossDescription singleRMSELoss;
+                singleRMSELoss.LossFunction = ELossFunction::RMSE;
+                TVector<double> startPoint(target.size());
+                for (int dim : xrange(target.size())) {
+                    startPoint[dim] = *CalcOneDimensionalOptimumConstApprox(singleRMSELoss, target[dim], weights);
+                }
+                return startPoint;
+            }
+            default:
+            {
+                TMaybe<double> optimum = CalcOneDimensionalOptimumConstApprox(lossDescription, target[0], weights);
+                if (optimum.Defined()) {
+                    return TVector<double>(1, *optimum.Get());
+                } else {
+                    return Nothing();
+                }
+            }
         }
     }
 }

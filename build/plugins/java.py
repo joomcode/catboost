@@ -1,6 +1,7 @@
 import _common as common
 import ymake
 import json
+import os
 import base64
 
 
@@ -39,12 +40,17 @@ def onrun_java_program(unit, *args):
 
     flat, kv = common.sort_by_keywords({'IN': -1, 'IN_DIR': -1, 'OUT': -1, 'OUT_DIR': -1, 'CWD': 1, 'CLASSPATH': -1, 'CP_USE_COMMAND_FILE': 1, 'ADD_SRCS_TO_CLASSPATH': 0}, args)
     depends = kv.get('CLASSPATH', []) + kv.get('JAR', [])
+    fake_out = None
     if depends:
         # XXX: hack to force ymake to build dependencies
-        unit.on_run_java(['TOOL'] + depends + ["OUT", "fake.out.{}".format(hash(tuple(args)))])
+        fake_out = "fake.out.{}".format(hash(tuple(args)))
+        unit.on_run_java(['TOOL'] + depends + ["OUT", fake_out])
 
     if not kv.get('CP_USE_COMMAND_FILE'):
        args += ['CP_USE_COMMAND_FILE', unit.get(['JAVA_PROGRAM_CP_USE_COMMAND_FILE']) or 'yes']
+
+    if fake_out is not None:
+        args += ['FAKE_OUT', fake_out]
 
     prev = unit.get(['RUN_JAVA_PROGRAM_VALUE']) or ''
     new_val = (prev + ' ' + base64.b64encode(json.dumps(list(args), encoding='utf-8'))).strip()
@@ -78,12 +84,15 @@ def onjava_module(unit, *args):
         'MODULE_ARGS': unit.get('MODULE_ARGS'),
         'PEERDIR': unit.get_module_dirs('PEERDIRS'),
         'MANAGED_PEERS': '${MANAGED_PEERS}',
+        'MANAGED_PEERS_CLOSURE': '${MANAGED_PEERS_CLOSURE}',
+        'NON_NAMAGEABLE_PEERS': '${NON_NAMAGEABLE_PEERS}',
         'EXCLUDE': extract_macro_calls(unit, 'EXCLUDE_VALUE', args_delim),
         'JAVA_SRCS': extract_macro_calls(unit, 'JAVA_SRCS_VALUE', args_delim),
         'JAVAC_FLAGS': extract_macro_calls(unit, 'JAVAC_FLAGS_VALUE', args_delim),
         'ANNOTATION_PROCESSOR': extract_macro_calls(unit, 'ANNOTATION_PROCESSOR_VALUE', args_delim),
         'EXTERNAL_JAR': extract_macro_calls(unit, 'EXTERNAL_JAR_VALUE', args_delim),
         'RUN_JAVA_PROGRAM': extract_macro_calls2(unit, 'RUN_JAVA_PROGRAM_VALUE'),
+        'RUN_JAVA_PROGRAM_MANAGED': '${RUN_JAVA_PROGRAM_MANAGED}',
         'ADD_WAR': extract_macro_calls(unit, 'ADD_WAR_VALUE', args_delim),
         'DEPENDENCY_MANAGEMENT': extract_macro_calls(unit, 'DEPENDENCY_MANAGEMENT_VALUE', args_delim),
         'MAVEN_GROUP_ID': extract_macro_calls(unit, 'MAVEN_GROUP_ID_VALUE', args_delim),
@@ -110,12 +119,42 @@ def onjava_module(unit, *args):
         'TEST_DATA': extract_macro_calls(unit, 'TEST_DATA_VALUE', args_delim),
         'JAVA_FORBIDDEN_LIBRARIES': extract_macro_calls(unit, 'JAVA_FORBIDDEN_LIBRARIES_VALUE', args_delim),
     }
+    if unit.get('SAVE_JAVAC_GENERATED_SRCS_DIR') and unit.get('SAVE_JAVAC_GENERATED_SRCS_TAR'):
+        data['SAVE_JAVAC_GENERATED_SRCS_DIR'] = extract_macro_calls(unit, 'SAVE_JAVAC_GENERATED_SRCS_DIR', args_delim)
+        data['SAVE_JAVAC_GENERATED_SRCS_TAR'] = extract_macro_calls(unit, 'SAVE_JAVAC_GENERATED_SRCS_TAR', args_delim)
 
     if unit.get('JAVA_ADD_DLLS_VALUE') == 'yes':
         data['ADD_DLLS_FROM_DEPENDS'] = extract_macro_calls(unit, 'JAVA_ADD_DLLS_VALUE', args_delim)
 
     if unit.get('ERROR_PRONE_VALUE') == 'yes':
         data['ERROR_PRONE'] = extract_macro_calls(unit, 'ERROR_PRONE_VALUE', args_delim)
+
+    if unit.get('WITH_KOTLIN_VALUE') == 'yes':
+        data['WITH_KOTLIN'] = extract_macro_calls(unit, 'WITH_KOTLIN_VALUE', args_delim)
+        if unit.get('KOTLIN_JVM_TARGET'):
+            data['KOTLIN_JVM_TARGET'] = extract_macro_calls(unit, 'KOTLIN_JVM_TARGET', args_delim)
+        if unit.get('KOTLINC_FLAGS_VALUE'):
+            data['KOTLINC_FLAGS'] = extract_macro_calls(unit, 'KOTLINC_FLAGS_VALUE', args_delim)
+
+    if unit.get('WITH_GROOVY_VALUE') == 'yes':
+        if not common.strip_roots(unit.path()).startswith(('devtools/dummy_arcadia', 'junk')):
+            ymake.report_configure_error('Groovy is not allowed here')
+        data['WITH_GROOVY'] = extract_macro_calls(unit, 'WITH_GROOVY_VALUE', args_delim)
+
+    if unit.get('DIRECT_DEPS_ONLY_VALUE') == 'yes':
+        data['DIRECT_DEPS_ONLY'] = extract_macro_calls(unit, 'DIRECT_DEPS_ONLY_VALUE', args_delim)
+
+    if unit.get('JAVA_EXTERNAL_DEPENDENCIES_VALUE'):
+        valid = []
+        for dep in sum(extract_macro_calls(unit, 'JAVA_EXTERNAL_DEPENDENCIES_VALUE', args_delim), []):
+            if os.path.normpath(dep).startswith('..'):
+                ymake.report_configure_error('{}: {} - relative paths in JAVA_EXTERNAL_DEPENDENCIES is not allowed'.format(unit.path(), dep))
+            elif os.path.isabs(dep):
+                ymake.report_configure_error('{}: {} absolute paths in JAVA_EXTERNAL_DEPENDENCIES is not allowed'.format(unit.path(), dep))
+            else:
+                valid.append(dep)
+        if valid:
+            data['EXTERNAL_DEPENDENCIES'] = [valid]
 
     if unit.get('MAKE_UBERJAR_VALUE') == 'yes':
         if unit.get('MODULE_TYPE') != 'JAVA_PROGRAM':
@@ -201,9 +240,9 @@ def onjava_module(unit, *args):
     unit.set_property(['JAVA_DART_DATA', dart])
     if unit.get('MODULE_TYPE') in ('JAVA_PROGRAM', 'JAVA_LIBRARY', 'JTEST', 'TESTNG', 'JUNIT5') and not unit.path().startswith('$S/contrib/java'):
         jdeps_val = (unit.get('CHECK_JAVA_DEPS_VALUE') or '').lower()
-        if jdeps_val and jdeps_val not in ('yes', 'no'):
-            ymake.report_configure_error('CHECK_JAVA_DEPS: "yes" or "no" required')
-        if jdeps_val == 'yes':
-            unit.onjava_test_deps()
+        if jdeps_val and jdeps_val not in ('yes', 'no', 'strict'):
+            ymake.report_configure_error('CHECK_JAVA_DEPS: "yes", "no" or "strict" required')
+        if jdeps_val and jdeps_val != 'no':
+            unit.onjava_test_deps(jdeps_val)
         if unit.get('LINT_LEVEL_VALUE') != "none":
             unit.onadd_check(['JAVA_STYLE', unit.get('LINT_LEVEL_VALUE')])

@@ -4,9 +4,9 @@
 #include <catboost/libs/data/ut/lib/for_objects.h>
 #include <catboost/libs/data/ut/lib/for_target.h>
 
-#include <library/binsaver/util_stream_io.h>
+#include <library/cpp/binsaver/util_stream_io.h>
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 
 using namespace NCB;
@@ -182,23 +182,13 @@ static void CreateQuantizedObjectsDataProviderTestData(
         TVector<TFeaturesGroup>()
     );
 
-    if constexpr(std::is_same<TTObjectsDataProvider, TQuantizedForCPUObjectsDataProvider>::value) {
-        *objectsData = MakeIntrusive<TQuantizedForCPUObjectsDataProvider>(
-            *objectsGrouping,
-            std::move(commonObjectsData),
-            std::move(quantizedObjectsData),
-            true,
-            Nothing()
-        );
-    } else {
-        *objectsData = MakeIntrusive<TQuantizedObjectsDataProvider>(
-            *objectsGrouping,
-            std::move(commonObjectsData),
-            std::move(quantizedObjectsData.Data),
-            true,
-            Nothing()
-        );
-    }
+    *objectsData = MakeIntrusive<TQuantizedForCPUObjectsDataProvider>(
+        *objectsGrouping,
+        std::move(commonObjectsData),
+        std::move(quantizedObjectsData),
+        true,
+        Nothing()
+    );
 }
 
 
@@ -212,7 +202,7 @@ static TRawTargetData CreateRawTargetData() {
     };
     targetData.Weights = TWeights<float>{TVector<float>{1.0f, 0.0f, 0.2f, 0.12f, 0.45f, 0.89f}};
     targetData.GroupWeights = TWeights<float>(6);
-    targetData.Pairs = {TPair{0, 1, 0.1f}, TPair{3, 4, 1.0f}, TPair{3, 5, 2.0f}};
+    targetData.Pairs = TFlatPairsInfo{TPair{0, 1, 0.1f}, TPair{3, 4, 1.0f}, TPair{3, 5, 2.0f}};
 
     return targetData;
 }
@@ -228,7 +218,7 @@ static TRawTargetData CreateRawMultiTargetData() {
     };
     targetData.Weights = TWeights<float>{TVector<float>{1.0f, 0.0f, 0.2f, 0.12f, 0.45f, 0.89f}};
     targetData.GroupWeights = TWeights<float>(6);
-    targetData.Pairs = {TPair{0, 1, 0.1f}, TPair{3, 4, 1.0f}, TPair{3, 5, 2.0f}};
+    targetData.Pairs = TFlatPairsInfo{TPair{0, 1, 0.1f}, TPair{3, 4, 1.0f}, TPair{3, 5, 2.0f}};
 
     return targetData;
 }
@@ -266,7 +256,7 @@ Y_UNIT_TEST_SUITE(TDataProviderTemplate) {
     }
 
     Y_UNIT_TEST(Equal) {
-        TestEqual<TQuantizedObjectsDataProvider>(CreateRawTargetData);
+        TestEqual<TQuantizedForCPUObjectsDataProvider>(CreateRawTargetData);
         TestEqual<TQuantizedForCPUObjectsDataProvider>(CreateRawMultiTargetData);
     }
 }

@@ -24,6 +24,7 @@ TVector<TTextFeature> CreateTextFeatures(const NCB::TFeaturesLayout& featuresLay
 
 TVector<TCatFeature> CreateCatFeatures(const NCB::TFeaturesLayout& featuresLayout);
 
+TVector<TEmbeddingFeature> CreateEmbeddingFeatures(const NCB::TFeaturesLayout& featuresLayout);
 
 void ConfigureMalloc();
 
@@ -31,11 +32,11 @@ double CalcMetric(
     const IMetric& metric,
     const NCB::TTargetDataProviderPtr& targetData,
     const TVector<TVector<double>>& approx,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 );
 
 void CalcErrors(
-    const NCB::TTrainingForCPUDataProviders& trainingDataProviders,
+    const NCB::TTrainingDataProviders& trainingDataProviders,
     const TVector<THolder<IMetric>>& errors,
     bool calcAllMetrics, // bool value for each error
     bool calcErrorTrackerMetric,

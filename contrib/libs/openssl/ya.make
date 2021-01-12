@@ -1,33 +1,18 @@
 LIBRARY()
 
-VERSION(1.1.1d)
-
-LICENSE(
-    OpenSSL
-    SSLeay
-)
 
 
+VERSION(1.1.1g)
 
-NO_COMPILER_WARNINGS()
-
-NO_UTIL()
+LICENSE(OpenSSL AND SSLeay)
 
 PEERDIR(
     contrib/libs/openssl/crypto
-    contrib/libs/zlib
 )
 
 ADDINCL(
-    contrib/libs/openssl
-    contrib/libs/openssl/crypto
-    contrib/libs/openssl/crypto/ec/curve448
-    contrib/libs/openssl/crypto/ec/curve448/arch_32
-    contrib/libs/openssl/crypto/include
-    contrib/libs/openssl/crypto/modes
-    contrib/libs/openssl/include
-    contrib/libs/zlib
     GLOBAL contrib/libs/openssl/include
+    contrib/libs/openssl
 )
 
 IF (OS_LINUX)
@@ -64,7 +49,12 @@ IF (OS_ANDROID)
     ENDIF()
 ENDIF()
 
+NO_COMPILER_WARNINGS()
+
+NO_RUNTIME()
+
 CFLAGS(
+    -DAESNI_ASM
     -DECP_NISTZ256_ASM
     -DOPENSSL_BN_ASM_MONT
     -DOPENSSL_CPUID_OBJ
@@ -255,7 +245,6 @@ IF (OS_ANDROID AND ARCH_X86_64)
         -DMD5_ASM
         -DGHASH_ASM
         -DX25519_ASM
-        -D__ANDROID_API__=21
     )
     SRCS(
         asm/android/x86_64/engines/e_padlock-x86_64.s
@@ -275,7 +264,6 @@ IF (OS_ANDROID AND ARCH_I686)
         -DVPAES_ASM
         -DWHIRLPOOL_ASM
         -DGHASH_ASM
-        -D__ANDROID_API__=15
     )
     SRCS(
         asm/android/i686/engines/e_padlock-x86.s
@@ -290,7 +278,6 @@ IF (OS_ANDROID AND ARCH_ARM7)
         -DAES_ASM
         -DBSAES_ASM
         -DGHASH_ASM
-        -D__ANDROID_API__=15
     )
 ENDIF()
 
@@ -299,7 +286,6 @@ IF (OS_ANDROID AND ARCH_ARM64)
         -DOPENSSL_PIC
         -DKECCAK1600_ASM
         -DVPAES_ASM
-        -D__ANDROID_API__=21
     )
 ENDIF()
 

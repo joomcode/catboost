@@ -9,13 +9,13 @@
 
 using namespace NCB;
 
-static void CalcIndicatorCoefficients(
+static void CalcObliviousIndicatorCoefficients(
     const TFullModel& model,
     const TVector<ui32>& borderIdxForSplit,
     TArrayRef<ui32> treeLeafIdxes,
     TVector<TVector<double>>* floatFeatureImpact
 ) {
-    const auto treeSplitOffsets = model.ModelTrees->GetTreeStartOffsets();
+    const auto& treeSplitOffsets = model.ModelTrees->GetModelTreeData()->GetTreeStartOffsets();
     floatFeatureImpact->resize(model.ModelTrees->GetFloatFeatures().size());
 
     for (ui32 featureIdx = 0; featureIdx < floatFeatureImpact->size(); ++featureIdx) {
@@ -26,27 +26,105 @@ static void CalcIndicatorCoefficients(
 
     size_t offset = 0;
     for (size_t treeId = 0; treeId < model.ModelTrees->GetTreeCount(); ++treeId) {
-        double leafValue = model.ModelTrees->GetLeafValues()[offset + treeLeafIdxes[treeId]];
-        const size_t treeDepth = model.ModelTrees->GetTreeSizes().at(treeId);
+        double leafValue = model.ModelTrees->GetModelTreeData()->GetLeafValues()[offset + treeLeafIdxes[treeId]];
+        const size_t treeDepth = model.ModelTrees->GetModelTreeData()->GetTreeSizes().at(treeId);
         for (size_t depthIdx = 0; depthIdx < treeDepth; ++depthIdx) {
             size_t leafIdx = treeLeafIdxes[treeId] ^ (1 << depthIdx);
-            double diff = model.ModelTrees->GetLeafValues()[offset + leafIdx] - leafValue;
+            double diff = model.ModelTrees->GetModelTreeData()->GetLeafValues()[offset + leafIdx] - leafValue;
             if (abs(diff) < 1e-12) {
                 continue;
             }
-            const auto splitIdx = model.ModelTrees->GetTreeSplits()[treeSplitOffsets[treeId] + depthIdx];
+            const int splitIdx = model.ModelTrees->GetModelTreeData()->GetTreeSplits()[treeSplitOffsets[treeId] + depthIdx];
             auto split = binSplits[splitIdx];
-            Y_ASSERT(split.Type == ESplitType::FloatFeature);
+            CB_ENSURE_INTERNAL(split.Type == ESplitType::FloatFeature, "Models only with float features are supported");
             int featureIdx = split.FloatFeature.FloatFeature;
-            auto splitNewIdx = borderIdxForSplit[splitIdx] + ((leafIdx >> depthIdx) & 1);
+            ui32 splitNewIdx = borderIdxForSplit[splitIdx] + ((leafIdx >> depthIdx) & 1);
             (*floatFeatureImpact)[featureIdx][splitNewIdx] += diff;
         }
         offset += (1ull << treeDepth);
     }
 }
 
+static double CalcNonSymmetricLeafValue(
+    const TFullModel& model,
+    int splitIdx,
+    const TVector<double>& featureValues
+) {
+    const auto& treeSplits = model.ModelTrees->GetModelTreeData()->GetTreeSplits();
+    const auto& stepNodes = model.ModelTrees->GetModelTreeData()->GetNonSymmetricStepNodes();
+    const auto& binFeatures = model.ModelTrees->GetBinFeatures();
+
+    int nextNodeStep = 0;
+    do {
+        const auto& split = binFeatures[treeSplits[splitIdx]];
+        double featureValue = featureValues[split.FloatFeature.FloatFeature];
+        double splitValue = split.FloatFeature.Split;
+        nextNodeStep = (featureValue > splitValue) ? stepNodes[splitIdx].RightSubtreeDiff : stepNodes[splitIdx].LeftSubtreeDiff;
+        splitIdx += nextNodeStep;
+    } while (nextNodeStep != 0);
+    ui32 leafIdx = model.ModelTrees->GetModelTreeData()->GetNonSymmetricNodeIdToLeafId()[splitIdx];
+    return model.ModelTrees->GetModelTreeData()->GetLeafValues()[leafIdx];
+}
+
+
+static void CalcNonSymmetricIndicatorCoefficients(
+        const TFullModel& model,
+        const TVector<ui32>& borderIdxForSplit,
+        const TVector<double>& featureValues,
+        TArrayRef<ui32> treeLeafIdxes,
+        TVector<TVector<double>>* floatFeatureImpact
+) {
+    floatFeatureImpact->resize(model.ModelTrees->GetFloatFeatures().size());
+    for (ui32 featureIdx = 0; featureIdx < floatFeatureImpact->size(); ++featureIdx) {
+        (*floatFeatureImpact)[featureIdx].resize(model.ModelTrees->GetFloatFeatures()[featureIdx].Borders.size() + 1);
+    }
+
+    const auto& treeSplits = model.ModelTrees->GetModelTreeData()->GetTreeSplits();
+    const auto& stepNodes = model.ModelTrees->GetModelTreeData()->GetNonSymmetricStepNodes();
+    const auto& binFeatures = model.ModelTrees->GetBinFeatures();
+
+    auto applyData = model.ModelTrees->GetApplyData();
+    for (size_t treeId = 0; treeId < model.ModelTrees->GetTreeCount(); ++treeId) {
+        size_t leafOffset = applyData->TreeFirstLeafOffsets[treeId];
+        double leafValue = model.ModelTrees->GetModelTreeData()->GetLeafValues()[leafOffset + treeLeafIdxes[treeId]];
+        size_t splitIdx = model.ModelTrees->GetModelTreeData()->GetTreeStartOffsets()[treeId];
+        int nextSplitStep = 0;
+        do {
+            const auto& split = binFeatures[treeSplits[splitIdx]];
+            double featureValue = featureValues[split.FloatFeature.FloatFeature];
+            double splitValue = split.FloatFeature.Split;
+            int newSplitStep = featureValue > splitValue ? stepNodes[splitIdx].LeftSubtreeDiff : stepNodes[splitIdx].RightSubtreeDiff;
+            size_t newSplitIdx = splitIdx + newSplitStep;
+            double newLeafValue = CalcNonSymmetricLeafValue(model, newSplitIdx, featureValues);
+            double diff = newLeafValue - leafValue;
+            if (abs(diff) > 1e-12) {
+                ui32 borderIdx = borderIdxForSplit[treeSplits[splitIdx]] + (featureValue < splitValue);
+                (*floatFeatureImpact)[split.FloatFeature.FloatFeature][borderIdx] += diff;
+            }
+            nextSplitStep = featureValue > splitValue ? stepNodes[splitIdx].RightSubtreeDiff : stepNodes[splitIdx].LeftSubtreeDiff;
+            splitIdx += nextSplitStep;
+        } while (nextSplitStep != 0);
+    }
+
+}
+
+static void CalcIndicatorCoefficients(
+        const TFullModel& model,
+        const TVector<ui32>& borderIdxForSplit,
+        const TVector<double>& featureValues,
+        TArrayRef<ui32> treeLeafIdxes,
+        TVector<TVector<double>>* floatFeatureImpact
+) {
+ if (model.IsOblivious()) {
+     CalcObliviousIndicatorCoefficients(model, borderIdxForSplit, treeLeafIdxes, floatFeatureImpact);
+ } else {
+     CalcNonSymmetricIndicatorCoefficients(model, borderIdxForSplit, featureValues, treeLeafIdxes, floatFeatureImpact);
+ }
+}
+
 static TVector<double> GetPredictionDiffSingle(
     const TFeaturesLayout& layout,
+    const TVector<double>& featureValues,
     const TFullModel& model,
     const TVector<ui32>& borderIdxForSplit,
     const TVector<ui32>& borders,
@@ -57,6 +135,7 @@ static TVector<double> GetPredictionDiffSingle(
     CalcIndicatorCoefficients(
         model,
         borderIdxForSplit,
+        featureValues,
         treeLeafIdxes,
         &floatFeatureImpact
     );
@@ -68,14 +147,14 @@ static TVector<double> GetPredictionDiffSingle(
         auto externalIdx = feature.Position.FlatIndex;
         for (int splitIdx = borders[featureIdx] - 1; splitIdx >= 0; --splitIdx) {
             diff += floatFeatureImpact[featureIdx][splitIdx];
-            if ((tryIncrease && diff < 0.) || (!tryIncrease && diff > 0.)) {
+            if ((tryIncrease && diff > 0.) || (!tryIncrease && diff < 0.)) {
                 impact[externalIdx] = std::max(impact[externalIdx], abs(diff));
             }
         }
         diff = 0;
         for (int splitIdx = borders[featureIdx] + 1; splitIdx < floatFeatureImpact[featureIdx].ysize(); ++splitIdx) {
             diff += floatFeatureImpact[featureIdx][splitIdx];
-            if ((tryIncrease && diff < 0.) || (!tryIncrease && diff > 0.)) {
+            if ((tryIncrease && diff > 0.) || (!tryIncrease && diff < 0.)) {
                 impact[externalIdx] = std::max(impact[externalIdx], abs(diff));
             }
         }
@@ -86,18 +165,22 @@ static TVector<double> GetPredictionDiffSingle(
 TVector<TVector<double>> GetPredictionDiff(
     const TFullModel& model,
     const TDataProvider& dataProvider,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
-    CB_ENSURE(model.IsOblivious(), "Is not supported for non symmetric trees");
     CB_ENSURE(model.ModelTrees->GetDimensionsCount() == 1,  "Is not supported for multiclass");
     CB_ENSURE(dataProvider.GetObjectCount() == 2, "PredictionDiff requires 2 documents for compare");
-    CB_ENSURE(model.GetNumCatFeatures() == 0, "Model with categorical features are not supported ");
+    CB_ENSURE(model.GetNumCatFeatures() == 0, "Models with categorical features are not supported");
 
     TVector<ui32> leafIdxes = CalcLeafIndexesMulti(model, dataProvider.ObjectsData, 0, 0);
 
-    const auto *const rawObjectsData = dynamic_cast<const TRawObjectsDataProvider*>(dataProvider.ObjectsData.Get());
+    const auto* const rawObjectsData = dynamic_cast<const TRawObjectsDataProvider*>(dataProvider.ObjectsData.Get());
 
     const auto& binSplits = model.ModelTrees->GetBinFeatures();
+
+    TVector<TVector<double>> floatFeatureValues(dataProvider.GetObjectCount());
+    for (size_t idx = 0; idx < dataProvider.GetObjectCount(); ++idx) {
+        floatFeatureValues[idx].resize(model.GetNumFloatFeatures());
+    }
 
     TVector<TVector<ui32>> docBorders(dataProvider.GetObjectCount());
     TVector<ui32> borderIdxForSplit(binSplits.size(), std::numeric_limits<ui32>::infinity());
@@ -113,6 +196,7 @@ TVector<TVector<double>> GetPredictionDiff(
                     for (const auto& border: feature.Borders) {
                         if (value > border) {
                             docBorders[docId].back()++;
+                            floatFeatureValues[docId][feature.Position.FlatIndex] = value;
                         }
                     }
                 },
@@ -148,11 +232,12 @@ TVector<TVector<double>> GetPredictionDiff(
     for (size_t idx = 0; idx < dataProvider.GetObjectCount(); ++idx) {
         impact[idx] = GetPredictionDiffSingle(
             *dataProvider.ObjectsData.Get()->GetFeaturesLayout(),
+            floatFeatureValues[idx],
             model,
             borderIdxForSplit,
             docBorders[idx],
             MakeArrayRef(leafIdxes.data() + idx * model.GetTreeCount(), model.GetTreeCount()),
-            predict[idx] - predict[idx ^ 1] > 0
+            predict[idx] - predict[idx ^ 1] < 0
         );
     }
     TVector<TVector<double>> result(impact[0].size());
@@ -166,7 +251,7 @@ void CalcAndOutputPredictionDiff(
     const TFullModel& model,
     const NCB::TDataProvider& dataProvider,
     const TString& outputPath,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     auto factorImpact = GetPredictionDiff(model, dataProvider, localExecutor);
     TVector<std::pair<double, int>> impacts;

@@ -8,8 +8,8 @@
 #include <catboost/libs/helpers/double_array_iterator.h>
 #include <catboost/libs/helpers/parallel_tasks.h>
 
-#include <library/pop_count/popcount.h>
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/pop_count/popcount.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/algorithm.h>
 #include <util/generic/array_ref.h>
@@ -25,6 +25,8 @@
 
 namespace NCB {
 
+    static_assert(CHAR_BIT == 8, "CatBoost requires CHAR_BIT == 8");
+
     // [flatFeatureIdx] -> (blockIdx, nonZero Mask)
     using TFeaturesNonDefaultMasks = TVector<TVector<std::pair<ui32, ui64>>>;
 
@@ -34,7 +36,7 @@ namespace NCB {
         TVector<ui64> UsedObjects; // block non default masks
 
     public:
-        TExclusiveFeatureBundleForMerging(ui32 objectCount, NPar::TLocalExecutor* localExecutor)
+        TExclusiveFeatureBundleForMerging(ui32 objectCount, NPar::ILocalExecutor* localExecutor)
             : IntersectionCount(0)
             , NonDefaultCount(0)
         {
@@ -97,7 +99,7 @@ namespace NCB {
         TConstArrayRef<ui32> featuresNonDefaultCounts,
         TConstArrayRef<ui32> flatFeatureIndicesToCalc,
         const TExclusiveFeaturesBundlingOptions& options,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     ) {
         const auto& featuresLayout = *quantizedFeaturesInfo.GetFeaturesLayout();
 
@@ -124,7 +126,11 @@ namespace NCB {
 
             // because 0 bin is common for all features in the bundle
             const ui32 binCountInBundleNeeded = featureBinCount - 1;
-
+            if (options.OnlyOneHotsAndBinaryFloats) {
+                if (featureBinCount > 2) {
+                    continue;
+                }
+            }
             if (binCountInBundleNeeded >= options.MaxBuckets) {
                 continue;
             }
@@ -316,7 +322,7 @@ namespace NCB {
         const TFeaturesLayout& featuresLayout,
         const TQuantizedFeaturesInfo& quantizedFeaturesInfo,
         const TExclusiveFeaturesBundlingOptions& options,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     ) {
         const ui32 objectCount = rawObjectsDataIncrementalIndexing.SrcSubsetIndexing.Size();
 
@@ -333,7 +339,8 @@ namespace NCB {
 
         for (auto flatFeatureIdx : xrange(featureCount)) {
             const auto& featureMetaInfo = featuresMetaInfo[flatFeatureIdx];
-            if (!featureMetaInfo.IsAvailable || featureMetaInfo.Type == EFeatureType::Text) {
+            if (!featureMetaInfo.IsAvailable ||
+                (featureMetaInfo.Type == EFeatureType::Text || featureMetaInfo.Type == EFeatureType::Embedding)) {
                 continue;
             }
 
@@ -342,9 +349,9 @@ namespace NCB {
             const ui32 perTypeFeatureIdx = featuresLayout.GetInternalFeatureIdx(flatFeatureIdx);
             bool isSparse = false;
             if (featureMetaInfo.Type == EFeatureType::Float) {
-                isSparse = rawObjectsData.FloatFeatures[perTypeFeatureIdx]->GetIsSparse();
+                isSparse = rawObjectsData.FloatFeatures[perTypeFeatureIdx]->IsSparse();
             } else if (featureMetaInfo.Type == EFeatureType::Categorical) {
-                isSparse = rawObjectsData.CatFeatures[perTypeFeatureIdx]->GetIsSparse();
+                isSparse = rawObjectsData.CatFeatures[perTypeFeatureIdx]->IsSparse();
             } else {
                 CB_ENSURE(false, featureMetaInfo.Type << " is not supported for feature bundles");
             }

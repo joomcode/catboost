@@ -4,7 +4,7 @@ LIBRARY()
 
 
 
-VERSION(1.4.4)
+VERSION(1.4.8)
 
 LICENSE(BSD-3-Clause)
 
@@ -12,18 +12,12 @@ PEERDIR(
     contrib/libs/xxhash
 )
 
-ADDINCL(
-    contrib/libs/xxhash
-    contrib/libs/zstd
-    contrib/libs/zstd/common
-    contrib/libs/zstd/legacy
-)
-
 NO_COMPILER_WARNINGS()
 
-NO_UTIL()
+NO_RUNTIME()
 
 CFLAGS(
+    -DDEBUGLEVEL=0
     -DZSTD_LEGACY_SUPPORT=1
 )
 
@@ -41,6 +35,7 @@ SRCS(
     compress/zstd_compress.c
     compress/zstd_compress_literals.c
     compress/zstd_compress_sequences.c
+    compress/zstd_compress_superblock.c
     compress/zstd_double_fast.c
     compress/zstd_fast.c
     compress/zstd_lazy.c

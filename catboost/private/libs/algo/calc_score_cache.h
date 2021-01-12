@@ -123,13 +123,14 @@ inline static int CountNonCtrBuckets(
 class TBucketStatsCache {
 public:
     inline void Create(const TVector<TFold>& folds, int bucketCount, int depth) {
+        Stats.clear();
         ApproxDimension = folds[0].GetApproxDimension();
         MaxBodyTailCount = GetMaxBodyTailCount(folds);
         InitialSize = sizeof(TBucketStats) * bucketCount * (1ULL << depth) * ApproxDimension * MaxBodyTailCount;
         if (InitialSize == 0) {
             InitialSize = NSystemInfo::GetPageSize();
         }
-        MemoryPool = new TMemoryPool(InitialSize);
+        MemoryPool = MakeHolder<TMemoryPool>(InitialSize);
     }
     TVector<TBucketStats, TPoolAllocator>& GetStats(
         const TSplitEnsemble& splitEnsemble,
@@ -208,22 +209,22 @@ public:
         TUnsizedVector<TSlice> Slices;
 
     public:
-        void Create(const NPar::TLocalExecutor::TExecRangeParams& docBlockParams);
+        void Create(const NPar::ILocalExecutor::TExecRangeParams& docBlockParams);
         void CreateByControl(
-            const NPar::TLocalExecutor::TExecRangeParams& docBlockParams,
+            const NPar::ILocalExecutor::TExecRangeParams& docBlockParams,
             const TUnsizedVector<bool>& control,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         );
         void CreateByQueriesInfo(
             const TVector<TQueryInfo>& srcQueriesInfo,
-            const NPar::TLocalExecutor::TExecRangeParams& queryBlockParams
+            const NPar::ILocalExecutor::TExecRangeParams& queryBlockParams
         );
         void CreateByQueriesInfoAndControl(
             const TVector<TQueryInfo>& srcQueriesInfo,
-            const NPar::TLocalExecutor::TExecRangeParams& queryBlockParams,
+            const NPar::ILocalExecutor::TExecRangeParams& queryBlockParams,
             const TUnsizedVector<bool>& control,
             bool isPairwiseScoring,
-            NPar::TLocalExecutor* localExecutor,
+            NPar::ILocalExecutor* localExecutor,
             TVector<TQueryInfo>* dstQueriesInfo
         );
     };
@@ -232,40 +233,42 @@ public:
     void Create(
         const TVector<TFold>& folds,
         bool isPairwiseScoring,
+        bool hasOfflineEstimatedFeatures,
         int defaultCalcStatsObjBlockSize,
         float sampleRate = 1.0f
     );
     void SelectSmallestSplitSide(
         int curDepth,
         const TCalcScoreFold& fold,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     );
     void Sample(
         const TFold& fold,
         ESamplingUnit samplingUnit,
+        bool hasOfflineEstimatedFeatures,
         const TVector<TIndexType>& indices,
         TRestorableFastRng64* rand,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         bool performRandomChoice = true,
         bool shouldSortByLeaf = false,
         ui32 leavesCount = 0
     );
-    void UpdateIndices(const TVector<TIndexType>& indices, NPar::TLocalExecutor* localExecutor);
+    void UpdateIndices(const TVector<TIndexType>& indices, NPar::ILocalExecutor* localExecutor);
     // for lossguide
     void UpdateIndicesInLeafwiseSortedFoldForSingleLeaf(
         TIndexType leaf,
         TIndexType leftChildIdx,
         TIndexType rightChildIdx,
         const TVector<TIndexType>& indices,
-        NPar::TLocalExecutor* localExecutor);
+        NPar::ILocalExecutor* localExecutor);
     // for depthwise
     void UpdateIndicesInLeafwiseSortedFold(
         const TVector<TIndexType>& leafs,
         const TVector<TIndexType>& childs,
         const TVector<TIndexType>& indices,
-        NPar::TLocalExecutor* localExecutor);
+        NPar::ILocalExecutor* localExecutor);
     // for symmetric
-    void UpdateIndicesInLeafwiseSortedFold(const TVector<TIndexType>& indices, NPar::TLocalExecutor* localExecutor);
+    void UpdateIndicesInLeafwiseSortedFold(const TVector<TIndexType>& indices, NPar::ILocalExecutor* localExecutor);
 
     int GetDocCount() const;
     int GetBodyTailCount() const;
@@ -276,6 +279,10 @@ public:
 
     // for data with queries - query indices, object indices otherwise
     const NCB::IIndexRangesGenerator<int>& GetCalcStatsIndexRanges() const;
+
+    TConstArrayRef<ui32> GetLearnPermutationOfflineEstimatedFeaturesSubset() const {
+        return LearnPermutationOfflineEstimatedFeaturesSubset.Get<NCB::TIndexedSubset<ui32>>();
+    }
 
 private:
     using TSlice = TVectorSlicing::TSlice;
@@ -293,7 +300,7 @@ private:
         int curDepth,
         int docCount,
         const TUnsizedVector<TIndexType>& indices,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     );
     void SetSampledControl(
         int docCount,
@@ -304,7 +311,7 @@ private:
     void SetControlNoZeroWeighted(int docCount, const float* sampleWeights);
 
     void CreateBlocksAndUpdateQueriesInfoByControl(
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         int srcDocCount,
         const TVector<TQueryInfo>& srcQueriesInfo,
         int* blockCount,
@@ -314,19 +321,20 @@ private:
     );
 
     void SetPermutationBlockSizeAndCalcStatsRanges(
-        int nonCtrDataPermutationBlockSize,
-        int ctrDataPermutationBlockSize
+        int mainDataPermutationBlockSize,
+        int onlineDataPermutationBlockSize
     );
 
-    void SortFoldByLeafIndex(ui32 leafCount, NPar::TLocalExecutor* localExecutor);
+    void SortFoldByLeafIndex(ui32 leafCount, NPar::ILocalExecutor* localExecutor);
 
     struct TFoldPartitionOutput {
-        void Create(int size, int dimension);
+        void Create(int size, int dimension, bool hasOfflineEstimatedFeatures);
 
         struct TSlice {
             TArrayRef<float> SampleWeights;
             TArrayRef<ui32> IndexInFold;
             TArrayRef<ui32> LearnPermutationFeaturesSubset;
+            TArrayRef<ui32> LearnPermutationOfflineEstimatedFeaturesSubset; // can be empty if unused
             TVector<TArrayRef<double>> SampleWeightedDerivatives;
         };
 
@@ -334,9 +342,14 @@ private:
 
         int Size;
         int Dimension;
+
+        // don't process LearnPermutationOfflineEstimatedFeaturesSubset if false
+        bool HasOfflineEstimatedFeatures;
+
         TUnsizedVector<float> SampleWeights;
         TUnsizedVector<ui32> IndexInFold;
         NCB::TIndexedSubset<ui32> LearnPermutationFeaturesSubset;
+        NCB::TIndexedSubset<ui32> LearnPermutationOfflineEstimatedFeaturesSubset; // can be empty if unused
         TUnsizedVector<TUnsizedVector<double>> SampleWeightedDerivatives;
     };
 
@@ -345,7 +358,7 @@ private:
         TIndexType leftChildIdx,
         TIndexType rightChildIdx,
         const TVector<TIndexType>& indices,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         TFoldPartitionOutput::TSlice* out = nullptr);
 
 public:
@@ -362,14 +375,22 @@ public:
      */
     ui32 FeaturesSubsetBegin;
 
+    /* indexing in offline estimated features buckets arrays (because it's different from main features subset),
+     * always TIndexedSubset
+     * initialized
+     * initialized to some default value because TArraySubsetIndexing has no default constructor
+     */
+    NCB::TFeaturesArraySubsetIndexing LearnPermutationOfflineEstimatedFeaturesSubset
+        = NCB::TFeaturesArraySubsetIndexing(NCB::TIndexedSubset<ui32>(0));
+
     TUnsizedVector<ui32> IndexInFold;
     TUnsizedVector<float> LearnWeights;
     TUnsizedVector<float> SampleWeights;
     TVector<TQueryInfo> LearnQueriesInfo;
     TUnsizedVector<TBodyTail> BodyTailArr; // [tail][dim][doc]
     bool SmallestSplitSideValue;
-    int NonCtrDataPermutationBlockSize = FoldPermutationBlockSizeNotSet;
-    int CtrDataPermutationBlockSize = FoldPermutationBlockSizeNotSet;
+    int MainDataPermutationBlockSize = FoldPermutationBlockSizeNotSet;
+    int OnlineDataPermutationBlockSize = FoldPermutationBlockSizeNotSet;
     ui32 LeavesCount;
     TVector<NCB::TIndexRange<ui32>> LeavesBounds;
 
@@ -381,6 +402,10 @@ private:
     float BernoulliSampleRate;
     bool HasPairwiseWeights;
     bool IsPairwiseScoring;
+
+    // don't process LearnPermutationOfflineEstimatedFeaturesSubset if false
+    bool HasOfflineEstimatedFeatures;
+
     int DefaultCalcStatsObjBlockSize;
 
     THolder<NCB::IIndexRangesGenerator<int>> CalcStatsIndexRanges;

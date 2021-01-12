@@ -5,7 +5,7 @@
 #include "features.h"
 #include "ctr_value_table.h"
 
-#include <library/json/json_value.h>
+#include <library/cpp/json/json_value.h>
 
 #include <util/generic/array_ref.h>
 #include <util/generic/ptr.h>
@@ -22,12 +22,12 @@ public:
     virtual ~ICtrProvider() {
     }
 
-    virtual bool HasNeededCtrs(const TVector<TModelCtr>& neededCtrs) const = 0;
+    virtual bool HasNeededCtrs(TConstArrayRef<TModelCtr> neededCtrs) const = 0;
 
     virtual void CalcCtrs(
-        const TVector<TModelCtr>& neededCtrs,
-        const TConstArrayRef<ui8>& binarizedFeatures, // vector of binarized float & one hot features
-        const TConstArrayRef<ui32>& hashedCatFeatures,
+        const TConstArrayRef<TModelCtr> neededCtrs,
+        const TConstArrayRef<ui8> binarizedFeatures, // vector of binarized float & one hot features
+        const TConstArrayRef<ui32> hashedCatFeatures,
         size_t docCount,
         TArrayRef<float> result) = 0;
 

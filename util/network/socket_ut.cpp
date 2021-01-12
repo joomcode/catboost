@@ -2,7 +2,7 @@
 
 #include "pair.h"
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 #include <util/string/builder.h>
 #include <util/generic/vector.h>
@@ -22,6 +22,7 @@ class TSockTest: public TTestBase {
     UNIT_TEST_EXCEPTION(TestConnectionRefused, yexception);
 #endif
     UNIT_TEST(TestNetworkResolutionError);
+    UNIT_TEST(TestNetworkResolutionErrorMessage);
     UNIT_TEST(TestBrokenPipe);
     UNIT_TEST(TestClose);
     UNIT_TEST(TestReusePortAvailCheck);
@@ -32,6 +33,7 @@ public:
     void TestTimeout();
     void TestConnectionRefused();
     void TestNetworkResolutionError();
+    void TestNetworkResolutionErrorMessage();
     void TestBrokenPipe();
     void TestClose();
     void TestReusePortAvailCheck();
@@ -44,7 +46,7 @@ void TSockTest::TestSock() {
     TSocket s(addr);
     TSocketOutput so(s);
     TSocketInput si(s);
-    const TStringBuf req = AsStringBuf("GET / HTTP/1.1\r\nHost: yandex.ru\r\n\r\n");
+    const TStringBuf req = "GET / HTTP/1.1\r\nHost: yandex.ru\r\n\r\n";
 
     so.Write(req.data(), req.size());
 
@@ -89,6 +91,42 @@ void TSockTest::TestNetworkResolutionError() {
     }
 }
 
+void TSockTest::TestNetworkResolutionErrorMessage() {
+#ifdef _unix_
+    auto str = [](int code) -> TString {
+        return TNetworkResolutionError(code).what();
+    };
+
+    auto expected = [](int code) -> TString {
+        return gai_strerror(code);
+    };
+
+    struct TErrnoGuard {
+        TErrnoGuard()
+            : PrevValue(errno)
+        {
+        }
+
+        ~TErrnoGuard() {
+            errno = PrevValue;
+        }
+
+    private:
+        int PrevValue;
+    } g;
+
+    UNIT_ASSERT_VALUES_EQUAL(expected(0) + "(0): ", str(0));
+    UNIT_ASSERT_VALUES_EQUAL(expected(-9) + "(-9): ", str(-9));
+
+    errno = 0;
+    UNIT_ASSERT_VALUES_EQUAL(expected(EAI_SYSTEM) + "(" + IntToString<10>(EAI_SYSTEM) + "; errno=0): ",
+                             str(EAI_SYSTEM));
+    errno = 110;
+    UNIT_ASSERT_VALUES_EQUAL(expected(EAI_SYSTEM) + "(" + IntToString<10>(EAI_SYSTEM) + "; errno=110): ",
+                             str(EAI_SYSTEM));
+#endif
+}
+
 class TTempEnableSigPipe {
 public:
     TTempEnableSigPipe() {
@@ -130,7 +168,7 @@ void TSockTest::TestBrokenPipe() {
 void TSockTest::TestClose() {
     SOCKET socks[2];
 
-    UNIT_ASSERT_EQUAL(SocketPair(socks), 0)
+    UNIT_ASSERT_EQUAL(SocketPair(socks), 0);
     TSocket receiver(socks[1]);
 
     UNIT_ASSERT_EQUAL(static_cast<SOCKET>(receiver), socks[1]);
@@ -270,7 +308,7 @@ void TPollTest::TestPollInOut() {
 
     int expectedCount = 0;
     for (size_t i = 0; i < connectedSockets.size(); ++i) {
-        pollfd fd = {(i % 5 == 4) ? INVALID_SOCKET : *connectedSockets[i], POLLIN | POLLOUT, 0};
+        pollfd fd = {(i % 5 == 4) ? INVALID_SOCKET : static_cast<SOCKET>(*connectedSockets[i]), POLLIN | POLLOUT, 0};
         fds.push_back(fd);
         if (i % 5 != 4)
             ++expectedCount;

@@ -1,6 +1,6 @@
 @echo on
 
-set WIN_COMMON_FLAGS=-k -DOS_SDK=local -DCUDA_ROOT="%CUDA_PATH%" -DUSE_ARCADIA_CUDA_HOST_COMPILER=no --host-platform-flag USE_ARCADIA_CUDA_HOST_COMPILER=no -DCUDA_HOST_COMPILER="C:/VC_FOR_CUDA/VC/Tools/MSVC/14.13.26128/bin/Hostx64/x64/cl.exe"
+set WIN_COMMON_FLAGS=-k -DOS_SDK=local -DCUDA_ROOT="%CUDA_PATH%" -DUSE_ARCADIA_CUDA_HOST_COMPILER=no --host-platform-flag USE_ARCADIA_CUDA_HOST_COMPILER=no
 
 call "%VS_VARS_PATH%\vcvars64.bat" -vcvars_ver=14.16
 if %errorlevel% neq 0 exit /b %errorlevel%
@@ -35,6 +35,11 @@ c:\Python%PyV%\python.exe mk_wheel.py %WIN_COMMON_FLAGS% -DPYTHON_INCLUDE="/I c:
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 set PyV=38
+echo c:\Python%PyV%\python.exe
+c:\Python%PyV%\python.exe mk_wheel.py %WIN_COMMON_FLAGS% -DPYTHON_INCLUDE="/I c:/Python%PyV%/include/" -DPYTHON_LIBRARIES="c:/Python%PyV%/libs/python%PyV%.lib"
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+set PyV=39
 echo c:\Python%PyV%\python.exe
 c:\Python%PyV%\python.exe mk_wheel.py %WIN_COMMON_FLAGS% -DPYTHON_INCLUDE="/I c:/Python%PyV%/include/" -DPYTHON_LIBRARIES="c:/Python%PyV%/libs/python%PyV%.lib"
 if %errorlevel% neq 0 exit /b %errorlevel%

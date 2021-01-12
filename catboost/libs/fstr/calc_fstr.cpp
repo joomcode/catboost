@@ -3,12 +3,14 @@
 #include "compare_documents.h"
 #include "feature_str.h"
 #include "shap_values.h"
+#include "shap_interaction_values.h"
 #include "util.h"
 
 #include <catboost/private/libs/algo/apply.h>
 #include <catboost/private/libs/algo/plot.h>
 #include <catboost/private/libs/algo/yetirank_helpers.h>
 #include <catboost/private/libs/algo/tree_print.h>
+#include <catboost/libs/data/features_layout_helpers.h>
 #include <catboost/libs/data/model_dataset_compatibility.h>
 #include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/mem_usage.h>
@@ -36,18 +38,10 @@
 using namespace NCB;
 
 
-static TVector<TFeature>  GetCombinationClassFeatures(const TModelTrees& forest) {
-    NCB::TFeaturesLayout layout(
-        TVector<TFloatFeature>(
-            forest.GetFloatFeatures().begin(),
-            forest.GetFloatFeatures().end()
-        ),
-        TVector<TCatFeature>(
-            forest.GetCatFeatures().begin(),
-            forest.GetCatFeatures().end()
-        )
-    );
+static TVector<TFeature>  GetCombinationClassFeatures(const TFullModel& model) {
+    NCB::TFeaturesLayout layout = MakeFeaturesLayout(model);
     TVector<std::pair<TVector<int>, TFeature>> featuresCombinations;
+    const TModelTrees& forest = *model.ModelTrees;
 
     for (const TFloatFeature& floatFeature : forest.GetFloatFeatures()) {
         if (!floatFeature.UsedInModel()) {
@@ -74,6 +68,19 @@ static TVector<TFeature>  GetCombinationClassFeatures(const TModelTrees& forest)
         }
         featuresCombinations.back().second = TFeature(ctrFeature);
     }
+    for (const TEstimatedFeature& estimatedFeature: forest.GetEstimatedFeatures()) {
+        featuresCombinations.emplace_back();
+        featuresCombinations.back().first = {
+            (int)layout.GetExternalFeatureIdx(
+                estimatedFeature.ModelEstimatedFeature.SourceFeatureId,
+                EstimatedSourceFeatureTypeToFeatureType(estimatedFeature.ModelEstimatedFeature.SourceFeatureType)
+            )
+        };
+        featuresCombinations.back().second = TFeature(
+            estimatedFeature.ModelEstimatedFeature,
+            model.TextProcessingCollection->GetCalcer(estimatedFeature.ModelEstimatedFeature.CalcerId)->Type()
+        );
+    }
     TVector<int> sortedBinFeatures(featuresCombinations.size());
     Iota(sortedBinFeatures.begin(), sortedBinFeatures.end(), 0);
     Sort(
@@ -99,11 +106,13 @@ static TVector<TMxTree> BuildTrees(
     const THashMap<TFeature, int, TFeatureHash>& featureToIdx,
     const TFullModel& model)
 {
+    CB_ENSURE_INTERNAL(model.IsOblivious(), "BuildTrees are supported only for symmetric trees");
+
     TVector<TMxTree> trees(model.GetTreeCount());
-    auto& binFeatures = model.ModelTrees->GetBinFeatures();
+    const auto binFeatures = model.ModelTrees->GetBinFeatures();
     for (int treeIdx = 0; treeIdx < trees.ysize(); ++treeIdx) {
         auto& tree = trees[treeIdx];
-        const int leafCount = (1uLL << model.ModelTrees->GetTreeSizes()[treeIdx]);
+        const int leafCount = (1uLL << model.ModelTrees->GetModelTreeData()->GetTreeSizes()[treeIdx]);
 
         tree.Leaves.resize(leafCount);
         for (int leafIdx = 0; leafIdx < leafCount; ++leafIdx) {
@@ -116,10 +125,10 @@ static TVector<TMxTree> BuildTrees(
                     * model.ModelTrees->GetDimensionsCount() + dim];
             }
         }
-        auto treeSplitsStart = model.ModelTrees->GetTreeStartOffsets()[treeIdx];
-        auto treeSplitsStop = treeSplitsStart + model.ModelTrees->GetTreeSizes()[treeIdx];
+        auto treeSplitsStart = model.ModelTrees->GetModelTreeData()->GetTreeStartOffsets()[treeIdx];
+        auto treeSplitsStop = treeSplitsStart + model.ModelTrees->GetModelTreeData()->GetTreeSizes()[treeIdx];
         for (auto splitIdx = treeSplitsStart; splitIdx < treeSplitsStop; ++splitIdx) {
-            auto feature = GetFeature(binFeatures[model.ModelTrees->GetTreeSplits()[splitIdx]]);
+            auto feature = GetFeature(model, binFeatures[model.ModelTrees->GetModelTreeData()->GetTreeSplits()[splitIdx]]);
             tree.SrcFeatures.push_back(featureToIdx.at(feature));
         }
     }
@@ -132,8 +141,8 @@ static THashMap<TFeature, int, TFeatureHash> GetFeatureToIdxMap(
 {
     THashMap<TFeature, int, TFeatureHash> featureToIdx;
     const auto& modelBinFeatures = model.ModelTrees->GetBinFeatures();
-    for (auto binSplit : model.ModelTrees->GetTreeSplits()) {
-        TFeature feature = GetFeature(modelBinFeatures[binSplit]);
+    for (auto binSplit : model.ModelTrees->GetModelTreeData()->GetTreeSplits()) {
+        TFeature feature = GetFeature(model, modelBinFeatures[binSplit]);
         if (featureToIdx.contains(feature)) {
             continue;
         }
@@ -144,30 +153,30 @@ static THashMap<TFeature, int, TFeatureHash> GetFeatureToIdxMap(
     return featureToIdx;
 }
 
-static const TDataProvider GetSubset(
-        const TDataProvider& dataset,
-        ui32 maxDocumentCount,
-        NPar::TLocalExecutor* localExecutor
+const TDataProviderPtr GetSubsetForFstrCalc(
+    const TDataProviderPtr dataset,
+    NPar::ILocalExecutor* localExecutor
 ) {
-    auto documentCount = dataset.ObjectsData->GetObjectCount();
+    ui32 totalDocumentCount = dataset->ObjectsData->GetObjectCount();
+    ui32 maxDocumentCount = Min(totalDocumentCount, Max(ui32(2e5), ui32(2e9 / dataset->ObjectsData->GetFeaturesLayout()->GetExternalFeatureCount())));
 
-    if (documentCount > maxDocumentCount) {
-        ui32 foldCount = documentCount / maxDocumentCount;
+    if (totalDocumentCount > maxDocumentCount) {
+        ui32 foldCount = totalDocumentCount / maxDocumentCount;
 
         TVector<NCB::TArraySubsetIndexing<ui32>> testSubsets;
 
-        testSubsets = NCB::Split(*dataset.ObjectsGrouping, foldCount, /*oldCvStyleSplit*/ true);
+        testSubsets = NCB::Split(*dataset->ObjectsGrouping, foldCount, /*oldCvStyleSplit*/ true);
 
-        auto subset = dataset.GetSubset(
+        auto subset = dataset->GetSubset(
                 GetSubset(
-                        dataset.ObjectsGrouping,
+                        dataset->ObjectsGrouping,
                         std::move(testSubsets[0]),
                         NCB::EObjectsOrder::Ordered
                 ),
                 NSystemInfo::TotalMemorySize(),
                 localExecutor
         );
-        return *subset.Get();
+        return subset;
     } else {
         return dataset;
     }
@@ -176,7 +185,7 @@ static const TDataProvider GetSubset(
 static TVector<std::pair<double, TFeature>> CalcFeatureEffectAverageChange(
     const TFullModel& model,
     const TDataProviderPtr dataset,
-    NPar::TLocalExecutor* localExecutor)
+    NPar::ILocalExecutor* localExecutor)
 {
     if (model.GetTreeCount() == 0) {
         return TVector<std::pair<double, TFeature>>();
@@ -194,9 +203,9 @@ static TVector<std::pair<double, TFeature>> CalcFeatureEffectAverageChange(
         leavesStatistics = CollectLeavesStatistics(*dataset, model, localExecutor);
         weights = leavesStatistics;
     } else {
-        CB_ENSURE(!model.ModelTrees->GetLeafWeights().empty(), "CalcFeatureEffect requires either non-empty LeafWeights in model"
+        CB_ENSURE(!model.ModelTrees->GetModelTreeData()->GetLeafWeights().empty(), "CalcFeatureEffect requires either non-empty LeafWeights in model"
             " or provided dataset");
-        weights = model.ModelTrees->GetLeafWeights();
+        weights = model.ModelTrees->GetModelTreeData()->GetLeafWeights();
     }
 
     THashMap<TFeature, int, TFeatureHash> featureToIdx = GetFeatureToIdxMap(model, &features);
@@ -204,8 +213,9 @@ static TVector<std::pair<double, TFeature>> CalcFeatureEffectAverageChange(
         TVector<TMxTree> trees = BuildTrees(featureToIdx, model);
 
         TVector<TConstArrayRef<double>> mxTreeWeightsPresentation;
-        auto leafOffsetPtr = model.ModelTrees->GetFirstLeafOffsets();
-        const auto leafSizes = model.ModelTrees->GetTreeSizes();
+        auto applyData = model.ModelTrees->GetApplyData();
+        auto leafOffsetPtr = applyData->TreeFirstLeafOffsets.data();
+        const auto leafSizes = model.ModelTrees->GetModelTreeData()->GetTreeSizes();
         const int approxDimension = model.ModelTrees->GetDimensionsCount();
         for (size_t treeIdx = 0; treeIdx < model.GetTreeCount(); ++treeIdx) {
             mxTreeWeightsPresentation.push_back(
@@ -220,7 +230,7 @@ static TVector<std::pair<double, TFeature>> CalcFeatureEffectAverageChange(
             mxTreeWeightsPresentation
         );
     } else {
-        effect = CalcEffect(
+        effect = CalcEffectForNonObliviousModel(
             model,
             featureToIdx,
             weights
@@ -240,50 +250,54 @@ static TVector<std::pair<double, TFeature>> CalcFeatureEffectAverageChange(
     return result;
 }
 
-static bool TryGetObjectiveMetric(const TFullModel& model, NCatboostOptions::TLossDescription& lossDescription) {
-    if (model.ModelInfo.contains("params")) {
-        const auto &params = ReadTJsonValue(model.ModelInfo.at("params"));
-        if (params.Has("metrics") && params["metrics"].Has("objective_metric")) {
-            lossDescription.Load(params["metrics"]["objective_metric"]);
-            return true;
-        }
-    }
-    return TryGetLossDescription(model, lossDescription);
-}
-
 static TVector<std::pair<double, TFeature>> CalcFeatureEffectLossChange(
-        const TFullModel& model,
-        const TDataProvider& dataProvider,
-        NPar::TLocalExecutor* localExecutor)
+    const TFullModel& model,
+    const TDataProviderPtr dataProvider,
+    NPar::ILocalExecutor* localExecutor,
+    ECalcTypeShapValues calcType
+)
 {
     NCatboostOptions::TLossDescription metricDescription;
-    CB_ENSURE(TryGetObjectiveMetric(model, metricDescription), "Cannot calculate LossFunctionChange feature importances without metric, need model with params");
+    CB_ENSURE(TryGetObjectiveMetric(model, &metricDescription), "Cannot calculate LossFunctionChange feature importances without metric, need model with params");
     CATBOOST_INFO_LOG << "Used " << metricDescription << " metric for fstr calculation" << Endl;
     int approxDimension = model.ModelTrees->GetDimensionsCount();
 
-    auto combinationClassFeatures = GetCombinationClassFeatures(*model.ModelTrees);
+    auto combinationClassFeatures = GetCombinationClassFeatures(model);
     int featuresCount = combinationClassFeatures.size();
     if (featuresCount == 0) {
         TVector<std::pair<double, TFeature>> result;
         return result;
     }
 
-    ui32 totalDocumentCount = dataProvider.ObjectsData->GetObjectCount();
-    ui32 maxDocuments = Min(totalDocumentCount, Max(ui32(2e5), ui32(2e9 / dataProvider.ObjectsData->GetFeaturesLayout()->GetExternalFeatureCount())));
+    const auto dataset = GetSubsetForFstrCalc(dataProvider, localExecutor);
 
-    const auto dataset = GetSubset(dataProvider, maxDocuments, localExecutor);
+    ui32 documentCount = dataset->ObjectsData->GetObjectCount();
+    const TObjectsDataProvider& objectsData = *dataset->ObjectsData;
 
-    ui32 documentCount = dataset.ObjectsData->GetObjectCount();
-    const TObjectsDataProvider& objectsData = *dataset.ObjectsData;
-
-    CATBOOST_INFO_LOG << "Selected " << documentCount << " documents from " << totalDocumentCount << " for LossFunctionChange calculation." << Endl;
+    CATBOOST_INFO_LOG << "Selected " << documentCount << " documents from " << dataProvider->GetObjectCount() << " for LossFunctionChange calculation." << Endl;
 
     TRestorableFastRng64 rand(0);
-    auto targetData = CreateModelCompatibleProcessedDataProvider(dataset, {metricDescription}, model, GetMonopolisticFreeCpuRam(), &rand, localExecutor).TargetData;
+    auto targetData = CreateModelCompatibleProcessedDataProvider(*dataset.Get(), {metricDescription}, model, GetMonopolisticFreeCpuRam(), &rand, localExecutor).TargetData;
     CB_ENSURE(targetData->GetTargetDimension() <= 1, "Multi-dimensional target fstr is unimplemented yet");
 
-    TShapPreparedTrees preparedTrees = PrepareTrees(model, &dataset, 0, EPreCalcShapValues::Auto, localExecutor, true);
-
+    TShapPreparedTrees preparedTrees = PrepareTrees(
+        model,
+        dataset.Get(),
+        /*referenceDataset*/ nullptr,
+        EPreCalcShapValues::Auto,
+        localExecutor,
+        true,
+        calcType
+    );
+    CalcShapValuesByLeaf(
+        model,
+        /*fixedFeatureParams*/ Nothing(),
+        /*logPeriod*/ 0,
+        preparedTrees.CalcInternalValues,
+        localExecutor,
+        &preparedTrees,
+        calcType
+    );
     TVector<TMetricHolder> scores(featuresCount + 1);
 
     TConstArrayRef<TQueryInfo> targetQueriesInfo = targetData->GetGroupInfo().GetOrElse(TConstArrayRef<TQueryInfo>());
@@ -295,7 +309,7 @@ static TVector<std::pair<double, TFeature>> CalcFeatureEffectLossChange(
     ui32 blockSize = Min(ui32(10000), ui32(1e6) / (featuresCount * approx.ysize())); // shapValues[blockSize][featuresCount][dim] double
 
     NCatboostOptions::TLossDescription lossDescription;
-    CB_ENSURE(TryGetLossDescription(model, lossDescription), "No loss_function in model params");
+    CB_ENSURE(TryGetLossDescription(model, &lossDescription), "No loss_function in model params");
 
     // NDCG and PFound metrics are possible for YetiRank
     // PFound replace with PairLogit (with YetiRank generated pairs) due to quality
@@ -351,10 +365,11 @@ static TVector<std::pair<double, TFeature>> CalcFeatureEffectLossChange(
             featuresCount,
             objectsData,
             &shapValues,
-            localExecutor);
+            localExecutor,
+            calcType);
 
         for (int featureIdx = 0; featureIdx < featuresCount; ++featureIdx) {
-            NPar::TLocalExecutor::TExecRangeParams blockParams(begin, end);
+            NPar::ILocalExecutor::TExecRangeParams blockParams(begin, end);
             blockParams.SetBlockCountToThreadCount();
             localExecutor->ExecRange([&](ui32 docIdx) {
                 for (int dimensionIdx = 0; dimensionIdx < approxDimension; ++dimensionIdx) {
@@ -414,10 +429,12 @@ static TVector<std::pair<double, TFeature>> CalcFeatureEffectLossChange(
 }
 
 TVector<std::pair<double, TFeature>> CalcFeatureEffect(
-        const TFullModel& model,
-        const TDataProviderPtr dataset,
-        EFstrType type,
-        NPar::TLocalExecutor* localExecutor)
+    const TFullModel& model,
+    const TDataProviderPtr dataset,
+    EFstrType type,
+    NPar::ILocalExecutor* localExecutor,
+    ECalcTypeShapValues calcType
+)
 {
     type = AdjustFeatureImportanceType(type, model.GetLossFunctionName());
     if (type != EFstrType::PredictionValuesChange) {
@@ -428,7 +445,7 @@ TVector<std::pair<double, TFeature>> CalcFeatureEffect(
             dataset,
             "Dataset is not provided for " << EFstrType::LossFunctionChange << ", choose "
                 << EFstrType::PredictionValuesChange << " fstr type explicitly or provide dataset.");
-        return CalcFeatureEffectLossChange(model, *dataset.Get(), localExecutor);
+        return CalcFeatureEffectLossChange(model, dataset, localExecutor, calcType);
     } else {
         CB_ENSURE_INTERNAL(
             type == EFstrType::PredictionValuesChange || type == EFstrType::InternalFeatureImportance,
@@ -439,11 +456,16 @@ TVector<std::pair<double, TFeature>> CalcFeatureEffect(
 
 TVector<TFeatureEffect> CalcRegularFeatureEffect(
     const TVector<std::pair<double, TFeature>>& internalEffect,
-    int catFeaturesCount,
-    int floatFeaturesCount)
+    const TFullModel& model)
 {
+    int catFeaturesCount = model.GetNumCatFeatures();
+    int floatFeaturesCount = model.GetNumFloatFeatures();
+    int textFeaturesCount = model.GetNumTextFeatures();
+    int embeddingFeaturesCount = model.GetNumEmbeddingFeatures();
     TVector<double> catFeatureEffect(catFeaturesCount);
     TVector<double> floatFeatureEffect(floatFeaturesCount);
+    TVector<double> textFeatureEffect(textFeaturesCount);
+    TVector<double> embeddingFeatureEffect(embeddingFeaturesCount);
 
     for (const auto& effectWithSplit : internalEffect) {
         TFeature feature = effectWithSplit.second;
@@ -470,9 +492,15 @@ TVector<TFeatureEffect> CalcRegularFeatureEffect(
                 }
                 break;
             }
-            case ESplitType::EstimatedFeature:
-                CB_ENSURE(false, "Estimated features is not supported in fstr mode");
+            case ESplitType::EstimatedFeature: {
+                if (feature.EstimatedFeature.SourceFeatureType == EEstimatedSourceFeatureType::Text) {
+                    textFeatureEffect[feature.EstimatedFeature.SourceFeatureId] += effectWithSplit.first;
+                } else {
+                    CB_ENSURE(feature.EstimatedFeature.SourceFeatureType == EEstimatedSourceFeatureType::Embedding);
+                    embeddingFeatureEffect[feature.EstimatedFeature.SourceFeatureId] += effectWithSplit.first;
+                }
                 break;
+            }
         }
     }
 
@@ -484,6 +512,14 @@ TVector<TFeatureEffect> CalcRegularFeatureEffect(
     for (int i = 0; i < floatFeatureEffect.ysize(); ++i) {
         regularFeatureEffect.push_back(
             TFeatureEffect(floatFeatureEffect[i], EFeatureType::Float, i));
+    }
+    for (int i = 0; i < textFeatureEffect.ysize(); ++i) {
+        regularFeatureEffect.push_back(
+            TFeatureEffect(textFeatureEffect[i], EFeatureType::Text, i));
+    }
+    for (int i = 0; i < embeddingFeatureEffect.ysize(); ++i) {
+        regularFeatureEffect.push_back(
+            TFeatureEffect(embeddingFeatureEffect[i], EFeatureType::Embedding, i));
     }
 
     Sort(
@@ -500,23 +536,14 @@ TVector<double> CalcRegularFeatureEffect(
     const TFullModel& model,
     const TDataProviderPtr dataset,
     EFstrType type,
-    NPar::TLocalExecutor* localExecutor)
+    NPar::ILocalExecutor* localExecutor,
+    ECalcTypeShapValues calcType
+)
 {
-    const NCB::TFeaturesLayout layout(
-        TVector<TFloatFeature>(
-            model.ModelTrees->GetFloatFeatures().begin(),
-            model.ModelTrees->GetFloatFeatures().end()
-        ),
-        TVector<TCatFeature>(
-            model.ModelTrees->GetCatFeatures().begin(),
-            model.ModelTrees->GetCatFeatures().end()
-        )
-    );
+    const NCB::TFeaturesLayout layout = MakeFeaturesLayout(model);
 
     TVector<TFeatureEffect> regularEffect = CalcRegularFeatureEffect(
-        CalcFeatureEffect(model, dataset, type, localExecutor),
-        model.GetNumCatFeatures(),
-        model.GetNumFloatFeatures());
+        CalcFeatureEffect(model, dataset, type, localExecutor, calcType), model);
 
     TVector<double> effect(layout.GetExternalFeatureCount());
     for (const auto& featureEffect : regularEffect) {
@@ -537,9 +564,19 @@ TVector<TInternalFeatureInteraction> CalcInternalFeatureInteraction(const TFullM
 
     TVector<TFeature> features;
     THashMap<TFeature, int, TFeatureHash> featureToIdx = GetFeatureToIdxMap(model, &features);
-    TVector<TMxTree> trees = BuildTrees(featureToIdx, model);
 
-    TVector<TFeaturePairInteractionInfo> pairwiseEffect = CalcMostInteractingFeatures(trees);
+    TVector<TFeaturePairInteractionInfo> pairwiseEffect;
+
+    if(model.IsOblivious()) {
+        TVector<TMxTree> trees = BuildTrees(featureToIdx, model);
+        pairwiseEffect = CalcMostInteractingFeatures(trees);
+    } else {
+        pairwiseEffect = CalcMostInteractingFeatures(
+            model,
+            featureToIdx
+        );
+    }
+
     TVector<TInternalFeatureInteraction> result;
     result.reserve(pairwiseEffect.size());
     for (const auto& efffect : pairwiseEffect) {
@@ -620,17 +657,15 @@ static TVector<TVector<double>> CalcFstr(
     const TFullModel& model,
     const TDataProviderPtr dataset,
     EFstrType type,
-    NPar::TLocalExecutor* localExecutor)
+    NPar::ILocalExecutor* localExecutor,
+    ECalcTypeShapValues calcType
+)
 {
     CB_ENSURE(
-        !model.ModelTrees->GetLeafWeights().empty() || (dataset != nullptr),
+        !model.ModelTrees->GetModelTreeData()->GetLeafWeights().empty() || (dataset != nullptr),
         "CalcFstr requires either non-empty LeafWeights in model or provided dataset");
-    CB_ENSURE(
-        model.ModelTrees->GetTextFeatures().empty(),
-        "CalcFstr is not implemented for models with text features"
-    );
 
-    TVector<double> regularEffect = CalcRegularFeatureEffect(model, dataset, type, localExecutor);
+    TVector<double> regularEffect = CalcRegularFeatureEffect(model, dataset, type, localExecutor, calcType);
     TVector<TVector<double>> result;
     for (const auto& value : regularEffect){
         TVector<double> vec = {value};
@@ -640,16 +675,7 @@ static TVector<TVector<double>> CalcFstr(
 }
 
 TVector<TVector<double>> CalcInteraction(const TFullModel& model) {
-    const TFeaturesLayout layout(
-        TVector<TFloatFeature>(
-            model.ModelTrees->GetFloatFeatures().begin(),
-            model.ModelTrees->GetFloatFeatures().end()
-        ),
-        TVector<TCatFeature>(
-            model.ModelTrees->GetCatFeatures().begin(),
-            model.ModelTrees->GetCatFeatures().end()
-        )
-    );
+    const TFeaturesLayout layout = MakeFeaturesLayout(model);
 
     TVector<TInternalFeatureInteraction> internalInteraction = CalcInternalFeatureInteraction(model);
     TVector<TFeatureInteraction> interaction = CalcFeatureInteraction(internalInteraction, layout);
@@ -683,10 +709,13 @@ TVector<TVector<double>> GetFeatureImportances(
     const EFstrType fstrType,
     const TFullModel& model,
     const TDataProviderPtr dataset, // can be nullptr
+    const TDataProviderPtr referenceDataset, // can be nullptr
     int threadCount,
     EPreCalcShapValues mode,
-    int logPeriod)
-{
+    int logPeriod,
+    ECalcTypeShapValues calcType,
+    EExplainableModelOutput modelOutputType
+) {
     TSetLoggingVerboseOrSilent inThisScope(logPeriod);
     CB_ENSURE(model.GetTreeCount(), "Model is not trained");
     if (dataset) {
@@ -702,7 +731,7 @@ TVector<TVector<double>> GetFeatureImportances(
             NPar::TLocalExecutor localExecutor;
             localExecutor.RunAdditionalThreads(threadCount - 1);
 
-            return CalcFstr(model, dataset, fstrType, &localExecutor);
+            return CalcFstr(model, dataset, fstrType, &localExecutor, calcType);
         }
         case EFstrType::Interaction:
             if (dataset) {
@@ -715,7 +744,8 @@ TVector<TVector<double>> GetFeatureImportances(
             NPar::TLocalExecutor localExecutor;
             localExecutor.RunAdditionalThreads(threadCount - 1);
 
-            return CalcShapValues(model, *dataset, logPeriod, mode, &localExecutor);
+            return CalcShapValues(model, *dataset, referenceDataset, /*fixedFeatureParams*/ Nothing(), logPeriod, mode, &localExecutor,
+                                  calcType, modelOutputType);
         }
         case EFstrType::PredictionDiff: {
             NPar::TLocalExecutor localExecutor;
@@ -733,14 +763,18 @@ TVector<TVector<TVector<double>>> GetFeatureImportancesMulti(
     const EFstrType fstrType,
     const TFullModel& model,
     const TDataProviderPtr dataset,
+    const TDataProviderPtr referenceDataset, // can be nullptr
     int threadCount,
     EPreCalcShapValues mode,
-    int logPeriod)
-{
+    int logPeriod,
+    ECalcTypeShapValues calcType,
+    EExplainableModelOutput modelOutputType
+) {
     TSetLoggingVerboseOrSilent inThisScope(logPeriod);
     CB_ENSURE(model.GetTreeCount(), "Model is not trained");
 
-    CB_ENSURE(fstrType == EFstrType::ShapValues, "Only shap values can provide multi approxes.");
+    CB_ENSURE(fstrType == EFstrType::ShapValues,
+            "Only shap values can provide multi approxes.");
 
     CB_ENSURE(dataset, "Dataset is not provided");
     CheckModelAndDatasetCompatibility(model, *dataset->ObjectsData.Get());
@@ -748,20 +782,34 @@ TVector<TVector<TVector<double>>> GetFeatureImportancesMulti(
     NPar::TLocalExecutor localExecutor;
     localExecutor.RunAdditionalThreads(threadCount - 1);
 
-    return CalcShapValuesMulti(model, *dataset, logPeriod, mode, &localExecutor);
+    return CalcShapValuesMulti(model, *dataset, referenceDataset, /*fixedFeatureParams*/ Nothing(), logPeriod, mode, &localExecutor,
+                               calcType, modelOutputType);
+}
+
+TVector<TVector<TVector<TVector<double>>>> CalcShapFeatureInteractionMulti(
+    const EFstrType fstrType,
+    const TFullModel& model,
+    const NCB::TDataProviderPtr dataset,
+    const TMaybe<std::pair<int, int>>& pairOfFeatures,
+    int threadCount,
+    EPreCalcShapValues mode,
+    int logPeriod,
+    ECalcTypeShapValues calcType
+) {
+    ValidateFeatureInteractionParams(fstrType, model, dataset, calcType);
+    if (pairOfFeatures.Defined()) {
+        const int flatFeatureCount = SafeIntegerCast<int>(dataset->MetaInfo.GetFeatureCount());
+        ValidateFeaturePair(flatFeatureCount, pairOfFeatures.GetRef());
+    }
+
+    NPar::TLocalExecutor localExecutor;
+    localExecutor.RunAdditionalThreads(threadCount - 1);
+
+    return CalcShapInteractionValuesMulti(model, *dataset, pairOfFeatures, logPeriod, mode, &localExecutor, calcType);
 }
 
 TVector<TString> GetMaybeGeneratedModelFeatureIds(const TFullModel& model, const TDataProviderPtr dataset) {
-    const NCB::TFeaturesLayout modelFeaturesLayout(
-        TVector<TFloatFeature>(
-            model.ModelTrees->GetFloatFeatures().begin(),
-            model.ModelTrees->GetFloatFeatures().end()
-        ),
-        TVector<TCatFeature>(
-            model.ModelTrees->GetCatFeatures().begin(),
-            model.ModelTrees->GetCatFeatures().end()
-        )
-    );
+    const NCB::TFeaturesLayout modelFeaturesLayout = MakeFeaturesLayout(model);
     TVector<TString> modelFeatureIds(modelFeaturesLayout.GetExternalFeatureCount());
     if (AllFeatureIdsEmpty(modelFeaturesLayout.GetExternalFeaturesMetaInfo())) {
         if (dataset) {
@@ -788,3 +836,4 @@ TVector<TString> GetMaybeGeneratedModelFeatureIds(const TFullModel& model, const
     }
     return modelFeatureIds;
 }
+

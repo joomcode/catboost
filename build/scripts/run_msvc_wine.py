@@ -8,6 +8,8 @@ import json
 import argparse
 import errno
 
+import process_command_files as pcf
+
 
 procs = []
 build_kekeke = 45
@@ -316,14 +318,26 @@ def colorize(out):
 
 
 def trim_path(path, winepath):
-    p = run_subprocess([winepath, '-s', path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    stdout, stderr = p.communicate()
+    p1 = run_subprocess([winepath, '-w', path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p1_stdout, p1_stderr = p1.communicate()
+    win_path = p1_stdout.strip()
 
-    for line in reversed(stdout.splitlines()):
-        if line.startswith((path[:4], path[:4].upper())):
-            return line
+    if p1.returncode != 0 or not win_path:
+        # Fall back to only winepath -s
+        win_path = path
 
-    raise Exception('Cannot trim path {}; winepath exit code: {}, stdout:\n{}\n  stderr:\n{}'.format(path, p.returncode, stdout, stderr))
+    p2 = run_subprocess([winepath, '-s', win_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p2_stdout, p2_stderr = p2.communicate()
+    short_path = p2_stdout.strip()
+
+    check_path = short_path
+    if check_path.startswith(('Z:', 'z:')):
+        check_path = check_path[2:]
+
+    if not check_path[1:].startswith((path[1:4], path[1:4].upper())):
+        raise Exception('Cannot trim path {}; 1st winepath exit code: {}, stdout:\n{}\n  stderr:\n{}\n 2nd winepath exit code: {}, stdout:\n{}\n  stderr:\n{}'.format(path, p1.returncode, p1_stdout, p1_stderr, p2.returncode, p2_stdout, p2_stderr))
+
+    return short_path
 
 
 def downsize_path(path, short_names):
@@ -386,7 +400,8 @@ def run_main():
     binary = args.binary
     version = args.version
     incl_paths = args.incl_paths
-    free_args = args.free_args
+    # By now just unpack. Ideally we should fix path and pack arguments back into command file
+    free_args = pcf.get_args(args.free_args)
     bld_root = args.arcadia_build_root
 
     wine_dir = os.path.dirname(os.path.dirname(wine))

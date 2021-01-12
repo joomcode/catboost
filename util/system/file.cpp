@@ -539,6 +539,38 @@ FHANDLE TFileHandle::Duplicate() const noexcept {
 #endif
 }
 
+int TFileHandle::Duplicate2Posix(int dstHandle) const noexcept {
+    if (!IsOpen()) {
+        return -1;
+    }
+#if defined(_win_)
+    FHANDLE dupHandle = Duplicate();
+    if (dupHandle == INVALID_FHANDLE) {
+        _set_errno(EMFILE);
+        return -1;
+    }
+    int posixHandle = _open_osfhandle((intptr_t)dupHandle, 0);
+    if (posixHandle == -1) {
+        CloseHandle(dupHandle);
+        return -1;
+    }
+    if (dup2(posixHandle, dstHandle) == -1) {
+        dstHandle = -1;
+    }
+    _close(posixHandle);
+    return dstHandle;
+#elif defined(_unix_)
+    while (dup2(Fd_, dstHandle) == -1) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    return dstHandle;
+#else
+#error unsupported platform
+#endif
+}
+
 bool TFileHandle::LinkTo(const TFileHandle& fh) const noexcept {
 #if defined(_unix_)
     while (dup2(fh.Fd_, Fd_) == -1) {
@@ -726,9 +758,9 @@ TString DecodeOpenMode(ui32 mode0) {
     if ((mode & flag) == flag) {   \
         mode &= ~flag;             \
         if (r) {                   \
-            r << AsStringBuf("|"); \
+            r << TStringBuf("|"); \
         }                          \
-        r << AsStringBuf(#flag);   \
+        r << TStringBuf(#flag);   \
     }
 
     F(RdWr)
@@ -770,7 +802,7 @@ TString DecodeOpenMode(ui32 mode0) {
 
     if (mode != 0) {
         if (r) {
-            r << AsStringBuf("|");
+            r << TStringBuf("|");
         }
 
         r << Hex(mode);

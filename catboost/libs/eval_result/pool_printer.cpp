@@ -2,6 +2,7 @@
 
 #include <catboost/idl/pool/flat/quantized_chunk_t.fbs.h>
 #include <catboost/libs/helpers/exception.h>
+#include <catboost/private/libs/data_util/exists_checker.h>
 #include <catboost/private/libs/quantized_pool/serialization.h>
 
 #include <util/generic/xrange.h>
@@ -12,18 +13,27 @@
 
 
 namespace NCB {
+    TDSVPoolColumnsPrinter::TDSVPoolColumnsPrinter(
+        TPoolColumnsPrinterPushArgs&& args
+    )
+        : LineDataReader(std::move(args.Reader))
+        , Delimiter(args.Format.Delimiter)
+        , DocId(-1)
+    {
+        UpdateColumnTypeInfo(args.ColumnsMetaInfo);
+    }
 
     TDSVPoolColumnsPrinter::TDSVPoolColumnsPrinter(
         const TPathWithScheme& testSetPath,
         const TDsvFormatOptions& format,
         const TMaybe<TDataColumnsMetaInfo>& columnsMetaInfo
     )
-        : LineDataReader(GetLineDataReader(testSetPath, format))
-        , Delimiter(format.Delimiter)
-        , DocId(-1)
-    {
-        UpdateColumnTypeInfo(columnsMetaInfo);
-    }
+        : TDSVPoolColumnsPrinter(TPoolColumnsPrinterPushArgs{
+            GetLineDataReader(testSetPath, format),
+            format,
+            columnsMetaInfo})
+    {}
+
 
     void TDSVPoolColumnsPrinter::OutputColumnByType(IOutputStream* outStream, ui64 docId, EColumn columnType) {
         CB_ENSURE(FromColumnTypeToColumnId.contains(columnType),
@@ -63,7 +73,7 @@ namespace NCB {
     }
 
     TQuantizedPoolColumnsPrinter::TQuantizedPoolColumnsPrinter(const TPathWithScheme& testSetPath)
-        : QuantizedPool(LoadQuantizedPool(testSetPath, {/*LockMemory=*/false, /*Precharge=*/false, TDatasetSubset::MakeColumns()}))
+        : QuantizedPool(LoadQuantizedPool(testSetPath, {/*LockMemory=*/false, /*Precharge=*/false, TDatasetSubset::MakeColumns(!IsSharedFs(testSetPath))}))
     {
         for (const ui32 columnId : xrange(QuantizedPool.ColumnTypes.size())) {
             const auto columnType = QuantizedPool.ColumnTypes[columnId];
@@ -177,5 +187,8 @@ namespace NCB {
         }
         return columnInfo.CurrentToken;
     }
+
+    TPoolColumnsPrinterLoaderFactory::TRegistrator<TDSVPoolColumnsPrinter> DefPoolColumnsPrinter("");
+    TPoolColumnsPrinterLoaderFactory::TRegistrator<TDSVPoolColumnsPrinter> DsvPoolColumnsPrinter("dsv");
 
 } // namespace NCB

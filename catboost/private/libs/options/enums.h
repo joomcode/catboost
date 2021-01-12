@@ -25,7 +25,13 @@ enum class ESamplingUnit {
 enum class EFeatureType {
     Float,
     Categorical,
-    Text
+    Text,
+    Embedding
+};
+
+enum class EEstimatedSourceFeatureType {
+    Text,
+    Embedding
 };
 
 enum EErrorType {
@@ -126,6 +132,9 @@ enum class ELossFunction {
     MedianAbsoluteError,
     SMAPE,
     Huber,
+    Tweedie,
+
+    RMSEWithUncertainty,
 
     /* multiclassification errors */
 
@@ -144,10 +153,12 @@ enum class ELossFunction {
     QuerySoftMax,
     QueryCrossEntropy,
     StochasticFilter,
+    StochasticRank,
 
     /* user defined errors */
 
     PythonUserDefinedPerObject,
+    PythonUserDefinedMultiRegression,
     UserPerObjMetric,
     UserQuerywiseMetric,
 
@@ -176,6 +187,7 @@ enum class ELossFunction {
     WKappa,
     LogLikelihoodOfPrediction,
     NormalizedGini,
+    PRAUC,
 
     /* pair metrics */
 
@@ -193,7 +205,9 @@ enum class ELossFunction {
     FilteredDCG,
 
     /* multi-regression */
-    MultiRMSE
+    MultiRMSE,
+
+    Combination
 };
 
 enum class ERankingType {
@@ -217,7 +231,11 @@ enum class EPredictionType {
     LogProbability,
     Class,
     RawFormulaVal,
-    InternalRawFormulaVal
+    Exponent,
+    RMSEWithUncertainty,
+    InternalRawFormulaVal,
+    VirtEnsembles,
+    TotalUncertainty
 };
 
 enum class EFstrType {
@@ -228,7 +246,8 @@ enum class EFstrType {
     Interaction,
     InternalInteraction,
     ShapValues,
-    PredictionDiff
+    PredictionDiff,
+    ShapInteractionValues
 };
 
 enum class EFstrCalculatedInFitType {
@@ -241,6 +260,19 @@ enum class EPreCalcShapValues {
     Auto,
     UsePreCalc,
     NoPreCalc
+};
+
+enum class ECalcTypeShapValues {
+    Approximate,
+    Regular,
+    Exact,
+    Independent
+};
+
+enum class EExplainableModelOutput {
+    Raw,
+    Probability,
+    LossFunction
 };
 
 enum class EObservationsToBootstrap {
@@ -321,10 +353,27 @@ enum class EFeatureCalcerType : ui32 {
     BoW,
     NaiveBayes,
     BM25,
-    CosDistanceWithClassCenter,
-    GaussianHomoscedasticModel,
-    GaussianHeteroscedasticModel,
-    EmbeddingDistanceToClass
+    LDA,
+    KNN
+};
+
+enum class EAutoClassWeightsType {
+    Balanced,
+    SqrtBalanced,
+    None
+};
+
+enum class EAucType {
+    Classic,
+    Ranking,
+    Mu,
+    OneVsAll
+};
+
+enum class EF1AverageType {
+    Micro,
+    Macro,
+    Weighted
 };
 
 namespace NCB {
@@ -340,5 +389,11 @@ namespace NCB {
         Float,
         String,
         None
+    };
+
+    enum class EFeaturesSelectionAlgorithm {
+        RecursiveByPredictionValuesChange,
+        RecursiveByLossFunctionChange,
+        RecursiveByShapValues
     };
 }

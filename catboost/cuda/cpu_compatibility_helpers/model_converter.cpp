@@ -13,7 +13,7 @@
 using namespace NCB;
 
 TVector<TTargetClassifier> NCatboostCuda::CreateTargetClassifiers(const NCatboostCuda::TBinarizedFeaturesManager& featuresManager) {
-    TTargetClassifier targetClassifier(featuresManager.GetTargetBorders());
+    TTargetClassifier targetClassifier(featuresManager.GetTargetBorders(), 0);
     TVector<TTargetClassifier> classifiers;
     classifiers.resize(1, targetClassifier);
     return classifiers;
@@ -31,12 +31,10 @@ TModelConverter::TModelConverter(
       , FeaturesLayout(*quantizedFeaturesInfo->GetFeaturesLayout())
       , CatFeatureBinToHashIndex(perfectHashedToHashedCatValuesMap)
       , TargetHelper(targetHelper) {
-    Borders.resize(FeaturesLayout.GetFloatFeatureCount());
     FloatFeaturesNanMode.resize(FeaturesLayout.GetFloatFeatureCount(), ENanMode::Forbidden);
 
     FeaturesLayout.IterateOverAvailableFeatures<EFeatureType::Float>(
         [&](const TFloatFeatureIdx floatFeatureIdx) {
-            Borders[*floatFeatureIdx] = QuantizedFeaturesInfo->GetBorders(floatFeatureIdx);
             FloatFeaturesNanMode[*floatFeatureIdx] = QuantizedFeaturesInfo->GetNanMode(floatFeatureIdx);
         });
 }
@@ -93,11 +91,13 @@ TFullModel TModelConverter::Convert(
         *QuantizedFeaturesInfo);
     TVector<TCatFeature> catFeatures = CreateCatFeatures(*QuantizedFeaturesInfo->GetFeaturesLayout());
     TVector<TTextFeature> textFeatures = CreateTextFeatures(*QuantizedFeaturesInfo->GetFeaturesLayout());
+    TVector<TEmbeddingFeature> embeddingFeatures = CreateEmbeddingFeatures(*QuantizedFeaturesInfo->GetFeaturesLayout());
 
     TObliviousTreeBuilder obliviousTreeBuilder(
         floatFeatures,
         catFeatures,
         textFeatures,
+        embeddingFeatures,
         cpuApproxDim);
 
     for (ui32 i = 0; i < src.Size(); ++i) {
@@ -130,7 +130,11 @@ TFullModel TModelConverter::Convert(
     }
 
     obliviousTreeBuilder.Build(coreModel.ModelTrees.GetMutable());
-    coreModel.SetScaleAndBias({1.0, src.Bias});
+    TVector<double> bias;
+    if (cpuApproxDim == 1) {
+        bias = {src.Bias};
+    }
+    coreModel.SetScaleAndBias({1.0, bias});
     coreModel.UpdateDynamicData();
     return coreModel;
 }
@@ -152,11 +156,14 @@ TFullModel TModelConverter::Convert(
             *QuantizedFeaturesInfo);
         TVector<TCatFeature> catFeatures = CreateCatFeatures(*QuantizedFeaturesInfo->GetFeaturesLayout());
         TVector<TTextFeature> textFeatures = CreateTextFeatures(*QuantizedFeaturesInfo->GetFeaturesLayout());
+        TVector<TEmbeddingFeature> embeddingFeatures = CreateEmbeddingFeatures(*QuantizedFeaturesInfo->GetFeaturesLayout());
+
 
         TNonSymmetricTreeModelBuilder treeBuilder(
             floatFeatures,
             catFeatures,
             textFeatures,
+            embeddingFeatures,
             cpuApproxDim);
 
         for (ui32 treeId = 0; treeId < src.Size(); ++treeId) {
@@ -203,7 +210,11 @@ TFullModel TModelConverter::Convert(
         }
 
         treeBuilder.Build(coreModel.ModelTrees.GetMutable());
-        coreModel.SetScaleAndBias({1.0, src.Bias});
+        TVector<double> bias;
+        if (cpuApproxDim == 1) {
+            bias = {src.Bias};
+        }
+        coreModel.SetScaleAndBias({1.0, bias});
         coreModel.UpdateDynamicData();
         return coreModel;
     }
@@ -219,7 +230,7 @@ TFullModel TModelConverter::Convert(
         auto dataProviderId = FeaturesManager.GetDataProviderId(split.FeatureId);
         auto remapId = FeaturesLayout.GetInternalFeatureIdx<EFeatureType::Float>(dataProviderId);
 
-        float border = Borders.at(*remapId).at(split.BinIdx);
+        float border = FeaturesManager.GetBorders(split.FeatureId).at(split.BinIdx);
         modelSplit.FloatFeature = TFloatSplit{(int) *remapId, border};
         return modelSplit;
     }
@@ -236,16 +247,17 @@ TFullModel TModelConverter::Convert(
         const auto& featureBorders = FeaturesManager.GetBorders(split.FeatureId);
         const float border = featureBorders.at(split.BinIdx);
 
-        TEstimatedFeature estimatedFeature = FeaturesManager.GetEstimatedFeature(split.FeatureId);
+        NCB::TEstimatedFeatureId estimatedFeature = FeaturesManager.GetEstimatedFeature(split.FeatureId);
         TFeatureEstimatorsPtr featureEstimators = FeaturesManager.GetFeatureEstimators();
         const TGuid& estimatorGuid = featureEstimators->GetEstimatorGuid(estimatedFeature.EstimatorId);
 
-        modelSplit.EstimatedFeature = TEstimatedFeatureSplit{
+        modelSplit.EstimatedFeature = TEstimatedFeatureSplit(TModelEstimatedFeature{
             SafeIntegerCast<int>(featureEstimators->GetEstimatorSourceFeatureIdx(estimatorGuid).TextFeatureId),
             estimatorGuid,
             SafeIntegerCast<int>(estimatedFeature.LocalFeatureId),
+            FeatureTypeToEstimatedSourceFeatureType(featureEstimators->GetEstimatorSourceType(estimatorGuid))},
             border
-        };
+        );
         return modelSplit;
     }
 
@@ -338,7 +350,7 @@ TFullModel TModelConverter::Convert(
         featureCombinationToProjection->insert({modelCtr.Base.Projection, std::move(projection)});
 
         modelCtr.Base.CtrType = ctr.Configuration.Type;
-        modelCtr.Base.TargetBorderClassifierIdx = ctr.Configuration.CtrBinarizationConfigId;
+        modelCtr.Base.TargetBorderClassifierIdx = 0;
 
         const auto& config = ctr.Configuration;
         modelCtr.TargetBorderIdx = config.ParamId;

@@ -13,11 +13,14 @@
 #include <catboost/private/libs/options/runtime_text_options.h>
 #include <catboost/private/libs/text_processing/text_digitizers.h>
 #include <catboost/private/libs/quantization/utils.h>
+#include <catboost/private/libs/quantization_schema/schema.h>
 
-#include <library/binsaver/bin_saver.h>
-#include <library/grid_creator/binarization.h>
-#include <library/dbg_output/dump.h>
-#include <library/threading/local_executor/local_executor.h>
+#include <catboost/private/libs/options/runtime_embedding_options.h>
+
+#include <library/cpp/binsaver/bin_saver.h>
+#include <library/cpp/grid_creator/binarization.h>
+#include <library/cpp/dbg_output/dump.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/fwd.h>
 #include <util/generic/guid.h>
@@ -71,7 +74,13 @@ namespace NCB {
             NCatboostOptions::TBinarizationOptions commonFloatFeaturesBinarization,
             TMap<ui32, NCatboostOptions::TBinarizationOptions> perFloatFeatureQuantization,
             const NCatboostOptions::TTextProcessingOptions& textFeaturesProcessing,
+            const NCatboostOptions::TEmbeddingProcessingOptions& embeddingFeatureProcessing,
             bool floatFeaturesAllowNansInTestOnly = true);
+
+        /* for Java deserialization
+         *  ignored features are already set in featuresLayout
+         */
+        void Init(TFeaturesLayout* featuresLayout); // featuresLayout is moved into
 
         bool EqualTo(const TQuantizedFeaturesInfo& rhs, bool ignoreSparsity = false) const;
 
@@ -79,10 +88,10 @@ namespace NCB {
             return EqualTo(rhs);
         }
 
-        int operator&(IBinSaver& binSaver);
+        // for Spark
+        bool EqualWithoutOptionsTo(const TQuantizedFeaturesInfo& rhs, bool ignoreSparsity = false) const;
 
-        // *this contains a superset of quantized features in rhs
-        bool IsSupersetOf(const TQuantizedFeaturesInfo& rhs) const;
+        int operator&(IBinSaver& binSaver);
 
         // const because can be used with TReadGuard without changing the object
         TRWMutex& GetRWMutex() const {
@@ -200,7 +209,7 @@ namespace NCB {
         }
 
         TPerfectHashedToHashedCatValuesMap CalcPerfectHashedToHashedCatValuesMap(
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) const;
 
         ui32 CalcCheckSum() const;
@@ -215,6 +224,10 @@ namespace NCB {
 
         const NCatboostOptions::TRuntimeTextOptions& GetTextProcessingOptions() const {
             return RuntimeTextProcessingOptions;
+        }
+
+        const NCatboostOptions::TRuntimeEmbeddingOptions& GetEmbeddingProcessingOptions() const {
+            return EmbeddingEstimatorsOptions;
         }
 
         ui32 GetTokenizedFeatureCount() const {
@@ -232,13 +245,14 @@ namespace NCB {
 
         void CheckCorrectFeature(const IFeatureValuesHolder& feature) const {
             CB_ENSURE_INTERNAL(
-                IsConsistentWithLayout(feature, *FeaturesLayout),
+                FeaturesLayout->IsCorrectExternalFeatureIdxAndType(
+                    feature.GetId(), feature.GetFeatureType()
+                ),
                 "feature #" << feature.GetId() << " is not consistent with featuresLayout"
             );
         }
 
         friend class TCatFeaturesPerfectHashHelper;
-        friend class TObjectsSerialization;
 
         inline ENanMode ComputeNanMode(const TFloatValuesHolder& feature) const;
 
@@ -260,9 +274,18 @@ namespace NCB {
 
         NCatboostOptions::TRuntimeTextOptions RuntimeTextProcessingOptions;
         TTextDigitizers TextDigitizers;
+
+        NCatboostOptions::TRuntimeEmbeddingOptions EmbeddingEstimatorsOptions;
     };
 
     using TQuantizedFeaturesInfoPtr = TIntrusivePtr<TQuantizedFeaturesInfo>;
+
+
+    // compatibility, probably better switch to TQuantizedFeaturesInfo everywhere
+    TPoolQuantizationSchema GetPoolQuantizationSchema(
+        const TQuantizedFeaturesInfo& quantizedFeaturesInfo,
+        const TVector<NJson::TJsonValue>& classNames // can be empty
+    );
 }
 
 

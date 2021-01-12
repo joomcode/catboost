@@ -9,7 +9,6 @@ namespace NCatboostCuda {
     template struct TGpuFeaturesBlockDescription<NCudaLib::TStripeMapping, NCudaLib::TStripeMapping>;
     template struct TGpuFeaturesBlockDescription<NCudaLib::TStripeMapping, NCudaLib::TMirrorMapping>;
 
-    template struct TCudaFeaturesLayoutHelper<TSingleDevLayout>;
     template struct TCudaFeaturesLayoutHelper<TFeatureParallelLayout>;
     template struct TCudaFeaturesLayoutHelper<TDocParallelLayout>;
 
@@ -49,7 +48,7 @@ namespace NCatboostCuda {
 
     ui32 TBinarizationInfoProvider::GetFoldsCount(ui32 featureId) const {
         const ui32 binCount = Manager->GetBinCount(featureId);
-        if (DataProvider && binCount && IsOneHot(featureId)) {
+        if (DataProvider && binCount && Manager->IsCat(featureId)) {
             ui32 dataProviderId = Manager->GetDataProviderId(featureId);
             auto catFeatureIdx = DataProvider->MetaInfo.FeaturesLayout->GetInternalFeatureIdx<EFeatureType::Categorical>(dataProviderId);
             ui32 count = DataProvider->ObjectsData->GetQuantizedFeaturesInfo()->GetUniqueValuesCounts(catFeatureIdx).OnAll;

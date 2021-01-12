@@ -80,7 +80,9 @@ class InvalidExecutionStateError(Exception):
 
 
 class SignalInterruptionError(Exception):
-    pass
+    def __init__(self, message=None):
+        super(SignalInterruptionError, self).__init__(message)
+        self.res = None
 
 
 class _Execution(object):
@@ -140,13 +142,27 @@ class _Execution(object):
         return self._command
 
     @property
+    def returncode(self):
+        return self.exit_code
+
+    @property
     def exit_code(self):
+        """
+        Deprecated, use returncode
+        """
         if self._exit_code is None:
             self._exit_code = self._process.returncode
         return self._exit_code
 
     @property
+    def stdout(self):
+        return self.std_out
+
+    @property
     def std_out(self):
+        """
+        Deprecated, use stdout
+        """
         if self._std_out is not None:
             return self._std_out
         if self._process.stdout and not self._user_stdout:
@@ -154,7 +170,14 @@ class _Execution(object):
             return self._std_out
 
     @property
+    def stderr(self):
+        return self.std_err
+
+    @property
     def std_err(self):
+        """
+        Deprecated, use stderr
+        """
         if self._std_err is not None:
             return self._std_err
         if self._process.stderr and not self._user_stderr:
@@ -203,8 +226,19 @@ class _Execution(object):
         if self._metrics:
             for key, value in six.iteritems(self._metrics):
                 yatest_logger.debug("Command (pid %s) %s: %s", self._process.pid, key, value)
-        yatest_logger.debug("Command (pid %s) output:\n%s", self._process.pid, truncate(self._std_out, MAX_OUT_LEN))
-        yatest_logger.debug("Command (pid %s) errors:\n%s", self._process.pid, truncate(self._std_err, MAX_OUT_LEN))
+
+        # Since this code is Python2/3 compatible, we don't know is _std_out/_std_err is real bytes or bytes-str.
+        printable_std_out, err = _try_convert_bytes_to_string(self._std_out)
+        if err:
+            yatest_logger.debug("Got error during parse process stdout: %s", err)
+            yatest_logger.debug("stdout will be displayed as raw bytes.")
+        printable_std_err, err = _try_convert_bytes_to_string(self._std_err)
+        if err:
+            yatest_logger.debug("Got error during parse process stderr: %s", err)
+            yatest_logger.debug("stderr will be displayed as raw bytes.")
+
+        yatest_logger.debug("Command (pid %s) output:\n%s", self._process.pid, truncate(printable_std_out, MAX_OUT_LEN))
+        yatest_logger.debug("Command (pid %s) errors:\n%s", self._process.pid, truncate(printable_std_err, MAX_OUT_LEN))
 
     def _clean_files(self):
         if self._err_file and not self._user_stderr and self._err_file != subprocess.PIPE:
@@ -398,7 +432,15 @@ def execute(
     if env is None:
         env = os.environ.copy()
     else:
-        mandatory_system_vars = ["TMPDIR"]
+        # Certain environment variables must be present for programs to work properly.
+        # For more info see DEVTOOLSSUPPORT-4907
+        mandatory_env_name = 'YA_MANDATORY_ENV_VARS'
+        if mandatory_env_name in os.environ:
+            env[mandatory_env_name] = os.environ[mandatory_env_name]
+            mandatory_system_vars = filter(None, os.environ.get('YA_MANDATORY_ENV_VARS', '').split(':'))
+        else:
+            mandatory_system_vars = ['TMPDIR']
+
         for var in mandatory_system_vars:
             if var not in env and var in os.environ:
                 env[var] = os.environ[var]
@@ -460,19 +502,24 @@ def execute(
 
 
 def _get_command_output_file(cmd, ext):
-    command_name = get_command_name(cmd)
-    file_name = command_name + "." + ext
+    parts = [get_command_name(cmd)]
+    if 'YA_RETRY_INDEX' in os.environ:
+        parts.append('retry{}'.format(os.environ.get('YA_RETRY_INDEX')))
+    if int(os.environ.get('YA_SPLIT_COUNT', '0')) > 1:
+        parts.append('chunk{}'.format(os.environ.get('YA_SPLIT_INDEX', '0')))
+
+    filename = '.'.join(parts + [ext])
     try:
         # if execution is performed from test, save out / err to the test logs dir
         import yatest.common
         import pytest
         if not hasattr(pytest, 'config'):
             raise ImportError("not in test")
-        file_name = path.get_unique_file_path(yatest.common.output_path(), file_name)
-        yatest_logger.debug("Command %s will be placed to %s", ext, os.path.basename(file_name))
-        return open(file_name, "wb+")
+        filename = path.get_unique_file_path(yatest.common.output_path(), filename)
+        yatest_logger.debug("Command %s will be placed to %s", ext, os.path.basename(filename))
+        return open(filename, "wb+")
     except ImportError:
-        return tempfile.NamedTemporaryFile(delete=False, suffix=file_name)
+        return tempfile.NamedTemporaryFile(delete=False, suffix=filename)
 
 
 def _get_proc_tree_info(pids):
@@ -633,10 +680,22 @@ def backtrace_to_html(bt_filename, output):
             core_proc.filter_stackdump(bt_filename, stream=afile)
     except ImportError as e:
         yatest_logger.debug("Failed to import coredump_filter: %s", e)
-
         with open(output, "wb") as afile:
-            res = execute([runtime.python_path(), runtime.source_path("library/python/coredump_filter/core_proc.py"), bt_filename], check_exit_code=False, check_sanitizer=False, stdout=afile)
-        if res.exit_code != 0:
-            with open(output, "ab") as afile:
-                afile.write("\n")
-                afile.write(res.std_err)
+            afile.write("<html>Failed to import coredump_filter in USE_ARCADIA_PYTHON=no mode</html>")
+
+
+def _try_convert_bytes_to_string(source):
+    """ Function is necessary while this code Python2/3 compatible, because bytes in Python3 is a real bytes and in Python2 is not """
+    # Bit ugly typecheck, because in Python2 isinstance(str(), bytes) and "type(str()) is bytes" working as True as well
+    if 'bytes' not in str(type(source)):
+        # We already got not bytes. Nothing to do here.
+        return source, False
+
+    result = source
+    error = False
+    try:
+        result = source.decode(encoding='utf-8')
+    except ValueError as e:
+        error = e
+
+    return result, error

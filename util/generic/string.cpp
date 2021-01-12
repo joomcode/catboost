@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cctype>
 
+#ifndef TSTRING_IS_STD_STRING
 namespace NDetail {
     struct TStaticData {
         TStringData Data;
@@ -57,23 +58,24 @@ namespace NDetail {
         y_deallocate(data);
     }
 }
+#endif
 
 std::ostream& operator<<(std::ostream& os, const TString& s) {
     return os.write(s.data(), s.size());
 }
 
 template<>
-bool TBasicString<char, TCharTraits<char>>::to_lower(size_t pos, size_t n) {
+bool TBasicString<char, std::char_traits<char>>::to_lower(size_t pos, size_t n) {
     return Transform([](size_t, char c) { return AsciiToLower(c); }, pos, n);
 }
 
 template<>
-bool TBasicString<char, TCharTraits<char>>::to_upper(size_t pos, size_t n) {
+bool TBasicString<char, std::char_traits<char>>::to_upper(size_t pos, size_t n) {
     return Transform([](size_t, char c) { return AsciiToUpper(c); }, pos, n);
 }
 
 template<>
-bool TBasicString<char, TCharTraits<char>>::to_title(size_t pos, size_t n) {
+bool TBasicString<char, std::char_traits<char>>::to_title(size_t pos, size_t n) {
     if (n == 0) {
         return false;
     }
@@ -83,12 +85,12 @@ bool TBasicString<char, TCharTraits<char>>::to_title(size_t pos, size_t n) {
 
 template<>
 TUtf16String&
-TBasicString<wchar16, TCharTraits<wchar16>>::AppendAscii(const ::TFixedString<char>& s) {
-    ReserveAndResize(size() + s.Length);
+TBasicString<wchar16, std::char_traits<wchar16>>::AppendAscii(const ::TStringBuf& s) {
+    ReserveAndResize(size() + s.size());
 
-    auto dst = begin() + size() - s.Length;
+    auto dst = begin() + size() - s.size();
 
-    for (const char* src = s.Start; dst != end(); ++dst, ++src) {
+    for (const char* src = s.data(); dst != end(); ++dst, ++src) {
         *dst = static_cast<wchar16>(*src);
     }
 
@@ -97,41 +99,41 @@ TBasicString<wchar16, TCharTraits<wchar16>>::AppendAscii(const ::TFixedString<ch
 
 template<>
 TUtf16String&
-TBasicString<wchar16, TCharTraits<wchar16>>::AppendUtf8(const ::TFixedString<char>& s) {
+TBasicString<wchar16, std::char_traits<wchar16>>::AppendUtf8(const ::TStringBuf& s) {
     size_t oldSize = size();
-    ReserveAndResize(size() + s.Length * 4);
+    ReserveAndResize(size() + s.size() * 4);
     size_t written = 0;
-    size_t pos = UTF8ToWideImpl(s.Start, s.Length, begin() + oldSize, written);
-    if (pos != s.Length)
-        ythrow yexception() << "failed to decode UTF-8 string at pos " << pos << ::NDetail::InStringMsg(s.Start, s.Length);
-    remove(oldSize + written);
+    size_t pos = UTF8ToWideImpl(s.data(), s.size(), begin() + oldSize, written);
+    if (pos != s.size())
+        ythrow yexception() << "failed to decode UTF-8 string at pos " << pos << ::NDetail::InStringMsg(s.data(), s.size());
+    resize(oldSize + written);
 
     return *this;
 }
 
 template<>
-bool TBasicString<wchar16, TCharTraits<wchar16>>::to_lower(size_t pos, size_t n) {
+bool TBasicString<wchar16, std::char_traits<wchar16>>::to_lower(size_t pos, size_t n) {
     return ToLower(*this, pos, n);
 }
 
 template<>
-bool TBasicString<wchar16, TCharTraits<wchar16>>::to_upper(size_t pos, size_t n) {
+bool TBasicString<wchar16, std::char_traits<wchar16>>::to_upper(size_t pos, size_t n) {
     return ToUpper(*this, pos, n);
 }
 
 template<>
-bool TBasicString<wchar16, TCharTraits<wchar16>>::to_title(size_t pos, size_t n) {
+bool TBasicString<wchar16, std::char_traits<wchar16>>::to_title(size_t pos, size_t n) {
     return ToTitle(*this, pos, n);
 }
 
 template<>
 TUtf32String&
-TBasicString<wchar32, TCharTraits<wchar32>>::AppendAscii(const ::TFixedString<char>& s) {
-    ReserveAndResize(size() + s.Length);
+TBasicString<wchar32, std::char_traits<wchar32>>::AppendAscii(const ::TStringBuf& s) {
+    ReserveAndResize(size() + s.size());
 
-    auto dst = begin() + size() - s.Length;
+    auto dst = begin() + size() - s.size();
 
-    for (const char* src = s.Start; dst != end(); ++dst, ++src) {
+    for (const char* src = s.data(); dst != end(); ++dst, ++src) {
         *dst = static_cast<wchar32>(*src);
     }
 
@@ -139,47 +141,61 @@ TBasicString<wchar32, TCharTraits<wchar32>>::AppendAscii(const ::TFixedString<ch
 }
 
 template<>
-TUtf32String&
-TBasicString<wchar32, TCharTraits<wchar32>>::AppendUtf8(const ::TFixedString<char>& s) {
-    size_t oldSize = size();
-    ReserveAndResize(size() + s.Length * 4);
+TBasicString<char, std::char_traits<char>>&
+TBasicString<char, std::char_traits<char>>::AppendUtf16(const ::TWtringBuf& s) {
+    const size_t oldSize = size();
+    ReserveAndResize(size() + WideToUTF8BufferSize(s.size()));
+
     size_t written = 0;
-    size_t pos = UTF8ToWideImpl(s.Start, s.Length, begin() + oldSize, written);
-    if (pos != s.Length)
-        ythrow yexception() << "failed to decode UTF-8 string at pos " << pos << ::NDetail::InStringMsg(s.Start, s.Length);
-    remove(oldSize + written);
+    WideToUTF8(s.data(), s.size(), begin() + oldSize, written);
+
+    resize(oldSize + written);
 
     return *this;
 }
 
 template<>
 TUtf32String&
-TBasicString<wchar32, TCharTraits<wchar32>>::AppendUtf16(const ::TFixedString<wchar16>& s) {
+TBasicString<wchar32, std::char_traits<wchar32>>::AppendUtf8(const ::TStringBuf& s) {
     size_t oldSize = size();
-    ReserveAndResize(size() + s.Length * 2);
+    ReserveAndResize(size() + s.size() * 4);
+    size_t written = 0;
+    size_t pos = UTF8ToWideImpl(s.data(), s.size(), begin() + oldSize, written);
+    if (pos != s.size())
+        ythrow yexception() << "failed to decode UTF-8 string at pos " << pos << ::NDetail::InStringMsg(s.data(), s.size());
+    resize(oldSize + written);
+
+    return *this;
+}
+
+template<>
+TUtf32String&
+TBasicString<wchar32, std::char_traits<wchar32>>::AppendUtf16(const ::TWtringBuf& s) {
+    size_t oldSize = size();
+    ReserveAndResize(size() + s.size() * 2);
 
     wchar32* oldEnd = begin() + oldSize;
     wchar32* end = oldEnd;
-    NDetail::UTF16ToUTF32ImplScalar(s.Start, s.Start + s.Length, end);
+    NDetail::UTF16ToUTF32ImplScalar(s.data(), s.data() + s.size(), end);
     size_t written = end - oldEnd;
 
-    remove(oldSize + written);
+    resize(oldSize + written);
 
     return *this;
 }
 
 
 template<>
-bool TBasicString<wchar32, TCharTraits<wchar32>>::to_lower(size_t pos, size_t n) {
+bool TBasicString<wchar32, std::char_traits<wchar32>>::to_lower(size_t pos, size_t n) {
     return ToLower(*this, pos, n);
 }
 
 template<>
-bool TBasicString<wchar32, TCharTraits<wchar32>>::to_upper(size_t pos, size_t n) {
+bool TBasicString<wchar32, std::char_traits<wchar32>>::to_upper(size_t pos, size_t n) {
     return ToUpper(*this, pos, n);
 }
 
 template<>
-bool TBasicString<wchar32, TCharTraits<wchar32>>::to_title(size_t pos, size_t n) {
+bool TBasicString<wchar32, std::char_traits<wchar32>>::to_title(size_t pos, size_t n) {
     return ToTitle(*this, pos, n);
 }

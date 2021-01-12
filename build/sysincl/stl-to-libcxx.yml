@@ -42,19 +42,8 @@
     - contrib/libs/cxxsupp/libcxxrt/unwind.h
     - contrib/libs/libunwind/include/unwind.h
 
-- source_filter: "^contrib/libs/cxxsupp/libcxx/include"
-  includes:
-  - __config:   contrib/libs/cxxsupp/libcxx/include/__config
-
-- source_filter: "^contrib/deprecated/boost/boost/asio/detail"
-  includes:
-  - __config:   contrib/libs/cxxsupp/libcxx/include/__config
-
-- source_filter: "quasar/yandex_io/daemons/external_libs/(boost/include/boost|websocketpp/include)/asio/detail"
-  includes:
-  - __config:   contrib/libs/cxxsupp/libcxx/include/__config
-
 - includes:
+  - __config:                  contrib/libs/cxxsupp/libcxx/include/__config
   - algorithm:                 contrib/libs/cxxsupp/libcxx/include/algorithm
   - any:                       contrib/libs/cxxsupp/libcxx/include/any
   - array:                     contrib/libs/cxxsupp/libcxx/include/array
@@ -122,6 +111,7 @@
   - regex:                     contrib/libs/cxxsupp/libcxx/include/regex
   - scoped_allocator:          contrib/libs/cxxsupp/libcxx/include/scoped_allocator
   - set:                       contrib/libs/cxxsupp/libcxx/include/set
+  - shared_mutex:              contrib/libs/cxxsupp/libcxx/include/shared_mutex
   - sstream:                   contrib/libs/cxxsupp/libcxx/include/sstream
   - stack:                     contrib/libs/cxxsupp/libcxx/include/stack
   - stdexcept:                 contrib/libs/cxxsupp/libcxx/include/stdexcept

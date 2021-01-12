@@ -1,7 +1,6 @@
 #include "base.h"
 
 #include <util/string/cast.h>
-#include <util/string/util.h>
 #include <util/stream/output.h>
 #include <util/stream/mem.h>
 #include <util/system/compat.h>
@@ -146,7 +145,7 @@ void Out<TInstant>(IOutputStream& os, TTypeTraits<TInstant>::TFuncParam instant)
     auto len = FormatDate8601(buf, sizeof(buf), instant.TimeT());
 
     // shouldn't happen due to current implementation of FormatDate8601() and GmTimeR()
-    Y_ENSURE(len, AsStringBuf("Out<TInstant>: year does not fit into an integer"));
+    Y_ENSURE(len, TStringBuf("Out<TInstant>: year does not fit into an integer"));
 
     os.Write(buf, len - 1 /* 'Z' */);
     WriteMicroSecondsToStream(os, instant.MicroSecondsOfSecond());
@@ -285,8 +284,9 @@ TString DateToString(time_t when, long* sec) {
 
 TString YearToString(const struct tm& theTm) {
     Y_ENSURE(0 <= theTm.tm_year + 1900 && theTm.tm_year + 1900 <= 9999, "invalid year " + ToString(theTm.tm_year + 1900) + ", year should be in range [0, 9999]");
-
-    return Strftime("%04Y", &theTm);
+    char buf[16];
+    sprintf(buf, "%04d", theTm.tm_year + 1900);
+    return buf;
 }
 
 TString YearToString(time_t when) {

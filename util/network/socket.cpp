@@ -44,6 +44,7 @@
 #include <util/generic/hash_set.h>
 
 #include <stddef.h>
+#include <sys/uio.h>
 
 using namespace NAddr;
 
@@ -518,39 +519,6 @@ bool IsNotSocketClosedByOtherSide(SOCKET s) {
 }
 
 #if defined(_win_)
-ssize_t readv(SOCKET sock, const struct iovec* iov, int iovcnt) {
-    WSABUF* wsabuf = (WSABUF*)alloca(iovcnt * sizeof(WSABUF));
-    for (int i = 0; i < iovcnt; ++i) {
-        wsabuf[i].buf = iov[i].iov_base;
-        wsabuf[i].len = (u_long)iov[i].iov_len;
-    }
-    DWORD numberOfBytesRecv;
-    DWORD flags = 0;
-    int res = WSARecv(sock, wsabuf, iovcnt, &numberOfBytesRecv, &flags, nullptr, nullptr);
-    if (res == SOCKET_ERROR) {
-        errno = EIO;
-        return -1;
-    }
-    return numberOfBytesRecv;
-}
-#endif
-
-#if defined(_win_)
-ssize_t writev(SOCKET sock, const struct iovec* iov, int iovcnt) {
-    WSABUF* wsabuf = (WSABUF*)alloca(iovcnt * sizeof(WSABUF));
-    for (int i = 0; i < iovcnt; ++i) {
-        wsabuf[i].buf = iov[i].iov_base;
-        wsabuf[i].len = (u_long)iov[i].iov_len;
-    }
-    DWORD numberOfBytesSent;
-    int res = WSASend(sock, wsabuf, iovcnt, &numberOfBytesSent, 0, nullptr, nullptr);
-    if (res == SOCKET_ERROR) {
-        errno = EIO;
-        return -1;
-    }
-    return numberOfBytesSent;
-}
-
 static ssize_t DoSendMsg(SOCKET sock, const struct iovec* iov, int iovcnt) {
     return writev(sock, iov, iovcnt);
 }
@@ -1041,7 +1009,7 @@ public:
     inline TImpl(const char* path, int flags)
         : Info_(nullptr, TAddrInfoDeleter{/* useFreeAddrInfo = */ false})
     {
-        THolder<struct sockaddr_un> sockAddr = new struct sockaddr_un;
+        THolder<struct sockaddr_un> sockAddr = MakeHolder<struct sockaddr_un>();
 
         Y_ENSURE(strlen(path) < sizeof(sockAddr->sun_path), "Unix socket path more than " << sizeof(sockAddr->sun_path));
         sockAddr->sun_family = AF_UNIX;
@@ -1102,7 +1070,15 @@ TNetworkResolutionError::TNetworkResolutionError(int error) {
 #else
     errMsg = gai_strerror(error);
 #endif
-    (*this) << errMsg;
+    (*this) << errMsg << "(" << error;
+
+#if defined(_unix_)
+    if (error == EAI_SYSTEM) {
+        (*this) << "; errno=" << LastSystemError();
+    }
+#endif
+
+    (*this) << "): ";
 }
 
 #if defined(_unix_)

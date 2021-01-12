@@ -14,10 +14,6 @@
 # Btw: seems that this ADDINCL should be made global and removed from projects
 # that use this header
 - includes:
-    - iconv.h:       contrib/libs/libiconv/iconv.h
-
-- source_filter: "^contrib/restricted/glib/glib/gconvert.c"
-  includes:
     - iconv.h:       contrib/libs/libiconv/include/iconv.h
 
 - includes:
@@ -51,7 +47,6 @@
 - source_filter: "^contrib/libs/libunistring"
   includes:
     - alloca.h:      contrib/libs/libunistring/alloca.h
-    - iconv.h:       contrib/libs/libiconv/include/iconv.h
     - langinfo.h:    contrib/libs/libunistring/langinfo.h
     - limits.h:      contrib/libs/libunistring/limits.h
     - math.h:        contrib/libs/libunistring/math.h
@@ -124,18 +119,22 @@
   includes:
     - error.h:       contrib/libs/cppkafka/include/cppkafka/error.h
 
-- source_filter: "^contrib/libs/libevent"
+- source_filter: "^contrib/libs/clang10-rt"
   includes:
-    - sys/queue.h:   contrib/libs/libevent/compat/sys/queue.h
+    - xray/xray_interface.h: contrib/libs/clang10-rt/include/xray/xray_interface.h
+
+- source_filter: "^contrib/libs/clang11-rt"
+  includes:
+    - xray/xray_interface.h: contrib/libs/clang11-rt/include/xray/xray_interface.h
+
+- source_filter: "^contrib/libs/llvm"
+  includes:
+    - plugin-api.h # GNU linker plugin API.
 
 - source_filter: "^contrib/libs/musl"
   includes:
     - atomic.h:      contrib/libs/musl/src/internal/atomic.h
     - bits/fenv.h:   contrib/libs/musl/arch/x86_64/bits/fenv.h
-
-- source_filter: "^contrib/libs/unixodbc"
-  includes:
-    - argz.h:        contrib/libs/unixodbc/libltdl/argz.h
 
 - source_filter: "^contrib/libs/zbar"
   includes:
@@ -146,10 +145,6 @@
     - http.h:        contrib/libs/curl/lib/http.h
     - inet_ntop.h:   contrib/libs/curl/lib/inet_ntop.h
     - share.h:       contrib/libs/curl/lib/share.h
-
-- source_filter: "^contrib/libs/gdal"
-  includes:
-    - iconv.h:       contrib/libs/libiconv/include/iconv.h
 
 - source_filter: "^contrib/libs/zeromq"
   includes:
@@ -162,10 +157,6 @@
     - fribidi.h
     - stdatomic.h:   contrib/libs/ffmpeg-3.4.1/compat/atomics/win32/stdatomic.h
     - nppi.h:        contrib/libs/ffmpeg-3/libavfilter/vf_scale_npp.c
-
-- source_filter: "^contrib/libs/v8-profiler"
-  includes:
-    - nan.h:         contrib/libs/node_nan/nan.h
 
 - source_filter: "^contrib/libs/glog"
   includes:
@@ -222,9 +213,9 @@
   includes:
     - util.h:        contrib/libs/libgit2/src/util.h
 
-- source_filter: "^contrib/libs/nodejs_8"
+- source_filter: "^contrib/libs/nodejs_12"
   includes:
-    - util.h:        contrib/libs/nodejs_8/src/util.h
+    - util.h:        contrib/libs/nodejs_12/src/util.h
 
 - source_filter: "^contrib/libs/numa"
   includes:
@@ -243,19 +234,15 @@
     - cuda.h:        contrib/libs/tf/tensorflow/core/platform/cuda.h
 
 # unused legacy include in boost
-- source_filter: "^contrib/deprecated/boost"
+- source_filter: "^contrib/restricted/boost"
   includes:
     - atomic.h
     - fstream.h
     - ../include/fenv.h
 
-# libc++ internal implementation details
-- source_filter: "^contrib/deprecated/boost/boost/asio/detail"
+- source_filter: "^contrib/restricted/boost/boost/stacktrace/detail"
   includes:
-  - __config
-- source_filter: "quasar/yandex_io/daemons/external_libs/(boost/include/boost|websocketpp/include)/asio/detail"
-  includes:
-  - __config
+    - backtrace.h: contrib/libs/backtrace/backtrace.h
 
 # windows sdk includes that we do not want to apply for whole arcadia
 - source_filter: "^contrib"
@@ -276,10 +263,6 @@
 - source_filter: "^contrib/libs/apr"
   includes:
     - atomic.h
-
-- source_filter: "^contrib/libs/apr-util"
-  includes:
-    - iconv.h: contrib/libs/libiconv/include/iconv.h
 
 - source_filter: "^contrib/libs/(apr|httpd|llvm)"
   includes:
@@ -391,15 +374,15 @@
   includes:
     - lzma.h
 
-- source_filter: "^(contrib/libs/(kyotocabinet|minilzo)|logbroker/contrib/tokyocabinet)"
+- source_filter: "^contrib/libs/(kyotocabinet|minilzo)"
   includes:
     - lzo/lzo1x.h
 
-- source_filter: "^(contrib/libs/(gtest|libpng|opencv)|maps/contrib/freeimage)"
+- source_filter: "^contrib/libs/(gtest|libpng|opencv)"
   includes:
     - mem.h
 
-- source_filter: "^contrib/libs/(authparser|libcoro-perl|libev-perl|libevent-perl|perl-JavaScript-V8|uatraits)"
+- source_filter: "^contrib/libs/(authparser|libcoro-perl|libev-perl|libevent-perl|uatraits)"
   includes:
     - patchlevel.h
 
@@ -411,7 +394,7 @@
   includes:
     - png.h
 
-- source_filter: "^(contrib/deprecated/boost/boost/mpi|catboost/cuda/cuda_lib/mpi|cv/imgclassifiers/danet/distributed/network)"
+- source_filter: "^(contrib/restricted/boost/boost/mpi|catboost/cuda/cuda_lib/mpi)"
   includes:
     - mpi.h
 
@@ -510,7 +493,7 @@
 
 - source_filter: "^contrib/tools/fluent-bit"
   includes:
-    - backtrace.h: contrib/tools/fluent-bit/lib/libbacktrace-5a99ff7f/backtrace.h
+    - backtrace.h: contrib/libs/backtrace/backtrace.h
 
 - source_filter: "^contrib/restricted/glib"
   includes:
@@ -535,3 +518,25 @@
 - source_filter: "^contrib/libs/dpdk"
   includes:
     - process.h: contrib/libs/dpdk/drivers/bus/dpaa/include/process.h
+
+- source_filter: "^contrib/libs/usrsctp/"
+  includes:
+    - netinet/sctp_uio.h: contrib/libs/usrsctp/usrsctplib/netinet/sctp_uio.h
+
+- source_filter: "^contrib/libs/libsrtp/"
+  includes:
+  - alloc.h: contrib/libs/libsrtp/crypto/include/alloc.h
+  - err.h: contrib/libs/libsrtp/crypto/include/err.h
+  - stat.h: contrib/libs/libsrtp/crypto/include/stat.h
+
+- source_filter: "^contrib/restricted/openal-soft"
+  includes:
+    - threads.h: contrib/restricted/openal-soft/common/threads.h
+
+- source_filter: "^contrib/python/pymqi"
+  includes:
+    # IBM MQ
+    - cmqc.h
+    - cmqxc.h
+    - cmqcfc.h
+    - cmqbc.h

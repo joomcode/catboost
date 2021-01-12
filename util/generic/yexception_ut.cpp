@@ -8,7 +8,7 @@ static inline void Throw2DontMove() {
     ythrow yexception() << 1 << " qw " << 12.1; // don't move this line
 }
 
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 #include <util/generic/algorithm.h>
 #include <util/memory/tempbuf.h>
@@ -29,15 +29,9 @@ static void CallbackFun(int i) {
 
 static IOutputStream* OUTS = nullptr;
 
-namespace NOuter {
-    namespace NInner {
-        constexpr TStringBuf AsStringBuf(...) {
-            return ::AsStringBuf("Shouldn't be called from Y_ENSURE");
-        }
-
-        void Compare10And20() {
-            Y_ENSURE(10 > 20);
-        }
+namespace NOuter::NInner {
+    void Compare10And20() {
+        Y_ENSURE(10 > 20);
     }
 }
 
@@ -71,7 +65,7 @@ private:
                 throw;
             }
         } catch (...) {
-            UNIT_ASSERT(CurrentExceptionMessage().Contains("ithappens"))
+            UNIT_ASSERT(CurrentExceptionMessage().Contains("ithappens"));
         }
     }
 

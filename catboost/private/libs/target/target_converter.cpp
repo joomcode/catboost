@@ -5,7 +5,7 @@
 #include <catboost/libs/data/loader.h> // for IsMissingValue
 #include <catboost/libs/helpers/exception.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/algorithm.h>
 #include <util/generic/array_ref.h>
@@ -40,7 +40,7 @@ namespace NCB {
 
     static TVector<float> ConvertRawToFloatTarget(
         const TRawTarget& rawTarget,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     ) {
         TVector<float> result;
 
@@ -50,7 +50,7 @@ namespace NCB {
             size_t i = 0;
             (*floatSequence)->ForEach(
                 [resultRef, &i] (float value) {
-                    CB_ENSURE(!IsNan(value), "NaN values are not supported for target");
+                    CB_ENSURE(!std::isnan(value), "NaN values are not supported for target");
                     resultRef[i++] = value;
                 }
             );
@@ -79,7 +79,7 @@ namespace NCB {
         TVector<float> Process(
             ERawTargetType targetType,
             const TRawTarget& rawTarget,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) override {
             Y_UNUSED(targetType);
             return ConvertRawToFloatTarget(rawTarget, localExecutor);
@@ -103,7 +103,7 @@ namespace NCB {
         TVector<float> Process(
             ERawTargetType targetType,
             const TRawTarget& rawTarget,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) override {
             Y_UNUSED(targetType);
             TVector<float> floatTarget = ConvertRawToFloatTarget(rawTarget, localExecutor);
@@ -129,7 +129,7 @@ namespace NCB {
         TVector<float> Process(
             ERawTargetType targetType,
             const TRawTarget& rawTarget,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) override {
             Y_UNUSED(targetType);
 
@@ -210,7 +210,7 @@ namespace NCB {
         TVector<float> Process(
             ERawTargetType targetType,
             const TRawTarget& rawTarget,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) override {
             Y_UNUSED(targetType);
 
@@ -306,7 +306,7 @@ namespace NCB {
         TVector<float> Process(
             ERawTargetType targetType,
             const TRawTarget& rawTarget,
-            NPar::TLocalExecutor* localExecutor
+            NPar::ILocalExecutor* localExecutor
         ) override {
             CB_ENSURE_INTERNAL(targetType != ERawTargetType::None, "targetType=None is unexpected");
 
@@ -381,7 +381,7 @@ namespace NCB {
         }
 
         TVector<float> ProcessMakeClassLabelsImpl(const ITypedSequencePtr<float>& labels,
-                                                  NPar::TLocalExecutor* localExecutor) {
+                                                  NPar::ILocalExecutor* localExecutor) {
             CB_ENSURE_INTERNAL(
                 (TargetType == ERawTargetType::Float) || (TargetType == ERawTargetType::Integer),
                 "TargetType is " << TargetType << ", but labels is ITypedSequencePtr<float>"
@@ -391,7 +391,7 @@ namespace NCB {
 
             THashSet<float> uniqueLabelsSet;
             for (float value : targets) {
-                CB_ENSURE(!IsNan(value), "NaN values are not supported for target");
+                CB_ENSURE(!std::isnan(value), "NaN values are not supported for target");
                 uniqueLabelsSet.insert(value);
             }
 
@@ -430,7 +430,7 @@ namespace NCB {
         }
 
         TVector<float> ProcessMakeClassLabelsImpl(TConstArrayRef<TString> labels,
-                                                  NPar::TLocalExecutor* localExecutor) {
+                                                  NPar::ILocalExecutor* localExecutor) {
             CB_ENSURE_INTERNAL(
                 TargetType == ERawTargetType::String,
                 "TargetType is " << TargetType << ", but labels is TVector<TString>"

@@ -1,23 +1,23 @@
 
 
 RECURSE(
-    android_ifaddrs
     base64
     brotli
     clapack
     coreml
-    cppdemangle/all
+    cppdemangle
     crcutil
     cxxsupp/libcxx
     cxxsupp/libcxx-filesystem
     expat
     fastlz
     flatbuffers
-    flatbuffers/samples
     fmath
     gamma_function_apache_math_port
+    jdk
     jemalloc
     libbz2
+    libc_compat
     libunwind
     linux-headers
     linuxvdso
@@ -30,16 +30,16 @@ RECURSE(
     openssl/apps
     openssl/dynamic
     protobuf
-    protobuf/java
     protobuf/python
     protobuf/python/test
-    protobuf/ut
     pugixml
     python
     python/ut
+    r-lang
     re2
     snappy
     sqlite3
+    tbb
     tensorboard
     xxhash
     zlib
@@ -63,12 +63,6 @@ IF (OS_LINUX)
     RECURSE(
     ibdrv
 )
-
-    IF (NOT OS_SDK STREQUAL "ubuntu-12")
-        RECURSE(
-    
-)
-    ENDIF()
 ENDIF()
 
 IF (OS_WINDOWS)
@@ -82,12 +76,6 @@ ELSE()
 ENDIF()
 
 IF (OS_LINUX OR OS_WINDOWS)
-    RECURSE(
-    
-)
-ENDIF()
-
-IF (OS_IOS)
     RECURSE(
     
 )

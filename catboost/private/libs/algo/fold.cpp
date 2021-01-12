@@ -1,14 +1,16 @@
 #include "fold.h"
 
 #include "approx_updater_helpers.h"
+#include "estimated_features.h"
 #include "helpers.h"
 
 #include <catboost/private/libs/data_types/groupid.h>
+#include <catboost/libs/helpers/exception.h>
 #include <catboost/libs/helpers/permutation.h>
 #include <catboost/libs/helpers/query_info_helper.h>
 #include <catboost/libs/helpers/restorable_rng.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/cast.h>
 
@@ -38,7 +40,7 @@ static double SelectTailSize(ui32 oldSize, double multiplier) {
 }
 
 static void InitPermutationData(
-    const NCB::TTrainingForCPUDataProvider& learnData,
+    const NCB::TTrainingDataProvider& learnData,
     bool shuffle,
     ui32 permuteBlockSize,
     TRestorableFastRng64* rand,
@@ -94,7 +96,7 @@ static void InitPermutationData(
 
 
 TFold TFold::BuildDynamicFold(
-    const NCB::TTrainingForCPUDataProvider& learnData,
+    const NCB::TTrainingDataProviders& data,
     const TVector<TTargetClassifier>& targetClassifiers,
     bool shuffle,
     ui32 permuteBlockSize,
@@ -102,10 +104,14 @@ TFold TFold::BuildDynamicFold(
     double multiplier,
     bool storeExpApproxes,
     bool hasPairwiseWeights,
-    TMaybe<double> startingApprox,
+    const TMaybe<TVector<double>>& startingApprox,
+    const NCatboostOptions::TBinarizationOptions& onlineEstimatedFeaturesQuantizationOptions,
+    TQuantizedFeaturesInfoPtr onlineEstimatedFeaturesQuantizedInfo,
     TRestorableFastRng64* rand,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
+    const NCB::TTrainingDataProvider& learnData = *data.Learn;
+
     const ui32 learnSampleCount = learnData.GetObjectCount();
 
     TFold ff;
@@ -165,13 +171,8 @@ TFold TFold::BuildDynamicFold(
             : Accumulate(ff.GetLearnWeights().begin(), ff.GetLearnWeights().begin() + bodyFinish, (double)0.0);
 
         TFold::TBodyTail bt(bodyQueryFinish, tailQueryFinish, bodyFinish, tailFinish, bodySumWeight);
-        bt.Approx.resize(
-            approxDimension,
-            TVector<double>(
-                bt.TailFinish,
-                startingApprox ? ExpApproxIf(storeExpApproxes, *startingApprox) : GetNeutralApprox(storeExpApproxes)
-            )
-        );
+        InitApproxes(bt.TailFinish, startingApprox, approxDimension, storeExpApproxes,  &(bt.Approx));
+
         if (baseline) {
             InitApproxFromBaseline(
                 bt.TailFinish,
@@ -194,6 +195,17 @@ TFold TFold::BuildDynamicFold(
         ff.BodyTailArr.emplace_back(std::move(bt));
         leftPartLen = (ui32)bt.TailFinish;
     }
+
+    ff.InitOnlineEstimatedFeatures(
+        onlineEstimatedFeaturesQuantizationOptions,
+        std::move(onlineEstimatedFeaturesQuantizedInfo),
+        data,
+        localExecutor,
+        rand
+    );
+
+    ff.InitOwnedOnlineCtrs(data);
+
     return ff;
 }
 
@@ -207,17 +219,22 @@ void TFold::SetWeights(TConstArrayRef<float> weights, ui32 learnSampleCount) {
 }
 
 TFold TFold::BuildPlainFold(
-    const NCB::TTrainingForCPUDataProvider& learnData,
+    const NCB::TTrainingDataProviders& data,
     const TVector<TTargetClassifier>& targetClassifiers,
     bool shuffle,
     ui32 permuteBlockSize,
     int approxDimension,
     bool storeExpApproxes,
     bool hasPairwiseWeights,
-    TMaybe<double> startingApprox,
+    const TMaybe<TVector<double>>& startingApprox,
+    const NCatboostOptions::TBinarizationOptions& onlineEstimatedFeaturesQuantizationOptions,
+    TQuantizedFeaturesInfoPtr onlineEstimatedFeaturesQuantizedInfo,
+    TIntrusivePtr<TPrecomputedOnlineCtr> precomputedSingleOnlineCtrs,
     TRestorableFastRng64* rand,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
+    const NCB::TTrainingDataProvider& learnData = *data.Learn;
+
     const ui32 learnSampleCount = learnData.GetObjectCount();
 
     TFold ff;
@@ -253,10 +270,7 @@ TFold TFold::BuildPlainFold(
         ff.GetSumWeight()
     );
 
-    bt.Approx.resize(approxDimension,
-        TVector<double>(
-            learnSampleCount,
-            startingApprox ? ExpApproxIf(storeExpApproxes, *startingApprox) : GetNeutralApprox(storeExpApproxes)));
+    InitApproxes(learnSampleCount, startingApprox, approxDimension, storeExpApproxes, &(bt.Approx));
     AllocateRank2(approxDimension, learnSampleCount, bt.WeightedDerivatives);
     AllocateRank2(approxDimension, learnSampleCount, bt.SampleWeightedDerivatives);
     if (hasPairwiseWeights) {
@@ -276,31 +290,39 @@ TFold TFold::BuildPlainFold(
         );
     }
     ff.BodyTailArr.emplace_back(std::move(bt));
+
+    ff.InitOnlineEstimatedFeatures(
+        onlineEstimatedFeaturesQuantizationOptions,
+        std::move(onlineEstimatedFeaturesQuantizedInfo),
+        data,
+        localExecutor,
+        rand
+    );
+
+    if (precomputedSingleOnlineCtrs) {
+        ff.OnlineSingleCtrs = std::move(precomputedSingleOnlineCtrs);
+    } else {
+        ff.InitOwnedOnlineCtrs(data);
+    }
+
     return ff;
 }
 
 
 void TFold::DropEmptyCTRs() {
     TVector<TProjection> emptyProjections;
-    for (auto& projCtr : OnlineSingleCtrs) {
-        if (projCtr.second.Feature.empty()) {
-            emptyProjections.emplace_back(projCtr.first);
-        }
+    if (OwnedOnlineSingleCtrs) {
+        OwnedOnlineSingleCtrs->DropEmptyData();
     }
-    for (auto& projCtr : OnlineCTR) {
-        if (projCtr.second.Feature.empty()) {
-            emptyProjections.emplace_back(projCtr.first);
-        }
-    }
-    for (const auto& proj : emptyProjections) {
-        GetCtrs(proj).erase(proj);
+    if (OwnedOnlineCtrs) {
+        OwnedOnlineCtrs->DropEmptyData();
     }
 }
 
 void TFold::AssignTarget(
     TMaybeData<TConstArrayRef<TConstArrayRef<float>>> target,
     const TVector<TTargetClassifier>& targetClassifiers,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     ui32 learnSampleCount = GetLearnSampleCount();
     if (target && target->size() > 0) {
@@ -327,7 +349,8 @@ void TFold::AssignTarget(
             0,
             learnSampleCount,
             [&] (ui32 z) {
-                LearnTargetClass[ctrIdx][z] = targetClassifiers[ctrIdx].GetTargetClass(LearnTarget[0][z]);
+                auto targetId = targetClassifiers[ctrIdx].GetTargetId();
+                LearnTargetClass[ctrIdx][z] = targetClassifiers[ctrIdx].GetTargetClass(LearnTarget[targetId][z]);
             }
         );
         TargetClassesCount[ctrIdx] = targetClassifiers[ctrIdx].GetClassesCount();
@@ -349,4 +372,43 @@ void TFold::LoadApproxes(IInputStream* s) {
     for (ui64 i = 0; i < bodyTailCount; ++i) {
         ::Load(s, BodyTailArr[i].Approx);
     }
+}
+
+void TFold::InitOnlineEstimatedFeatures(
+    const NCatboostOptions::TBinarizationOptions& quantizationOptions,
+    TQuantizedFeaturesInfoPtr quantizedFeaturesInfo,
+    const NCB::TTrainingDataProviders& data,
+    NPar::ILocalExecutor* localExecutor,
+    TRestorableFastRng64* rand
+) {
+    OnlineEstimatedFeatures = CreateEstimatedFeaturesData(
+        quantizationOptions,
+        /*maxSubsetSizeForBuildBordersAlgorithms*/ 100000,
+        std::move(quantizedFeaturesInfo),
+        data,
+        data.FeatureEstimators,
+        GetLearnPermutationArray(),
+        localExecutor,
+        rand
+    );
+}
+
+void TFold::InitOwnedOnlineCtrs(const NCB::TTrainingDataProviders& data) {
+    TVector<TIndexRange<size_t>> datasetsObjectRanges;
+    size_t offset = 0;
+    datasetsObjectRanges.push_back(TIndexRange<size_t>(0, data.Learn->GetObjectCount()));
+    offset += data.Learn->GetObjectCount();
+    for (const auto& test : data.Test) {
+        size_t size = test->GetObjectCount();
+        datasetsObjectRanges.push_back(TIndexRange<size_t>(offset, offset + size));
+        offset += size;
+    }
+
+    OwnedOnlineSingleCtrs = new TOwnedOnlineCtr();
+    OnlineSingleCtrs.Reset(OwnedOnlineSingleCtrs);
+    OwnedOnlineSingleCtrs->DatasetsObjectRanges = datasetsObjectRanges;
+
+    OwnedOnlineCtrs = new TOwnedOnlineCtr();
+    OnlineCtrs.Reset(OwnedOnlineCtrs);
+    OwnedOnlineCtrs->DatasetsObjectRanges = std::move(datasetsObjectRanges);
 }

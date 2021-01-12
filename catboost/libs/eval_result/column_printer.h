@@ -9,7 +9,7 @@
 #include <catboost/private/libs/labels/external_label_helper.h>
 #include <catboost/private/libs/options/enums.h>
 
-#include <library/threading/local_executor/local_executor.h>
+#include <library/cpp/threading/local_executor/local_executor.h>
 
 #include <util/generic/fwd.h>
 #include <util/generic/maybe.h>
@@ -181,23 +181,45 @@ namespace NCB {
     class TEvalPrinter: public IColumnPrinter {
     public:
         TEvalPrinter(
-            NPar::TLocalExecutor* executor,
-            const TVector<TVector<TVector<double>>>& rawValues,
             const EPredictionType predictionType,
-            const TString& lossFunctionName,
-            ui32 targetDimension,
-            const TExternalLabelsHelper& visibleLabelsHelper,
-            TMaybe<std::pair<size_t, size_t>> evalParameters = TMaybe<std::pair<size_t, size_t>>());
-        void OutputValue(IOutputStream* outStream, size_t docIndex) override;
-        void OutputHeader(IOutputStream* outStream) override;
+            const TString& header,
+            const TVector<double>& approx,
+            const TExternalLabelsHelper& visibleLabelsHelper)
+            : PredictionType(predictionType)
+            , Header(header)
+            , Approx(approx)
+            , VisibleLabelsHelper(visibleLabelsHelper)
+        {}
+
+        void OutputValue(IOutputStream* outStream, size_t docIndex) override {
+            if (PredictionType == EPredictionType::Class) {
+                 *outStream << VisibleLabelsHelper.GetVisibleClassNameFromClass(static_cast<int>(Approx[docIndex]));
+            } else {
+                *outStream << Approx[docIndex];
+            }
+        }
+
+        void OutputHeader(IOutputStream* outStream) override {
+            *outStream << Header;
+        }
 
     private:
         EPredictionType PredictionType;
-        TVector<TString> Header;
-        TVector<TVector<TVector<double>>> Approxes;
+        TString Header;
+        TVector<double> Approx;
         const TExternalLabelsHelper& VisibleLabelsHelper;
     };
 
+    void PushBackEvalPrinters(
+        const TVector<TVector<TVector<double>>>& rawValues,
+        const EPredictionType predictionType,
+        const TString& lossFunctionName,
+        bool isMultiTarget,
+        const TExternalLabelsHelper& visibleLabelsHelper,
+        TMaybe<std::pair<size_t, size_t>> evalParameters,
+        TVector<THolder<IColumnPrinter>>* result,
+        NPar::ILocalExecutor* executor
+    );
 
 
     class TColumnPrinter: public IColumnPrinter {
@@ -267,6 +289,7 @@ namespace NCB {
         bool isMultiTarget,
         EPredictionType predictionType,
         const TExternalLabelsHelper& visibleLabelsHelper,
+        const TString& lossFunctionName,
         ui32 startTreeIndex = 0,
         std::pair<size_t, size_t>* evalParameters = nullptr);
 } // namespace NCB

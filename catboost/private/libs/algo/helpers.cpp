@@ -6,7 +6,7 @@
 #include <catboost/private/libs/distributed/master.h>
 #include <catboost/libs/logging/logging.h>
 
-#include <library/malloc/api/malloc.h>
+#include <library/cpp/malloc/api/malloc.h>
 
 #include <functional>
 
@@ -82,6 +82,14 @@ TVector<TTextFeature> CreateTextFeatures(const NCB::TFeaturesLayout& featuresLay
     );
 }
 
+TVector<TEmbeddingFeature> CreateEmbeddingFeatures(const NCB::TFeaturesLayout& featuresLayout) {
+    return CreateFeatures<TEmbeddingFeature, EFeatureType::Embedding>(
+        featuresLayout,
+        [] (TEmbeddingFeature&) {
+            //Dimension!!!
+        }
+    );
+}
 
 void ConfigureMalloc() {
 #if !(defined(__APPLE__) && defined(__MACH__)) // there is no LF for MacOS
@@ -96,7 +104,7 @@ double CalcMetric(
     const IMetric& metric,
     const TTargetDataProviderPtr& targetData,
     const TVector<TVector<double>>& approx,
-    NPar::TLocalExecutor* localExecutor
+    NPar::ILocalExecutor* localExecutor
 ) {
     CB_ENSURE(
         approx[0].size() == targetData->GetObjectCount(),
@@ -107,8 +115,6 @@ double CalcMetric(
     const auto queryInfo = targetData->GetGroupInfo().GetOrElse(TConstArrayRef<TQueryInfo>());
     const auto& additiveStats = EvalErrors(
         approx,
-        /*approxDelta*/{},
-        /*isExpApprox*/false,
         target,
         weights,
         queryInfo,
@@ -152,7 +158,7 @@ static TVector<const IMetric*> FilterTestMetrics(
     return filtered;
 }
 
-static TVector<int> FilterTestPools(const TTrainingForCPUDataProviders& trainingDataProviders, bool calcAllMetrics) {
+static TVector<int> FilterTestPools(const TTrainingDataProviders& trainingDataProviders, bool calcAllMetrics) {
     TVector<int> filtered;
     for (int i : xrange(trainingDataProviders.Test.size())) {
         const auto &testPool = trainingDataProviders.Test[i];
@@ -167,7 +173,7 @@ static TVector<int> FilterTestPools(const TTrainingForCPUDataProviders& training
 }
 
 void CalcErrors(
-    const TTrainingForCPUDataProviders& trainingDataProviders,
+    const TTrainingDataProviders& trainingDataProviders,
     const TVector<THolder<IMetric>>& errors,
     bool calcAllMetrics,
     bool calcErrorTrackerMetric,

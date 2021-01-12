@@ -19,7 +19,7 @@
 #include <catboost/libs/model/target_classifier.h>
 #include <catboost/private/libs/options/catboost_options.h>
 
-#include <library/json/json_reader.h>
+#include <library/cpp/json/json_reader.h>
 
 #include <util/generic/noncopyable.h>
 #include <util/generic/hash_set.h>
@@ -27,7 +27,11 @@
 
 
 namespace NPar {
-    class TLocalExecutor;
+    class ILocalExecutor;
+}
+
+namespace NCatboostOptions {
+    struct TBinarizationOptions;
 }
 
 
@@ -39,17 +43,17 @@ struct TFoldsCreationParams {
     bool HasPairwiseWeights;
     float FoldLenMultiplier;
     bool IsAverageFoldPermuted;
-    TMaybe<double> StartingApprox;
+    TMaybe<TVector<double>> StartingApprox;
     ELossFunction LossFunction;
 
 public:
     TFoldsCreationParams(
         const NCatboostOptions::TCatBoostOptions& params,
         const NCB::TQuantizedObjectsDataProvider& learnObjectsData,
-        TMaybe<double> startingApprox,
+        const TMaybe<TVector<double>>& startingApprox,
         bool isForWorkerLocalData);
 
-    ui32 CalcCheckSum(const NCB::TObjectsGrouping& objectsGrouping, NPar::TLocalExecutor* localExecutor) const;
+    ui32 CalcCheckSum(const NCB::TObjectsGrouping& objectsGrouping, NPar::ILocalExecutor* localExecutor) const;
 };
 
 
@@ -59,7 +63,7 @@ struct TLearnProgress {
     TVector<TVector<double>> AvrgApprox;          //       [dim][docIdx]
     TVector<TVector<TVector<double>>> TestApprox; // [test][dim][docIdx]
     TVector<TVector<double>> BestTestApprox;      //       [dim][docIdx]
-    TMaybe<double> StartingApprox;
+    TMaybe<TVector<double>> StartingApprox;
 
     /* folds and approx data can become invalid if ShrinkModel is called
      * then this data has to be recalculated if training continuation is called
@@ -74,6 +78,8 @@ struct TLearnProgress {
 
     TVector<TCatFeature> CatFeatures;
     TVector<TFloatFeature> FloatFeatures;
+    TVector<TTextFeature> TextFeatures;
+    TVector<TEmbeddingFeature> EmbeddingFeatures;
 
     int ApproxDimension = 1;
     TLabelConverter LabelConverter;
@@ -103,12 +109,17 @@ struct TLearnProgress {
     ui32 SeparateInitModelCheckSum = 0;
 
     TRestorableFastRng64 Rand;
+
+    TVector<bool> UsedFeatures;
+    TMap<ui32, TVector<bool>> UsedFeaturesPerObject;
+
+    NCB::TCombinedEstimatedFeaturesContext EstimatedFeaturesContext;
 public:
     TLearnProgress();
     TLearnProgress(
         bool isForWorkerLocalData,
         bool isSingleHost,
-        const NCB::TTrainingForCPUDataProviders& data,
+        const NCB::TTrainingDataProviders& data,
         int approxDimension,
         const TLabelConverter& labelConverter, // unused if isForWorkerLocalData
         ui64 randomSeed,
@@ -118,9 +129,14 @@ public:
         const TVector<TTargetClassifier>& targetClassifiers,
         ui32 featuresCheckSum,
         ui32 foldCreationParamsCheckSum,
+        const NCatboostOptions::TBinarizationOptions& estimatedFeaturesQuantizationOptions,
+
+        // can be non-empty only if there is single fold
+        TMaybe<NCB::TPrecomputedOnlineCtrData> precomputedSingleOnlineCtrDataForSingleFold,
+        const NCatboostOptions::TObliviousTreeLearnerOptions& trainOptions,
         TMaybe<TFullModel*> initModel,
         NCB::TDataProviders initModelApplyCompatiblePools,
-        NPar::TLocalExecutor* localExecutor);
+        NPar::ILocalExecutor* localExecutor);
 
     // call after fold initizalization
     void SetSeparateInitModel(
@@ -128,7 +144,7 @@ public:
         const NCB::TDataProviders& initModelApplyCompatiblePools,
         bool isOrderedBoosting,
         bool storeExpApproxes,
-        NPar::TLocalExecutor* localExecutor);
+        NPar::ILocalExecutor* localExecutor);
 
     void PrepareForContinuation();
 
@@ -138,6 +154,8 @@ public:
     ui32 GetCurrentTrainingIterationCount() const;
     ui32 GetCompleteModelTreesSize() const; // includes init model size if it's a continuation training
     ui32 GetInitModelTreesSize() const;
+
+    NCB::TQuantizedEstimatedFeaturesInfo GetOnlineEstimatedFeaturesInfo() const;
 };
 
 class TCommonContext : public TNonCopyable {
@@ -147,7 +165,7 @@ public:
         const TMaybe<TCustomObjectiveDescriptor>& objectiveDescriptor,
         const TMaybe<TCustomMetricDescriptor>& evalMetricDescriptor,
         NCB::TFeaturesLayoutPtr layout,
-        NPar::TLocalExecutor* localExecutor
+        NPar::ILocalExecutor* localExecutor
     )
         : Params(params)
         , ObjectiveDescriptor(objectiveDescriptor)
@@ -163,7 +181,7 @@ public:
     NCB::TFeaturesLayoutPtr Layout;
     TCtrHelper CtrsHelper;
     // TODO(asaitgalin): local executor should be shared by all contexts. MLTOOLS-2451.
-    NPar::TLocalExecutor* LocalExecutor;
+    NPar::ILocalExecutor* LocalExecutor;
 };
 
 
@@ -179,17 +197,18 @@ public:
         const TMaybe<TCustomObjectiveDescriptor>& objectiveDescriptor,
         const TMaybe<TCustomMetricDescriptor>& evalMetricDescriptor,
         const NCatboostOptions::TOutputFilesOptions& outputOptions,
-        const NCB::TTrainingForCPUDataProviders& data,
+        const NCB::TTrainingDataProviders& data,
+
+        // can be non-empty only if there is single fold
+        TMaybe<NCB::TPrecomputedOnlineCtrData> precomputedSingleOnlineCtrDataForSingleFold,
         const TLabelConverter& labelConverter,
-        TMaybe<double> startingApprox,
+        const TMaybe<TVector<double>>& startingApprox,
         TMaybe<const TRestorableFastRng64*> initRand,
         TMaybe<TFullModel*> initModel,
         THolder<TLearnProgress> initLearnProgress, // will be modified if not non-nullptr
         NCB::TDataProviders initModelApplyCompatiblePools,
-        NPar::TLocalExecutor* localExecutor,
+        NPar::ILocalExecutor* localExecutor,
         const TString& fileNamesPrefix = "");
-
-    ~TLearnContext();
 
     void SaveProgress(std::function<void(IOutputStream*)> onSaveSnapshot = [] (IOutputStream* /*snapshot*/) {});
     bool TryLoadProgress(std::function<bool(IInputStream*)> onLoadSnapshot = [] (IInputStream* /*snapshot*/) { return true; });
@@ -205,8 +224,6 @@ public:
     TCalcScoreFold SampledDocs;
     TBucketStatsCache PrevTreeLevelStats;
     TProfileInfo Profile;
-
-    bool LearnAndTestDataPackingAreCompatible;
 
 private:
     bool UseTreeLevelCachingFlag;

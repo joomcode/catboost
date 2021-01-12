@@ -1,3 +1,204 @@
+# Release 0.24.4
+
+## Speedup
+* Major speedup asymmetric trees training time on CPU (2x speedup on Epsilon with 16 threads). We would like to recognize Intel software engineering team’s contributions to Catboost project.
+
+## New features
+* Now we publish Python 3.9 wheels. Related issues: #1491, #1509, #1510
+* Allow `boost_from_average` for `MultiRMSE` loss.
+* Add tag pairwise=False for sklearn compatibility. Fixes issue #1518
+
+## Bugfixes:
+* Allow fstr calculation for datasets with embeddings
+* Fix `feature_importances_` for fstr with texts
+* Virtual ensebles fix: use proper unshrinkage coefficients
+* Fixed constants in RMSEWithUnceratainty loss function calculation to correspond values from original paper
+* Allow shap values calculation for model with zero-weights and non-zero leaf values. Now we use sum of leaf weights on train and current dataset to guarantee non-zero weights for leafs, reachable on current dataset. Fixes issues #1512, #1284
+
+# Release 0.24.3
+
+
+## New functionality
+* Support fstr text features and embeddings. Issue #1293
+   
+## Bugfixes:
+* Fix model apply speed regression from 0.24.1 & 0.24.2
+* Different fixes in embeddings support: fixed apply and model serialization, fixed apply on texts and embeddings
+* Fixed virtual ensembles prediction - use proper scaling, fix apply (issue #1462)
+* Fix `score()` method for `RMSEWithUncertainty` issue #1482
+* Automatically use correct `prediction_type` in `score()`
+
+# Release 0.24.2
+
+## Uncertainty prediction
+* Supported uncertainty prediction for classification models.
+* Fixed RMSEWithUncertainty data uncertainty prediction - now it predicts variance, not standard deviation.
+
+## New functionality
+* Allow categorical feature counters for `MultiRMSE` loss function.
+* `group_weight` parameter added to `catboost.utils.eval_metric` method to allow passing weights for object groups. Allows correctly match weighted ranking metrics computation when group weights present.
+* Faster non-owning deserialization from memory with less memory overhead - moved some dynamically computed data to model file, other data is computed in lazy manner only when needed. 
+
+## Experimental functionality
+* Supported embedding features as input and linear discriminant analysis for embeddings preprocessing. Try adding your embeddings as new columns with embedding values array in Pandas.Dataframe and passing corresponding column names to `Pool` constructor or `fit` function with `embedding_features=['EmbeddingFeaturesColumnName1, ...]` parameter. Another way of adding your embedding vectors is new type of column in Column Description file `NumVector` and adding semicolon separated embeddings column to your XSV file: ```ClassLabel\t0.1;0.2;0.3\t...```.
+
+## Educational materials
+* Published new [tutorial](https://github.com/catboost/catboost/blob/master/catboost/tutorials/uncertainty/uncertainty_regression.ipynb) on uncertainty prediction. 
+
+   
+## Bugfixes:
+* Reduced GPU memory usage in multi gpu training when there is no need to compute categorical feature counters.
+* Now CatBoost allows to specify `use_weights` for metrics when `auto_class_weights` parameter is set.
+* Correctly handle NaN values in `plot_predictions` function.
+* Fixed floating point precision drop releated bugs during Multiclass training with lots of objects in our case, bug was triggered while training on 25mln objects on single GPU card.
+* Now `average` parameter is passed to TotalF1 metric while training on GPU.
+* Added class labels checks
+* Disallow feature remapping in model predict when there is empty feature names in model.
+
+# Release 0.24.1
+
+## Uncertainty prediction
+Main feature of this release is total uncertainty prediction support via virtual ensembles.
+You can read the theoretical background in the preprint [Uncertainty in Gradient Boosting via Ensembles](https://arxiv.org/pdf/2006.10562v2.pdf) from our research team.
+We introduced new training parameter `posterior_sampling`, that allows to estimate total uncertainty.
+Setting `posterior_sampling=True` implies enabling Langevin boosting, setting `model_shrink_rate` to `1/(2*N)` and setting `diffusion_temperature` to `N`, where `N` is dataset size.
+CatBoost object method `virtual_ensembles_predict` splits model into `virtual_ensembles_count` submodels.
+Calling `model.virtual_ensembles_predict(.., prediction_type='TotalUncertainty')` returns mean prediction, variance (and knowledge uncertrainty for models, trained with `RMSEWithUncertainty` loss function).
+Calling `model.virtual_ensembles_predict(.., prediction_type='VirtEnsembles')` returns `virtual_ensembles_count` predictions of virtual submodels for each object.
+
+## New functionality
+* Supported non-owning model deserialization for models with categorical feature counters
+## Speedups
+* We've done lot's of speedups for sparse data loading. For example, on bosch sparse dataset preprocessing speed got 4.5x speedup while running in 28 thread setting.   
+## Bugfixes:
+* Fixed target check for PairLogitPairwise on GPU. Issue #1217
+* Supported `n_features_in_` attribute required for using CatBoost in sklearn pipelines. Issue #1363 
+
+
+# Release 0.24
+
+## New functionality
+* We've finally implemented MVS sampling for GPU training. Switched default bootstrap algorithm to MVS for RMSE loss function while training on GPU
+* Implemented near-zero cost model deserialization from memory blob. Currently, if your model doesn't use categorical features CTR counters and text features you can deserialize model from, for example, memory-mapped file.
+* Added ability to load trained models from binary string or file-like stream. To load model from bytes string use `load_model(blob=b'....')`, to deserialize form file-like stream use `load_model(stream=gzip.open('model.cbm.gz', 'rb'))`
+* Fixed auto-learning rate estimation params for GPU
+* Supported beta parameter for QuerySoftMax function on CPU and GPU
+
+## New losses and metrics
+* New loss function ```RMSEWithUncertainty``` - it allows to estimate data uncertainty for trained regression models. The trained model will give you a two-element vector for each object with the first element as regression model prediction and the second element as an estimation of data uncertainty for that prediction.
+
+## Speedups
+* Major speedups for CPU training: kdd98 -9%, higgs -18%, msrank -28%. We would like to recognize Intel software engineering team’s contributions to Catboost project. This was mutually beneficial activity, and we look forward to continuing joint cooperation. 
+
+## Bugfixes:
+* Fixed CatBoost model export as Python code
+* Fixed AUC metric creation
+* Add text features to `model.feature_names_`. Issue#1314
+* Allow models, trained on datasets with NaN values (Min treatment) and without NaNs in `model_sum()` or as the base model in `init_model=`. Issue #1271 
+
+## Educational materials
+* Published new [tutorial](https://github.com/catboost/catboost/blob/master/catboost/tutorials/categorical_features/categorical_features_parameters.ipynb) on categorical features parameters. Thanks @garkavem 
+
+# Release 0.23.2
+
+## New functionality
+* Added `plot_partial_dependence` method in python-package (Now it works for models with symmetric trees trained on dataset with numerical features only). Implemented by @felixandrer.
+* Allowed using `boost_from_average` option together with `model_shrink_rate` option. In this case shrinkage is applied to the starting value..
+* Added new `auto_class_weights` option in python-package, R-package and cli with possible values `Balanced` and `SqrtBalanced`. For `Balanced` every class is weighted `maxSumWeightInClass / sumWeightInClass`, where sumWeightInClass is sum of weights of all samples in this class. If no weights are present then sample weight is 1. And maxSumWeightInClass - is maximum sum weight among all classes. For `SqrtBalanced` the formula is `sqrt(maxSumWeightInClass / sumWeightInClass)`. This option supported in binclass and multiclass tasks. Implemented by @egiby.
+* Supported `model_size_reg` option on GPU. Set to 0.5 by default (same as in CPU). This regularization works slightly differently on GPU: feature combinations are regularized more aggressively than on CPU. For CPU cost of a combination is equal to number of different feature values in this combinations that are present in training dataset. On GPU cost of a combination is equal to number of all possible different values of this combination. For example, if combination contains two categorical features c1 and c2, then the cost will be #categories in c1 * #categories in c2, even though many of the values from this combination might not be present in the dataset.
+* Added calculation of Shapley values, (see formula (2) from https://arxiv.org/pdf/1802.03888.pdf). By default estimation from this paper (Algorithm 2) is calcucated, that is much more faster. To use this mode specify shap_calc_type parameter of CatBoost.get_feature_importance function as "Exact". Implemented by @LordProtoss.
+
+## Bugfixes:
+* Fixed onnx converter for old onnx versions.
+
+
+# Release 0.23.1
+
+## New functionality
+* CatBoost model could be simply converted into ONNX object in Python with `catboost.utils.convert_to_onnx_object` method. Implemented by @monkey0head
+* We now print metric options with metric names as metric description in error logs by default. This allows you to distinguish between metrics of the same type with different parameters. For example, if user sets weigheted average `TotalF1` metric CatBoost will print `TotalF1:average=Weighted` as corresponding metric column header in error logs. Implemented by @ivanychev
+* Implemented PRAUC metric (issue  #737). Thanks @azikmsu
+* It's now possible to write custom multiregression objective in Python. Thanks @azikmsu
+* Supported nonsymmetric models export to PMML
+* `class_weights` parameter accepts dictionary with class name to class weight mapping
+* Added `_get_tags()` method for compatibility with sklearn (issue #1282). Implemented by @crazyleg
+* Lot's of improvements in .Net CatBoost library: implemented IDisposable interface, splitted ML.NET compatible and basic prediction classes in separate libraries, added base UNIX compatibility, supported GPU model evaluation, fixed tests. Thanks @khanova
+* In addition to first_feature_use_penalties presented in the previous release, we added new option per_object_feature_penalties which considers feature usage on each object individually. For more details refer the [tutorial](https://github.com/catboost/catboost/blob/master/catboost/tutorials/feature_penalties/feature_penalties.ipynb).
+
+## Breaking changes
+* From now on we require explicit `loss_function` param in python `cv` method.
+
+## Bugfixes:
+* Fixed deprecation warning on import (issue #1269)
+* Fixed saved models logging_level/verbose parameters conflict (issue #696)
+* Fixed kappa metric - in some cases there were integer overflow, switched accumulation types to double
+* Fixed per float feature quantization settings defaults
+
+## Educational materials
+* Extended shap values [tutorial](https://github.com/catboost/tutorials/blob/master/model_analysis/shap_values_tutorial.ipynb) with summary plot examples. Thanks @azanovivan02
+
+
+# Release 0.23
+
+## New functionality
+
+* It is possible now to train models on huge datasets that do not fit into CPU RAM.
+This can be accomplished by storing only quantized data in memory (it is many times smaller). Use `catboost.utils.quantize` function to create quantized `Pool ` this way. See usage example in the issue #1116.
+ Implemented by @noxwell.
+* Python Pool class now has `save_quantization_borders` method that allows to save resulting borders into a [file](https://catboost.ai/docs/concepts/output-data_custom-borders.html) and use it for quantization of other datasets. Quantization can be a bottleneck of training, especially on GPU. Doing quantization once for several trainings can significantly reduce running time. It is recommended for large dataset to perform quantization first, save quantization borders, use them to quantize validation dataset, and then use quantized training and validation datasets for further training.
+Use saved borders when quantizing other Pools by specifying `input_borders` parameter of the `quantize` method.
+Implemented by @noxwell.
+* Text features are supported on CPU
+* It is now possible to set `border_count` > 255 for GPU training. This might be useful if you have a "golden feature", see [docs](https://catboost.ai/docs/concepts/parameter-tuning.html#golden-features).
+* Feature weights are implemented.
+Specify weights for specific features by index or name like `feature_weights="FeatureName1:1.5,FeatureName2:0.5"`.
+Scores for splits with this features will be multiplied by corresponding weights.
+Implemented by @Taube03.
+* Feature penalties can be used for cost efficient gradient boosting.
+Penalties are specified in a similar fashion to feature weights, using parameter `first_feature_use_penalties`.
+This parameter penalized the first usage of a feature. This should be used in case if the calculation of the feature is costly.
+The penalty value (or the cost of using a feature) is subtracted from scores of the splits of this feature if feature has not been used in the model.
+After the feature has been used once, it is considered free to proceed using this feature, so no substruction is done.
+There is also a common multiplier for all `first_feature_use_penalties`, it can be specified by `penalties_coefficient` parameter.
+Implemented by @Taube03 (issue #1155)
+* `recordCount` attribute is added to PMML models (issue #1026).
+
+## New losses and metrics
+
+* New ranking objective 'StochasticRank', details in [paper](https://arxiv.org/abs/2003.02122).
+* `Tweedie` loss is supported now. It can be a good solution for right-skewed target with many zero values, see [tutorial](https://github.com/catboost/tutorials/blob/master/regression/tweedie.ipynb).
+When using `CatBoostRegressor.predict` function, default `prediction_type` for this loss will be equal to `Exponent`. Implemented by @ilya-pchelintsev (issue #577)
+* Classification metrics now support a new parameter `proba_border`. With this parameter you can set decision boundary for treating prediction as negative or positive. Implemented by @ivanychev.
+* Metric `TotalF1` supports a new parameter `average` with possible value `weighted`, `micro`, `macro`. Implemented by @ilya-pchelintsev.
+* It is possible now to specify a custom multi-label metric in python. Note that it is only possible to calculate this metric and use it as `eval_metric`. It is not possible to used it as an optimization objective.
+To write a multi-label metric, you need to define a python class which inherits from `MultiLabelCustomMetric` class. Implemented by @azikmsu.
+
+## Improvements of grid and randomized search
+
+* `class_weights` parameter is now supported in grid/randomized search. Implemented by @vazgenk.
+* Invalid option configurations are automatically skipped during grid/randomized search. Implemented by @borzunov.
+* `get_best_score` returns train/validation best score after grid/randomized search (in case of refit=False). Implemented by @rednevaler.
+
+## Improvements of model analysis tools
+
+* Computation of SHAP interaction values for CatBoost models. You can pass type=EFstrType.ShapInteractionValues to `CatBoost.get_feature_importance` to get a matrix of SHAP values for every prediction.
+By default, SHAP interaction values are calculated for all features. You may specify features of interest using the `interaction_indices` argument.
+Implemented by @IvanKozlov98.
+* SHAP values can be calculated approximately now which is much faster than default mode. To use this mode specify `shap_calc_type` parameter of  `CatBoost.get_feature_importance` function as  `"Approximate"`. Implemented by @LordProtoss (issue #1146).
+* `PredictionDiff` model analysis method can now be used with models that contain non symmetric trees. Implemented by @felixandrer.
+
+## New educational materials
+
+* A [tutorial](https://github.com/catboost/tutorials/blob/master/regression/tweedie.ipynb) on tweedie regression
+* A [tutorial](https://github.com/catboost/tutorials/blob/master/regression/poisson.ipynb) on poisson regression
+* A detailed [tutorial](https://github.com/catboost/tutorials/blob/master/metrics/AUC_tutorial.ipynb) on different types of AUC metric, which explains how different types of AUC can be used for binary classification, multiclassification and ranking tasks.
+
+## Breaking changes
+
+* When using `CatBoostRegressor.predict` function for models trained with `Poisson` loss, default `prediction_type` will be equal to `Exponent` (issue #1184). Implemented by @garkavem.
+
+This release also contains bug fixes and performance improvements, including a major speedup for sparse data on GPU.
+
 # Release 0.22
 
 ## New features:
@@ -33,7 +234,7 @@ The release also contains a list of bug fixes.
 - Target border and class weights are now taken from model when necessary for feature strength, metrics evaluation, roc_curve, object importances and calc_feature_statistics calculations.
 - Fixed that L2 regularization was not applied for non symmetric trees for binary classification on GPU.
 - [R-package] Fixed the bug that ``catboost.get_feature_importance`` did not work after model is loaded #1064
-- [R-package] Fixed the bug that ``catboost.train`` did not work when called with the single dataset parameter. #1162 
+- [R-package] Fixed the bug that ``catboost.train`` did not work when called with the single dataset parameter. #1162
 - Fixed L2 score calculation on CPU
 
 ##Other:

@@ -1,12 +1,14 @@
+from __future__ import absolute_import
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from six.moves import range
 
 
-OUT_DIR_FALG_PATTERN = re.compile('^(--go\w+=)')
+OUT_DIR_FLAG_PATTERN = re.compile('^(--go\w+=)')
 
 
 def move_tree(src_root, dst_root):
@@ -23,7 +25,7 @@ def main(arcadia_prefix, contrib_prefix, proto_namespace, args):
     out_dir_orig = None
     out_dir_temp = None
     for i in range(len(args)):
-        m = re.match(OUT_DIR_FALG_PATTERN, args[i])
+        m = re.match(OUT_DIR_FLAG_PATTERN, args[i])
         if m:
             out_dir_flag = m.group(1)
             index = max(len(out_dir_flag), args[i].rfind(':')+1)
@@ -37,10 +39,9 @@ def main(arcadia_prefix, contrib_prefix, proto_namespace, args):
     assert out_dir_temp is not None, 'Output directory is not specified'
 
     try:
-        subprocess.check_call(args, stdin=None, stderr=subprocess.STDOUT)
+        subprocess.check_output(args, stdin=None, stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as e:
-        print >>sys.stderr, '{} returned non-zero exit code {}. stop.'.format(' '.join(e.cmd), e.returncode)
-        print >>sys.stderr, e.output
+        sys.stderr.write('{} returned non-zero exit code {}.\n{}\n'.format(' '.join(e.cmd), e.returncode, e.output))
         return e.returncode
 
     # All Arcadia GO projects should have 'a.yandex-team.ru/' namespace prefix.
@@ -51,6 +52,20 @@ def main(arcadia_prefix, contrib_prefix, proto_namespace, args):
     if not os.path.isdir(out_dir_src):
         out_dir_src = out_dir_temp
         out_dir_dst = os.path.join(out_dir_orig, contrib_prefix)
+
+    if not os.path.exists(out_dir_dst):
+        proto_list = []
+        option_re = re.compile('^\s*option\s+go_package\s*=\s*')
+        for arg in [x for x in args if x.endswith('.proto')]:
+            with open(arg, 'r') as f:
+                if not any([re.match(option_re, line) for line in f]):
+                    proto_list.append(arg)
+        if proto_list:
+            sys.stderr.write(
+                '\nError: Option go_package is not specified in the following proto files: {}\n'
+                '\nNOTE! You can find detailed description of how to properly set go_package '
+                'option here https://wiki.yandex-team.ru/devrules/Go/#protobufigrpc'.format(', '.join(proto_list)))
+            return 1
 
     move_tree(out_dir_src, out_dir_dst)
 

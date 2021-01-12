@@ -1,5 +1,5 @@
 #include <catboost/cuda/ut_helpers/test_utils.h>
-#include <library/unittest/registar.h>
+#include <library/cpp/testing/unittest/registar.h>
 
 #include <catboost/cuda/cuda_lib/cuda_buffer_helpers/all_reduce.h>
 #include <catboost/cuda/data/binarizations_manager.h>
@@ -458,7 +458,7 @@ Y_UNIT_TEST_SUITE(TPairwiseHistogramTest) {
         treeConfig.PairwiseNonDiagReg = 1;
 
         if (dataSet.HasFeatures()) {
-            featuresScoreCalcer = new TScoreCalcer(dataSet.GetFeatures(),
+            featuresScoreCalcer = MakeHolder<TScoreCalcer>(dataSet.GetFeatures(),
                                                    treeConfig,
                                                    subsets,
                                                    random,
@@ -466,7 +466,7 @@ Y_UNIT_TEST_SUITE(TPairwiseHistogramTest) {
         }
 
         if (dataSet.HasPermutationDependentFeatures()) {
-            simpleCtrScoreCalcer = new TScoreCalcer(dataSet.GetPermutationFeatures(),
+            simpleCtrScoreCalcer = MakeHolder<TScoreCalcer>(dataSet.GetPermutationFeatures(),
                                                     treeConfig,
                                                     subsets,
                                                     random,
@@ -486,7 +486,7 @@ Y_UNIT_TEST_SUITE(TPairwiseHistogramTest) {
             NCudaLib::GetCudaManager().Barrier();
 
             if (featuresScoreCalcer) {
-                for (auto policy : GetAllGroupingPolicies()) {
+                for (auto policy : GetEnumAllValues<NCatboostCuda::EFeaturesGroupingPolicy>()) {
                     if (featuresScoreCalcer->HasHelperForPolicy(policy)) {
                         const TBinaryFeatureSplitResults& results = featuresScoreCalcer->GetResultsForPolicy(
                             policy);
@@ -501,7 +501,7 @@ Y_UNIT_TEST_SUITE(TPairwiseHistogramTest) {
             }
 
             if (simpleCtrScoreCalcer) {
-                for (auto policy : GetAllGroupingPolicies()) {
+                for (auto policy : GetEnumAllValues<NCatboostCuda::EFeaturesGroupingPolicy>()) {
                     if (simpleCtrScoreCalcer->HasHelperForPolicy(policy)) {
                         const TBinaryFeatureSplitResults& results = simpleCtrScoreCalcer->GetResultsForPolicy(policy);
                         CheckResults(policy,
